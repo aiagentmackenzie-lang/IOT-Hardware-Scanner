@@ -32,6 +32,10 @@ tests/fixtures/*.bin
 tests/fixtures/*.img
 tests/fixtures/*.elf
 
+# Internal documents - NOT for public repo
+SDR.md
+HANDOVER.md
+
 # Secrets - NEVER commit
 *.pem
 *.key
