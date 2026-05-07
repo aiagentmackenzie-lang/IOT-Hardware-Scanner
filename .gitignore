@@ -38,3 +38,4 @@ tests/fixtures/*.elf
 *.keystore
 .env
 .coverage
+.coverage
