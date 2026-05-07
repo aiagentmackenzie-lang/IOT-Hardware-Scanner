@@ -36,8 +36,9 @@ class Orchestrator:
       7. Risk/Report — scoring + multi-format report generation
     """
 
-    def __init__(self, config: ScannerConfig | None = None) -> None:
+    def __init__(self, config: ScannerConfig | None = None, creds_only: bool = False) -> None:
         self.config = config or ScannerConfig()
+        self.creds_only = creds_only
 
     def run(self, firmware_path: Path) -> ScanContext:
         """Execute the full scan pipeline.
@@ -59,21 +60,25 @@ class Orchestrator:
         context = self._phase_filesystem(context)
 
         # ── Phase 3: Entropy + Binary Intelligence ──
-        context = self._phase_entropy(context)
-        context = self._phase_binary_intelligence(context)
+        if not self.creds_only:
+            context = self._phase_entropy(context)
+            context = self._phase_binary_intelligence(context)
 
         # ── Phase 4: Credentials ──
         context = self._phase_credentials(context)
 
         # ── Phase 5: CVE ──
-        context = self._phase_cve(context)
+        if not self.creds_only:
+            context = self._phase_cve(context)
 
         # ── Phase 6: C2 Detection ──
-        context = self._phase_c2(context)
+        if not self.creds_only:
+            context = self._phase_c2(context)
 
         # ── Phase 7: Risk Score + Report ──
-        context = self._phase_risk(context)
-        context = self._phase_report(context)
+        if not self.creds_only:
+            context = self._phase_risk(context)
+            context = self._phase_report(context)
 
         return context
 

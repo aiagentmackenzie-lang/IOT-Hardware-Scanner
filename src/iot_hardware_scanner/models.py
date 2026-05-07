@@ -286,6 +286,19 @@ class BinaryIntelligenceResult:
 
 
 @dataclass
+class YaraMatch:
+    """A single YARA rule match result."""
+
+    rule_name: str
+    namespace: str
+    meta: dict[str, Any] = field(default_factory=dict)
+    strings: list[tuple[int, str, bytes]] = field(
+        default_factory=list,
+    )  # (offset, identifier, data)
+    file_path: Path | None = None
+
+
+@dataclass
 class CredentialFinding:
     """A discovered credential or secret."""
 

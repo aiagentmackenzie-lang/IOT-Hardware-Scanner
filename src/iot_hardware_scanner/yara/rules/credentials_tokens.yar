@@ -5,7 +5,7 @@ rule bearer_token {
         category = "credential"
 
     strings:
-        $bearer = /Bearer\s+[A-Za-z0-9\-._~+/]+=*/ nocase
+        $bearer = "Bearer " ascii nocase
 
     condition:
         $bearer
@@ -18,7 +18,7 @@ rule oauth_token {
         category = "credential"
 
     strings:
-        $token = /token\s*=\s*["'][A-Za-z0-9\-._~+/]{20,}["']/ nocase
+        $token = "token=" ascii nocase
 
     condition:
         $token

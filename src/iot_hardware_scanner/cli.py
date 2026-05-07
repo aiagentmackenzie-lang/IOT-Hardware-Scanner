@@ -69,6 +69,7 @@ def main() -> None:
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 @click.option("--nvd-api-key", envvar="NVD_API_KEY", default=None, help="NVD API key")
 @click.option("--yara-rules", type=click.Path(), default=None, help="Custom YARA rules dir")
+@click.option("--creds", is_flag=True, help="Run credential scan only (skip other phases)")
 @click.option("--offline", is_flag=True, help="Disable network requests")
 @click.option("--max-size", type=int, default=None, help="Max firmware size in MB")
 def scan(
@@ -79,6 +80,7 @@ def scan(
     verbose: bool,
     nvd_api_key: str | None,
     yara_rules: str | None,
+    creds: bool,
     offline: bool,
     max_size: int | None,
 ) -> None:
@@ -96,7 +98,7 @@ def scan(
     config.report_formats = [report_format]
 
     firmware_path = Path(firmware)
-    orchestrator = Orchestrator(config)
+    orchestrator = Orchestrator(config, creds_only=creds)
 
     try:
         context = orchestrator.run(firmware_path)

@@ -32,7 +32,6 @@ rule rc4_implementation {
         category = "weak_crypto"
 
     strings:
-        $rc4_swap = /xchg/ ascii
         $rc4_state = { 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f }
 
     condition:
