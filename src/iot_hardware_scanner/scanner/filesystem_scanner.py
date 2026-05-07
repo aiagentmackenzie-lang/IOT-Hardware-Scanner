@@ -4,6 +4,13 @@ Walks extracted firmware filesystem and categorizes every file by
 security relevance. This is the backbone for all subsequent scanning.
 
 SDR §8.2 — Filesystem Analysis
+
+Categorization:
+- 11 security categories (CRITICAL_CREDENTIAL through LOW_MISC)
+- SUID binary detection
+- World-writable file detection
+- Boot process analysis (inittab, init.d scripts)
+- Service exposure detection
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from iot_hardware_scanner.models import (
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# File categorization patterns
+# File categorization patterns (SDR §8.2 Table)
 # ──────────────────────────────────────────────
 
 CATEGORY_PATTERNS: dict[FileCategory, list[str]] = {
@@ -68,9 +75,8 @@ CATEGORY_PATTERNS: dict[FileCategory, list[str]] = {
         ".crt",
         ".p12",
         ".jks",
-        ".key",
-        ".cer",
         ".pfx",
+        ".cer",
     ],
     FileCategory.HIGH_DATABASE: [
         ".db",
@@ -90,7 +96,6 @@ CATEGORY_PATTERNS: dict[FileCategory, list[str]] = {
     ],
 }
 
-# Extension-based quick categorization
 EXTENSION_CATEGORIES: dict[str, FileCategory] = {
     ".key": FileCategory.CRITICAL_CREDENTIAL,
     ".pem": FileCategory.HIGH_CRYPTO,
@@ -110,6 +115,20 @@ EXTENSION_CATEGORIES: dict[str, FileCategory] = {
     ".php": FileCategory.MEDIUM_WEB,
     ".asp": FileCategory.MEDIUM_WEB,
 }
+
+SERVICE_BINARIES: set[str] = {
+    "sshd",
+    "telnetd",
+    "dropbear",
+    "httpd",
+    "nginx",
+    "lighttpd",
+    "vsftpd",
+    "tftpd",
+    "snmpd",
+}
+
+HASH_SIZE_LIMIT = 10 * 1024 * 1024  # Only hash files < 10MB for speed
 
 
 class FilesystemScanner:
@@ -138,7 +157,9 @@ class FilesystemScanner:
             return FilesystemInventory(rootfs_path=rootfs_path)
 
         findings: list[FilesystemFinding] = []
-        categories: dict[FileCategory, list[FilesystemFinding]] = {cat: [] for cat in FileCategory}
+        categories: dict[FileCategory, list[FilesystemFinding]] = {
+            cat: [] for cat in FileCategory
+        }
         total_dirs = 0
         total_size = 0
 
@@ -147,6 +168,9 @@ class FilesystemScanner:
                 if entry.is_dir():
                     total_dirs += 1
                 continue
+            # Skip symlinks — they could be escape vectors
+            if entry.is_symlink():
+                continue
 
             try:
                 finding = self._categorize_file(entry, rootfs_path)
@@ -154,7 +178,9 @@ class FilesystemScanner:
                 categories[finding.category].append(finding)
                 total_size += finding.file_size
             except (OSError, PermissionError) as exc:
-                logger.debug("Skipping file (access error): %s — %s", entry, exc)
+                logger.debug(
+                    "Skipping file (access error): %s — %s", entry, exc
+                )
                 continue
 
         inventory = FilesystemInventory(
@@ -168,14 +194,25 @@ class FilesystemScanner:
 
         # Build quick-access indices
         inventory.suid_binaries = [f for f in findings if f.is_suid]
-        inventory.world_writable_files = [f for f in findings if f.is_world_writable]
-        inventory.shadow_files = categories.get(FileCategory.CRITICAL_CREDENTIAL, [])
-        inventory.ssl_cert_files = categories.get(FileCategory.HIGH_CRYPTO, [])
-        inventory.init_scripts = categories.get(FileCategory.CRITICAL_SCRIPT, [])
-        inventory.network_services = categories.get(FileCategory.CRITICAL_SERVICE, [])
+        inventory.world_writable_files = [
+            f for f in findings if f.is_world_writable
+        ]
+        inventory.shadow_files = categories.get(
+            FileCategory.CRITICAL_CREDENTIAL, []
+        )
+        inventory.ssl_cert_files = categories.get(
+            FileCategory.HIGH_CRYPTO, []
+        )
+        inventory.init_scripts = categories.get(
+            FileCategory.CRITICAL_SCRIPT, []
+        )
+        inventory.network_services = categories.get(
+            FileCategory.CRITICAL_SERVICE, []
+        )
 
         logger.info(
-            "Filesystem scan complete: %d files, %d dirs, %d SUID, %d world-writable",
+            "Filesystem scan complete: %d files, %d dirs, "
+            "%d SUID, %d world-writable",
             inventory.total_files,
             inventory.total_directories,
             len(inventory.suid_binaries),
@@ -189,21 +226,139 @@ class FilesystemScanner:
         """Return all files matching a security category."""
         return inventory.categories.get(category, [])
 
-    def _categorize_file(self, file_path: Path, rootfs_path: Path) -> FilesystemFinding:
+    def analyze_boot_process(
+        self, inventory: FilesystemInventory
+    ) -> dict[str, list[str]]:
+        """Analyze boot process for security-relevant findings.
+
+        SDR §8.2 — Boot Process Analysis:
+        1. Identify init system (BusyBox? systemd? custom?)
+        2. Parse /etc/inittab for sysinit and respawn entries
+        3. Walk /etc/init.d/ scripts for service startup commands
+        4. Check /etc/rc.local or /etc/rcS.d/
+        5. Flag services: telnetd, sshd, dropbear, httpd, goahead, lighttpd
+
+        Returns:
+            Dict with keys: init_system, inittab_entries,
+            init_scripts, services, findings
+        """
+        result: dict[str, list[str]] = {
+            "init_system": [],
+            "inittab_entries": [],
+            "init_scripts": [],
+            "services": [],
+            "findings": [],
+        }
+        rootfs = inventory.rootfs_path
+
+        # 1. Identify init system
+        init_paths = [
+            rootfs / "sbin" / "init",
+            rootfs / "bin" / "init",
+            rootfs / "sbin" / "busybox",
+        ]
+        for p in init_paths:
+            if p.exists():
+                result["init_system"].append(p.name)
+                if p.name == "busybox":
+                    result["findings"].append(
+                        "BusyBox init detected — common in embedded, "
+                        "check for default credentials"
+                    )
+
+        # 2. Parse /etc/inittab
+        inittab = rootfs / "etc" / "inittab"
+        if inittab.exists():
+            result["inittab_entries"] = self._parse_inittab(inittab)
+            for entry in result["inittab_entries"]:
+                for svc in SERVICE_BINARIES:
+                    if svc in entry:
+                        result["findings"].append(
+                            f"Service '{svc}' configured in inittab: "
+                            f"{entry.strip()}"
+                        )
+
+        # 3. Walk /etc/init.d/ scripts
+        init_d = rootfs / "etc" / "init.d"
+        if init_d.exists() and init_d.is_dir():
+            for script in init_d.iterdir():
+                if script.is_file() and not script.is_symlink():
+                    result["init_scripts"].append(str(script.name))
+                    self._check_script_for_services(
+                        script, result["services"], result["findings"]
+                    )
+
+        # 4. Check rc.local / rcS.d
+        for rc_path in [
+            rootfs / "etc" / "rc.local",
+            rootfs / "etc" / "rcS.d",
+        ]:
+            if rc_path.exists() and rc_path.is_file():
+                self._check_script_for_services(
+                    rc_path, result["services"], result["findings"]
+                )
+
+        # Deduplicate
+        result["services"] = list(set(result["services"]))
+        result["findings"] = list(set(result["findings"]))
+
+        return result
+
+    def _parse_inittab(self, path: Path) -> list[str]:
+        """Parse /etc/inittab for sysinit/respawn entries."""
+        entries: list[str] = []
+        try:
+            for line in path.read_text(errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # inittab format: id:runlevels:action:process
+                if ":respawn:" in line or ":sysinit:" in line:
+                    entries.append(line)
+                    # Also flag telnetd on serial ports
+                    if "telnetd" in line:
+                        entries.append(
+                            f"CRITICAL: telnetd in inittab: {line}"
+                        )
+        except OSError as exc:
+            logger.warning("Could not read inittab: %s", exc)
+        return entries
+
+    def _check_script_for_services(
+        self,
+        script_path: Path,
+        services: list[str],
+        findings: list[str],
+    ) -> None:
+        """Check an init script for service startup commands."""
+        try:
+            content = script_path.read_text(errors="replace").lower()
+        except OSError:
+            return
+
+        for svc in SERVICE_BINARIES:
+            if svc in content:
+                services.append(svc)
+                findings.append(
+                    f"Service '{svc}' referenced in "
+                    f"{script_path.name}"
+                )
+
+    def _categorize_file(
+        self, file_path: Path, rootfs_path: Path
+    ) -> FilesystemFinding:
         """Categorize a single file by security relevance."""
         rel_path = file_path.relative_to(rootfs_path)
         file_stat = file_path.stat()
         mode = file_stat.st_mode
 
-        # Determine file type
         file_type = self._get_file_type(file_path)
 
-        # Compute hash (small files only for speed; large files skip)
+        # Compute hash (small files only for speed)
         file_hash = ""
-        if file_stat.st_size < 10 * 1024 * 1024:  # < 10 MB
+        if file_stat.st_size < HASH_SIZE_LIMIT:
             file_hash = self._hash_file(file_path)
 
-        # Determine category
         category = self._determine_category(rel_path, file_path, file_type)
 
         return FilesystemFinding(
@@ -220,7 +375,9 @@ class FilesystemScanner:
             hash_sha256=file_hash,
         )
 
-    def _determine_category(self, rel_path: Path, file_path: Path, file_type: str) -> FileCategory:
+    def _determine_category(
+        self, rel_path: Path, file_path: Path, file_type: str
+    ) -> FileCategory:
         """Determine security category for a file."""
         rel_str = str(rel_path)
         rel_lower = rel_str.lower()
@@ -242,24 +399,13 @@ class FilesystemScanner:
 
         # Check for service binaries by name
         name = file_path.name.lower()
-        service_names = {
-            "sshd",
-            "telnetd",
-            "dropbear",
-            "httpd",
-            "nginx",
-            "lighttpd",
-            "vsftpd",
-            "tftpd",
-            "snmpd",
-        }
-        if name in service_names:
+        if name in SERVICE_BINARIES:
             return FileCategory.CRITICAL_SERVICE
 
         return FileCategory.LOW_MISC
 
     def _get_file_type(self, path: Path) -> str:
-        """Get file type description."""
+        """Get file type description using python-magic or extension."""
         try:
             import magic
 
@@ -270,31 +416,26 @@ class FilesystemScanner:
 
     def _format_permissions(self, mode: int) -> str:
         """Format file mode as rwxr-xr-x string."""
-        parts = []
-        for who in (
-            stat.S_IRUSR,
-            stat.S_IWUSR,
-            stat.S_IXUSR,
-            stat.S_IRGRP,
-            stat.S_IWGRP,
-            stat.S_IXGRP,
-            stat.S_IROTH,
-            stat.S_IWOTH,
-            stat.S_IXOTH,
-        ):
-            parts.append(bool(mode & who))
-        rwx = ""
-        for _i, (r, w, x) in enumerate(
-            [
-                (parts[0], parts[1], parts[2]),
-                (parts[3], parts[4], parts[5]),
-                (parts[6], parts[7], parts[8]),
-            ]
-        ):
-            rwx += ("r" if r else "-") + ("w" if w else "-") + ("x" if x else "-")
-        # SUID
+        bits = [
+            (stat.S_IRUSR, "r"),
+            (stat.S_IWUSR, "w"),
+            (stat.S_IXUSR, "x"),
+            (stat.S_IRGRP, "r"),
+            (stat.S_IWGRP, "w"),
+            (stat.S_IXGRP, "x"),
+            (stat.S_IROTH, "r"),
+            (stat.S_IWOTH, "w"),
+            (stat.S_IXOTH, "x"),
+        ]
+        rwx = "".join(char if mode & bit else "-" for bit, char in bits)
+
+        # SUID override
         if mode & stat.S_ISUID:
             rwx = rwx[:2] + "s" + rwx[3:]
+        # SGID override
+        if mode & stat.S_ISGID:
+            rwx = rwx[:5] + "s" + rwx[6:]
+
         return rwx
 
     def _hash_file(self, path: Path) -> str:
