@@ -275,8 +275,8 @@ class TestScanFileTokens:
         """Detect Bearer token."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".cfg", delete=False) as f:
             f.write(
-                'Authorization: Bearer '
-                'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456\n'
+                "Authorization: Bearer "
+                "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456\n"
             )
             f.flush()
             path = Path(f.name)
@@ -438,17 +438,22 @@ class TestFalsePositiveReduction:
             findings = scanner.scan_file(path, rel)
             # Regex should be skipped (binary), but YARA may still match
             # No regex-based findings expected
-            [f for f in findings if f.matched_pattern not in (
-                "hardcoded_password_variable",
-                "aws_access_key",
-                "ssh_private_key",
-                "github_personal_access_token",
-                "stripe_secret_key",
-                "bearer_token",
-                "oauth_token",
-                "database_connection_string",
-                "unix_md5_hash",
-            )]
+            [
+                f
+                for f in findings
+                if f.matched_pattern
+                not in (
+                    "hardcoded_password_variable",
+                    "aws_access_key",
+                    "ssh_private_key",
+                    "github_personal_access_token",
+                    "stripe_secret_key",
+                    "bearer_token",
+                    "oauth_token",
+                    "database_connection_string",
+                    "unix_md5_hash",
+                )
+            ]
             # All findings should be from YARA (if any), not regex
             for f in findings:
                 # YARA matches don't have line_number
@@ -470,7 +475,8 @@ class TestFalsePositiveReduction:
             if pwd_f:
                 # Low entropy — likely placeholder
                 assert pwd_f[0].is_placeholder is True or pwd_f[0].severity in (
-                    Severity.LOW, Severity.INFO
+                    Severity.LOW,
+                    Severity.INFO,
                 )
         finally:
             path.unlink(missing_ok=True)
@@ -495,9 +501,7 @@ class TestDefaultCredentials:
             pwd_f = [f for f in findings if f.category == "password"]
             if pwd_f:
                 # 'admin' is a known default password
-                assert any(f.is_default for f in pwd_f) or any(
-                    f.is_placeholder for f in pwd_f
-                )
+                assert any(f.is_default for f in pwd_f) or any(f.is_placeholder for f in pwd_f)
         finally:
             path.unlink(missing_ok=True)
 
@@ -514,9 +518,7 @@ class TestDefaultCredentials:
             pwd_f = [f for f in findings if f.category == "password"]
             # "password" is both a placeholder AND a known default
             if pwd_f:
-                assert any(
-                    f.is_default or f.is_placeholder for f in pwd_f
-                )
+                assert any(f.is_default or f.is_placeholder for f in pwd_f)
         finally:
             path.unlink(missing_ok=True)
 
@@ -543,7 +545,10 @@ class TestContextDeprioritization:
             if pwd_f:
                 # Should be deprioritized (reduced severity)
                 assert pwd_f[0].severity in (
-                    Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO
+                    Severity.HIGH,
+                    Severity.MEDIUM,
+                    Severity.LOW,
+                    Severity.INFO,
                 )
         finally:
             path.unlink(missing_ok=True)

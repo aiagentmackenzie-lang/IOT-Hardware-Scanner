@@ -157,9 +157,7 @@ class FilesystemScanner:
             return FilesystemInventory(rootfs_path=rootfs_path)
 
         findings: list[FilesystemFinding] = []
-        categories: dict[FileCategory, list[FilesystemFinding]] = {
-            cat: [] for cat in FileCategory
-        }
+        categories: dict[FileCategory, list[FilesystemFinding]] = {cat: [] for cat in FileCategory}
         total_dirs = 0
         total_size = 0
 
@@ -178,9 +176,7 @@ class FilesystemScanner:
                 categories[finding.category].append(finding)
                 total_size += finding.file_size
             except (OSError, PermissionError) as exc:
-                logger.debug(
-                    "Skipping file (access error): %s — %s", entry, exc
-                )
+                logger.debug("Skipping file (access error): %s — %s", entry, exc)
                 continue
 
         inventory = FilesystemInventory(
@@ -194,25 +190,14 @@ class FilesystemScanner:
 
         # Build quick-access indices
         inventory.suid_binaries = [f for f in findings if f.is_suid]
-        inventory.world_writable_files = [
-            f for f in findings if f.is_world_writable
-        ]
-        inventory.shadow_files = categories.get(
-            FileCategory.CRITICAL_CREDENTIAL, []
-        )
-        inventory.ssl_cert_files = categories.get(
-            FileCategory.HIGH_CRYPTO, []
-        )
-        inventory.init_scripts = categories.get(
-            FileCategory.CRITICAL_SCRIPT, []
-        )
-        inventory.network_services = categories.get(
-            FileCategory.CRITICAL_SERVICE, []
-        )
+        inventory.world_writable_files = [f for f in findings if f.is_world_writable]
+        inventory.shadow_files = categories.get(FileCategory.CRITICAL_CREDENTIAL, [])
+        inventory.ssl_cert_files = categories.get(FileCategory.HIGH_CRYPTO, [])
+        inventory.init_scripts = categories.get(FileCategory.CRITICAL_SCRIPT, [])
+        inventory.network_services = categories.get(FileCategory.CRITICAL_SERVICE, [])
 
         logger.info(
-            "Filesystem scan complete: %d files, %d dirs, "
-            "%d SUID, %d world-writable",
+            "Filesystem scan complete: %d files, %d dirs, %d SUID, %d world-writable",
             inventory.total_files,
             inventory.total_directories,
             len(inventory.suid_binaries),
@@ -226,9 +211,7 @@ class FilesystemScanner:
         """Return all files matching a security category."""
         return inventory.categories.get(category, [])
 
-    def analyze_boot_process(
-        self, inventory: FilesystemInventory
-    ) -> dict[str, list[str]]:
+    def analyze_boot_process(self, inventory: FilesystemInventory) -> dict[str, list[str]]:
         """Analyze boot process for security-relevant findings.
 
         SDR §8.2 — Boot Process Analysis:
@@ -262,8 +245,7 @@ class FilesystemScanner:
                 result["init_system"].append(p.name)
                 if p.name == "busybox":
                     result["findings"].append(
-                        "BusyBox init detected — common in embedded, "
-                        "check for default credentials"
+                        "BusyBox init detected — common in embedded, check for default credentials"
                     )
 
         # 2. Parse /etc/inittab
@@ -274,8 +256,7 @@ class FilesystemScanner:
                 for svc in SERVICE_BINARIES:
                     if svc in entry:
                         result["findings"].append(
-                            f"Service '{svc}' configured in inittab: "
-                            f"{entry.strip()}"
+                            f"Service '{svc}' configured in inittab: {entry.strip()}"
                         )
 
         # 3. Walk /etc/init.d/ scripts
@@ -284,9 +265,7 @@ class FilesystemScanner:
             for script in init_d.iterdir():
                 if script.is_file() and not script.is_symlink():
                     result["init_scripts"].append(str(script.name))
-                    self._check_script_for_services(
-                        script, result["services"], result["findings"]
-                    )
+                    self._check_script_for_services(script, result["services"], result["findings"])
 
         # 4. Check rc.local / rcS.d
         for rc_path in [
@@ -294,9 +273,7 @@ class FilesystemScanner:
             rootfs / "etc" / "rcS.d",
         ]:
             if rc_path.exists() and rc_path.is_file():
-                self._check_script_for_services(
-                    rc_path, result["services"], result["findings"]
-                )
+                self._check_script_for_services(rc_path, result["services"], result["findings"])
 
         # Deduplicate
         result["services"] = list(set(result["services"]))
@@ -317,9 +294,7 @@ class FilesystemScanner:
                     entries.append(line)
                     # Also flag telnetd on serial ports
                     if "telnetd" in line:
-                        entries.append(
-                            f"CRITICAL: telnetd in inittab: {line}"
-                        )
+                        entries.append(f"CRITICAL: telnetd in inittab: {line}")
         except OSError as exc:
             logger.warning("Could not read inittab: %s", exc)
         return entries
@@ -339,14 +314,9 @@ class FilesystemScanner:
         for svc in SERVICE_BINARIES:
             if svc in content:
                 services.append(svc)
-                findings.append(
-                    f"Service '{svc}' referenced in "
-                    f"{script_path.name}"
-                )
+                findings.append(f"Service '{svc}' referenced in {script_path.name}")
 
-    def _categorize_file(
-        self, file_path: Path, rootfs_path: Path
-    ) -> FilesystemFinding:
+    def _categorize_file(self, file_path: Path, rootfs_path: Path) -> FilesystemFinding:
         """Categorize a single file by security relevance."""
         rel_path = file_path.relative_to(rootfs_path)
         file_stat = file_path.stat()
@@ -375,9 +345,7 @@ class FilesystemScanner:
             hash_sha256=file_hash,
         )
 
-    def _determine_category(
-        self, rel_path: Path, file_path: Path, file_type: str
-    ) -> FileCategory:
+    def _determine_category(self, rel_path: Path, file_path: Path, file_type: str) -> FileCategory:
         """Determine security category for a file."""
         rel_str = str(rel_path)
         rel_lower = rel_str.lower()

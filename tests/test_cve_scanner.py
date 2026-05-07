@@ -167,10 +167,9 @@ class TestCVEScannerWithMock:
         ]
 
         scanner = CVEScanner(config)
-        with patch.object(
-            scanner._nvd, "query_cpe", return_value=[]
-        ), patch.object(
-            scanner._nvd, "query_keyword", return_value=mock_keyword_results
+        with (
+            patch.object(scanner._nvd, "query_cpe", return_value=[]),
+            patch.object(scanner._nvd, "query_keyword", return_value=mock_keyword_results),
         ):
             component = _make_component()
             findings = scanner.scan_component(component)
@@ -226,9 +225,7 @@ class TestCVEScannerWithMock:
             source_file=Path("/usr/bin/unknown"),
             source_method="string_extraction",
         )
-        with patch.object(
-            scanner._nvd, "query_keyword", return_value=mock_keyword_results
-        ):
+        with patch.object(scanner._nvd, "query_keyword", return_value=mock_keyword_results):
             findings = scanner.scan_component(component)
             assert len(findings) == 1
             assert findings[0].severity == Severity.MEDIUM

@@ -38,12 +38,30 @@ _MACHO_MAGIC = b"\xfe\xed\xfe\xce"
 _MACHO_MAGIC_64 = b"\xfe\xed\xfe\xcf"
 
 # ── Placeholder values (case-insensitive) ──
-_PLACEHOLDERS = frozenset({
-    "changeme", "your_api_key", "replace_me", "xxx", "placeholder",
-    "insert_here", "todo", "test", "example", "sample", "default",
-    "password", "secret", "your_secret", "api_key_here",
-    "put_your_key_here", "<insert>", "<replace>", "redacted", "xxxxxx",
-})
+_PLACEHOLDERS = frozenset(
+    {
+        "changeme",
+        "your_api_key",
+        "replace_me",
+        "xxx",
+        "placeholder",
+        "insert_here",
+        "todo",
+        "test",
+        "example",
+        "sample",
+        "default",
+        "password",
+        "secret",
+        "your_secret",
+        "api_key_here",
+        "put_your_key_here",
+        "<insert>",
+        "<replace>",
+        "redacted",
+        "xxxxxx",
+    }
+)
 
 # ── Documentation file extensions to skip in docs/ dirs ──
 _DOC_EXTENSIONS = frozenset({".md", ".rst", ".txt"})
@@ -244,9 +262,7 @@ class CredentialScanner:
                     if not match:
                         continue
 
-                    raw = (
-                        match.group(1) if has_group and match.lastindex else match.group(0)
-                    )
+                    raw = match.group(1) if has_group and match.lastindex else match.group(0)
 
                     # Layer 3+4: Placeholder check + default credential check
                     is_placeholder = has_group and self._is_placeholder(raw)
@@ -257,8 +273,7 @@ class CredentialScanner:
                     # Low entropy (below threshold) is likely placeholder
                     low_entropy = (
                         has_group
-                        and self._compute_entropy(raw)
-                        < self.config.credential_entropy_threshold
+                        and self._compute_entropy(raw) < self.config.credential_entropy_threshold
                     )
                     if low_entropy and not is_placeholder:
                         is_placeholder = True
@@ -281,8 +296,10 @@ class CredentialScanner:
 
                     # Layer 4b: Context window deprioritization
                     effective_severity = severity
-                    if has_group and line_num > 1 and self._context_deprioritize(
-                        lines, line_num - 1
+                    if (
+                        has_group
+                        and line_num > 1
+                        and self._context_deprioritize(lines, line_num - 1)
                     ):
                         effective_severity = self._reduce_severity(severity)
 
@@ -353,16 +370,12 @@ class CredentialScanner:
     # YARA match conversion
     # ──────────────────────────────────────────
 
-    def _yara_match_to_finding(
-        self, ym: YaraMatch, rel_path: Path
-    ) -> CredentialFinding | None:
+    def _yara_match_to_finding(self, ym: YaraMatch, rel_path: Path) -> CredentialFinding | None:
         """Convert a YaraMatch to a CredentialFinding."""
         meta = ym.meta
         category = meta.get("category", "password")
         severity_str = meta.get("severity", "HIGH").upper()
-        severity = (
-            Severity(severity_str) if severity_str in Severity.__members__ else Severity.HIGH
-        )
+        severity = Severity(severity_str) if severity_str in Severity.__members__ else Severity.HIGH
         description = meta.get("description", ym.rule_name)
 
         # Extract matched data from strings
@@ -401,11 +414,7 @@ class CredentialScanner:
     ) -> CredentialFinding | None:
         """Convert a PasswdEntry to a CredentialFinding if security-relevant."""
         # Only flag entries that are security-relevant
-        if (
-            not entry.is_root_equivalent
-            and not entry.has_login_shell
-            and entry.has_password_field
-        ):
+        if not entry.is_root_equivalent and not entry.has_login_shell and entry.has_password_field:
             return None
 
         if entry.is_root_equivalent:
@@ -454,9 +463,7 @@ class CredentialScanner:
 
         raw_hash = hashlib.sha256(desc.encode()).hexdigest()
 
-        masked_value = (
-            f"${algo_label.lower()}$***" if algo_label != "unknown" else "***"
-        )
+        masked_value = f"${algo_label.lower()}$***" if algo_label != "unknown" else "***"
 
         return CredentialFinding(
             severity=entry.severity,
@@ -593,6 +600,4 @@ class CredentialScanner:
         """Check if a password matches a known default credential."""
         defaults = self._load_default_credentials()
         pw_lower = password.lower()
-        return any(
-            entry.get("password", "").lower() == pw_lower for entry in defaults
-        )
+        return any(entry.get("password", "").lower() == pw_lower for entry in defaults)

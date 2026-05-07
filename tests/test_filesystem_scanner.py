@@ -45,8 +45,7 @@ def temp_rootfs() -> Path:
         (etc / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\n")
         (etc / "shadow").write_text("root:$1$hash:19000:0:99999:7:::\n")
         (etc / "inittab").write_text(
-            "::sysinit:/etc/init.d/rcS\n"
-            "::respawn:/sbin/getty 115200 ttyS0\n"
+            "::sysinit:/etc/init.d/rcS\n::respawn:/sbin/getty 115200 ttyS0\n"
         )
 
         # /etc/init.d/rcS (CRITICAL_SCRIPT)
@@ -118,65 +117,49 @@ class TestFileCategorization:
         assert any("passwd" in p for p in paths)
         assert any("shadow" in p for p in paths)
 
-    def test_config_is_critical_config(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_config_is_critical_config(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         configs = inv.categories.get(FileCategory.CRITICAL_CONFIG, [])
         paths = [str(f.path) for f in configs]
         assert any("config.conf" in p for p in paths)
 
-    def test_service_binary_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_service_binary_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         services = inv.categories.get(FileCategory.CRITICAL_SERVICE, [])
         names = [f.path.name for f in services]
         assert "sshd" in names or "telnetd" in names
 
-    def test_init_script_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_init_script_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         scripts = inv.categories.get(FileCategory.CRITICAL_SCRIPT, [])
         paths = [str(f.path) for f in scripts]
         assert any("init.d" in p or "rcS" in p for p in paths)
 
-    def test_crypto_files_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_crypto_files_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         crypto = inv.categories.get(FileCategory.HIGH_CRYPTO, [])
         paths = [str(f.path) for f in crypto]
         assert any("server.pem" in p for p in paths)
 
-    def test_database_files_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_database_files_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         dbs = inv.categories.get(FileCategory.HIGH_DATABASE, [])
         paths = [str(f.path) for f in dbs]
         assert any("users.db" in p for p in paths)
 
-    def test_web_files_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_web_files_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         web = inv.categories.get(FileCategory.MEDIUM_WEB, [])
         paths = [str(f.path) for f in web]
         assert any("test.cgi" in p for p in paths)
 
-    def test_log_files_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_log_files_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         logs = inv.categories.get(FileCategory.MEDIUM_LOG, [])
         paths = [str(f.path) for f in logs]
         assert any("syslog" in p for p in paths)
 
-    def test_api_key_files_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_api_key_files_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         api = inv.categories.get(FileCategory.HIGH_API_KEY, [])
         paths = [str(f.path) for f in api]
@@ -186,43 +169,31 @@ class TestFileCategorization:
 class TestSecurityDetection:
     """SUID, world-writable, and other security flags."""
 
-    def test_suid_binaries_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_suid_binaries_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.suid_binaries) >= 1
         suid_names = [f.path.name for f in inv.suid_binaries]
         assert "busybox" in suid_names
 
-    def test_world_writable_detected(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_world_writable_detected(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.world_writable_files) >= 1
         names = [f.path.name for f in inv.world_writable_files]
         assert "world_writable.conf" in names
 
-    def test_shadow_files_tracked(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_shadow_files_tracked(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.shadow_files) >= 1
 
-    def test_ssl_certs_tracked(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_ssl_certs_tracked(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.ssl_cert_files) >= 1
 
-    def test_init_scripts_tracked(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_init_scripts_tracked(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.init_scripts) >= 1
 
-    def test_network_services_tracked(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_network_services_tracked(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert len(inv.network_services) >= 1
 
@@ -230,9 +201,7 @@ class TestSecurityDetection:
 class TestBootProcessAnalysis:
     """Boot process analysis per SDR §8.2."""
 
-    def test_inittab_parsing(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_inittab_parsing(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         result = scanner.analyze_boot_process(inv)
 
@@ -251,9 +220,7 @@ class TestBootProcessAnalysis:
         assert len(result["services"]) >= 1
         assert "telnetd" in result["services"]
 
-    def test_findings_generated(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_findings_generated(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         result = scanner.analyze_boot_process(inv)
 
@@ -266,9 +233,7 @@ class TestBootProcessAnalysis:
 class TestSymlinkSkipping:
     """Symlinks in rootfs are skipped for security."""
 
-    def test_symlink_skipped(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_symlink_skipped(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         """Symlinks inside rootfs should NOT appear in findings."""
         link = temp_rootfs / "etc" / "passwd_link"
         link.symlink_to(temp_rootfs / "etc" / "passwd")
@@ -288,15 +253,11 @@ class TestEdgeCases:
             assert inv.total_files == 0
             assert inv.total_directories == 0
 
-    def test_invalid_rootfs(
-        self, scanner: FilesystemScanner, tmp_path: Path
-    ) -> None:
+    def test_invalid_rootfs(self, scanner: FilesystemScanner, tmp_path: Path) -> None:
         inv = scanner.scan(tmp_path / "nonexistent")
         assert inv.total_files == 0
 
-    def test_total_files_count(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_total_files_count(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         assert inv.total_files > 0
         # Each file should appear exactly once
@@ -311,25 +272,17 @@ class TestEdgeCases:
         for cat in FileCategory:
             assert cat in inv.categories
 
-    def test_permissions_format(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_permissions_format(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         # SUID busybox should have "rwsr-xr-x"
-        busybox_findings = [
-            f for f in inv.findings if f.path.name == "busybox"
-        ]
+        busybox_findings = [f for f in inv.findings if f.path.name == "busybox"]
         if busybox_findings:
             assert "s" in busybox_findings[0].permissions
 
-    def test_hash_for_small_files(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_hash_for_small_files(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         # Small files should have SHA-256 hashes (64 hex chars)
-        small_files = [
-            f for f in inv.findings if f.file_size < 10 * 1024 * 1024
-        ]
+        small_files = [f for f in inv.findings if f.file_size < 10 * 1024 * 1024]
         for f in small_files:
             # Hash may be empty for files we can't read, but should be
             # valid hex if present
@@ -337,11 +290,7 @@ class TestEdgeCases:
                 assert len(f.hash_sha256) == 64
                 assert all(c in "0123456789abcdef" for c in f.hash_sha256)
 
-    def test_get_files_by_category(
-        self, scanner: FilesystemScanner, temp_rootfs: Path
-    ) -> None:
+    def test_get_files_by_category(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
-        creds = scanner.get_files_by_category(
-            inv, FileCategory.CRITICAL_CREDENTIAL
-        )
+        creds = scanner.get_files_by_category(inv, FileCategory.CRITICAL_CREDENTIAL)
         assert len(creds) >= 1

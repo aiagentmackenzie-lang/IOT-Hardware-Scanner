@@ -104,9 +104,7 @@ class BinaryIntelligence:
                 FileCategory.CRITICAL_BINARY, []
             )
             for finding in binary_findings:
-                meta = self._analyze_binary(
-                    finding.absolute_path, finding.path
-                )
+                meta = self._analyze_binary(finding.absolute_path, finding.path)
                 if meta:
                     binaries.append(meta)
                     for product, version in meta.version_strings.items():
@@ -117,9 +115,7 @@ class BinaryIntelligence:
                                     vendor=vendor,
                                     product=prod,
                                     version=version,
-                                    cpe_string=(
-                                        f"cpe:2.3:a:{vendor}:{prod}:{version}"
-                                    ),
+                                    cpe_string=(f"cpe:2.3:a:{vendor}:{prod}:{version}"),
                                     source_file=finding.path,
                                     source_method="string_extraction",
                                 )
@@ -128,9 +124,7 @@ class BinaryIntelligence:
         # Also scan raw firmware for version strings
         raw_versions = self._extract_version_strings(context.firmware_path)
         for product, version in raw_versions.items():
-            if product in CPE_MAP and not any(
-                c.product == CPE_MAP[product][1] for c in components
-            ):
+            if product in CPE_MAP and not any(c.product == CPE_MAP[product][1] for c in components):
                 vendor, prod = CPE_MAP[product]
                 components.append(
                     SoftwareComponent(
@@ -149,8 +143,7 @@ class BinaryIntelligence:
         unhardened = len(binaries) - hardened
 
         logger.info(
-            "Binary intelligence: %d binaries, %d hardened, %d unhardened, "
-            "%d software components",
+            "Binary intelligence: %d binaries, %d hardened, %d unhardened, %d software components",
             len(binaries),
             hardened,
             unhardened,
@@ -164,9 +157,7 @@ class BinaryIntelligence:
             unhardened_binaries=unhardened,
         )
 
-    def _analyze_binary(
-        self, abs_path: Path, rel_path: Path
-    ) -> BinaryMetadata | None:
+    def _analyze_binary(self, abs_path: Path, rel_path: Path) -> BinaryMetadata | None:
         """Analyze a single binary file for metadata and hardening."""
         try:
             file_type = self._get_file_type(abs_path)
@@ -216,7 +207,7 @@ class BinaryIntelligence:
         except (ImportError, Exception):
             # Fallback: check ELF magic bytes
             try:
-                header = path.open('rb').read(16)
+                header = path.open("rb").read(16)
                 if header[:4] == b"\x7fELF":
                     return "ELF executable"
                 if header[:2] == b"MZ":
@@ -296,9 +287,7 @@ class BinaryIntelligence:
                     full_output = result.stdout
                     full_lower = full_output.lower()
 
-                    hardening.stack_canary = (
-                        "stack_chk_fail" in full_lower
-                    )
+                    hardening.stack_canary = "stack_chk_fail" in full_lower
                     hardening.relro = (
                         "full"
                         if "bind_now" in full_lower
@@ -306,10 +295,7 @@ class BinaryIntelligence:
                         if "relro" in full_lower
                         else "none"
                     )
-                    hardening.fortify_source = (
-                        "__fortified" in full_lower
-                        or "_chk@" in full_lower
-                    )
+                    hardening.fortify_source = "__fortified" in full_lower or "_chk@" in full_lower
 
                 # PIE from ELF header
                 result = subprocess.run(
@@ -341,9 +327,7 @@ class BinaryIntelligence:
                 hardening.nx_enabled = True  # macOS defaults to NX
 
         except (FileNotFoundError, subprocess.TimeoutExpired):
-            logger.debug(
-                "Neither readelf nor otool available for %s", path
-            )
+            logger.debug("Neither readelf nor otool available for %s", path)
 
         return hardening
 

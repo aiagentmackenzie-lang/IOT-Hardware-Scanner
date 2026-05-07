@@ -15,10 +15,16 @@ from iot_hardware_scanner.models import PasswdEntry, Severity, ShadowEntry
 
 logger = logging.getLogger(__name__)
 
-NON_LOGIN_SHELLS = frozenset({
-    "/sbin/nologin", "/bin/false", "/usr/sbin/nologin", "/bin/nologin",
-    "/usr/bin/nologin", "/usr/bin/false",
-})
+NON_LOGIN_SHELLS = frozenset(
+    {
+        "/sbin/nologin",
+        "/bin/false",
+        "/usr/sbin/nologin",
+        "/bin/nologin",
+        "/usr/bin/nologin",
+        "/usr/bin/false",
+    }
+)
 
 
 class UnixCredentialParser:
@@ -159,9 +165,9 @@ class UnixCredentialParser:
                     # Find third $ (end of salt)
                     salt_end = hash_field.find("$", prefix_end + 1)
                     if salt_end > 0:
-                        masked_hash = hash_field[:salt_end + 1] + "***"
+                        masked_hash = hash_field[: salt_end + 1] + "***"
                     else:
-                        masked_hash = hash_field[:prefix_end + 1] + "***"
+                        masked_hash = hash_field[: prefix_end + 1] + "***"
                 else:
                     masked_hash = "$" + algo_prefix + "***"
             else:

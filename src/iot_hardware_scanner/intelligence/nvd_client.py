@@ -165,14 +165,16 @@ class NVDClient:
             # Published date
             published = cve.get("published", "")
 
-            results.append({
-                "cve_id": cve_id,
-                "description": description,
-                "cvss_v3_score": cvss_v3,
-                "cvss_v3_vector": cvss_v3_vector,
-                "published_date": published,
-                "references": references,
-            })
+            results.append(
+                {
+                    "cve_id": cve_id,
+                    "description": description,
+                    "cvss_v3_score": cvss_v3,
+                    "cvss_v3_vector": cvss_v3_vector,
+                    "published_date": published,
+                    "references": references,
+                }
+            )
 
         return results
 
@@ -190,6 +192,7 @@ class NVDClient:
 
         # Build URL
         from urllib.parse import quote
+
         url = f"{NVD_API_BASE}?cpeName={quote(cpe_string, safe=':')}"
         logger.info("NVD CPE query: %s", cpe_string)
 
@@ -214,6 +217,7 @@ class NVDClient:
             return cached
 
         from urllib.parse import quote
+
         url = f"{NVD_API_BASE}?keywordSearch={quote(keyword)}"
         logger.info("NVD keyword query: %s", keyword)
 

@@ -45,9 +45,7 @@ class EntropyAnalyzer:
     def __init__(self, config: ScannerConfig) -> None:
         self.config = config
 
-    def analyze(
-        self, data: bytes, block_size: int | None = None
-    ) -> EntropyProfile:
+    def analyze(self, data: bytes, block_size: int | None = None) -> EntropyProfile:
         """Compute entropy across the firmware image.
 
         Args:
@@ -113,9 +111,7 @@ class EntropyAnalyzer:
         )
         return profile
 
-    def analyze_file(
-        self, path: Path, block_size: int | None = None
-    ) -> EntropyProfile:
+    def analyze_file(self, path: Path, block_size: int | None = None) -> EntropyProfile:
         """Analyze entropy of a file on disk.
 
         Args:
@@ -158,9 +154,7 @@ class EntropyAnalyzer:
         block_size = max(128, int(round(raw / 1024) * 1024))
         return block_size
 
-    def _compute_blocks(
-        self, data: bytes, block_size: int
-    ) -> list[EntropyBlock]:
+    def _compute_blocks(self, data: bytes, block_size: int) -> list[EntropyBlock]:
         """Compute Shannon entropy for each block."""
         blocks: list[EntropyBlock] = []
         offset = 0
@@ -179,9 +173,7 @@ class EntropyAnalyzer:
 
         return blocks
 
-    def _shannon_entropy(
-        self, data: bytes
-    ) -> tuple[float, dict[int, int]]:
+    def _shannon_entropy(self, data: bytes) -> tuple[float, dict[int, int]]:
         """Compute Shannon entropy of a byte sequence.
 
         H = -Σ p(xi) * log2(p(xi))
@@ -205,9 +197,7 @@ class EntropyAnalyzer:
 
         return entropy, distribution
 
-    def _classify_regions(
-        self, blocks: list[EntropyBlock], block_size: int
-    ) -> list[EntropyRegion]:
+    def _classify_regions(self, blocks: list[EntropyBlock], block_size: int) -> list[EntropyRegion]:
         """Classify contiguous blocks into entropy regions.
 
         SDR §9.1 interpretation table:
@@ -228,9 +218,7 @@ class EntropyAnalyzer:
         for i in range(1, len(blocks)):
             block_class = self._entropy_to_classification(blocks[i].entropy)
             if block_class != current_class:
-                region = self._build_region(
-                    blocks, region_start, i, block_size, current_class
-                )
+                region = self._build_region(blocks, region_start, i, block_size, current_class)
                 regions.append(region)
                 region_start = i
                 current_class = block_class
@@ -271,17 +259,11 @@ class EntropyAnalyzer:
     ) -> EntropyRegion:
         """Build an EntropyRegion from a range of blocks."""
         region_blocks = blocks[start_idx:end_idx]
-        avg_entropy = sum(b.entropy for b in region_blocks) / len(
-            region_blocks
-        )
+        avg_entropy = sum(b.entropy for b in region_blocks) / len(region_blocks)
 
         # Confidence based on how clearly the classification applies
         if classification == "encrypted":
-            confidence = (
-                min(1.0, (avg_entropy - 0.93) / 0.07)
-                if avg_entropy > 0.93
-                else 0.5
-            )
+            confidence = min(1.0, (avg_entropy - 0.93) / 0.07) if avg_entropy > 0.93 else 0.5
         elif classification == "compressed":
             confidence = 0.7
         elif classification == "code":

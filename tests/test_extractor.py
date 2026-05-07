@@ -87,9 +87,7 @@ class TestSymlinkAudit:
         assert removed == 0
         assert link.exists()
 
-    def test_escape_symlink_removed(
-        self, extractor: FirmwareExtractor, temp_dir: Path
-    ) -> None:
+    def test_escape_symlink_removed(self, extractor: FirmwareExtractor, temp_dir: Path) -> None:
         """Symlink pointing outside extraction root is removed."""
         extract_dir = temp_dir / "extracted"
         extract_dir.mkdir()
@@ -102,9 +100,7 @@ class TestSymlinkAudit:
         assert removed == 1
         assert not link.exists()
 
-    def test_broken_symlink_removed(
-        self, extractor: FirmwareExtractor, temp_dir: Path
-    ) -> None:
+    def test_broken_symlink_removed(self, extractor: FirmwareExtractor, temp_dir: Path) -> None:
         """Broken symlink (target doesn't exist) is removed."""
         extract_dir = temp_dir / "extracted"
         extract_dir.mkdir()
@@ -133,14 +129,10 @@ class TestFilesystemClassification:
     """Binwalk output classification."""
 
     def test_classify_squashfs(self, extractor: FirmwareExtractor) -> None:
-        assert extractor._classify_filesystem(
-            "SquashFS filesystem, little endian"
-        ) == "SquashFS"
+        assert extractor._classify_filesystem("SquashFS filesystem, little endian") == "SquashFS"
 
     def test_classify_jffs2(self, extractor: FirmwareExtractor) -> None:
-        assert extractor._classify_filesystem(
-            "JFFS2 filesystem"
-        ) == "JFFS2"
+        assert extractor._classify_filesystem("JFFS2 filesystem") == "JFFS2"
 
     def test_classify_ubifs(self, extractor: FirmwareExtractor) -> None:
         assert extractor._classify_filesystem("UBIFS image") == "UBIFS"
@@ -184,9 +176,7 @@ class TestParseBinwalkOutput:
 class TestRootFilesystemDiscovery:
     """Find squashfs-root, jffs2-root etc. in extraction dirs."""
 
-    def test_find_squashfs_root(
-        self, extractor: FirmwareExtractor, temp_dir: Path
-    ) -> None:
+    def test_find_squashfs_root(self, extractor: FirmwareExtractor, temp_dir: Path) -> None:
         extract_dir = temp_dir / "_fw.bin.extracted"
         squashfs = extract_dir / "squashfs-root"
         squashfs.mkdir(parents=True)
@@ -207,9 +197,7 @@ class TestRootFilesystemDiscovery:
         roots = extractor.get_root_filesystems(extract_dir)
         assert len(roots) == 2
 
-    def test_no_root_filesystems(
-        self, extractor: FirmwareExtractor, temp_dir: Path
-    ) -> None:
+    def test_no_root_filesystems(self, extractor: FirmwareExtractor, temp_dir: Path) -> None:
         extract_dir = temp_dir / "_fw.bin.extracted"
         extract_dir.mkdir(parents=True)
         (extract_dir / "some_data.bin").write_bytes(b"\x00" * 100)
@@ -217,9 +205,7 @@ class TestRootFilesystemDiscovery:
         roots = extractor.get_root_filesystems(extract_dir)
         assert len(roots) == 0
 
-    def test_nonexistent_directory(
-        self, extractor: FirmwareExtractor
-    ) -> None:
+    def test_nonexistent_directory(self, extractor: FirmwareExtractor) -> None:
         roots = extractor.get_root_filesystems(Path("/nonexistent"))
         assert roots == []
 
@@ -227,9 +213,7 @@ class TestRootFilesystemDiscovery:
 class TestScanWithoutBinwalk:
     """Scan/extract raises BinwalkNotFoundError when binwalk unavailable."""
 
-    def test_scan_raises_without_binwalk(
-        self, extractor: FirmwareExtractor
-    ) -> None:
+    def test_scan_raises_without_binwalk(self, extractor: FirmwareExtractor) -> None:
         if extractor._binwalk_available:
             pytest.skip("binwalk is installed")
         with pytest.raises(BinwalkNotFoundError):
@@ -251,9 +235,7 @@ class TestExtractionWithBinwalk:
         shutil.which("binwalk") is None,
         reason="binwalk not installed",
     )
-    def test_extract_real_firmware(
-        self, config: ScannerConfig, temp_dir: Path
-    ) -> None:
+    def test_extract_real_firmware(self, config: ScannerConfig, temp_dir: Path) -> None:
         """Full extraction pipeline with a small test firmware."""
         extractor = FirmwareExtractor(config)
         # Create a minimal firmware-like file (just random data)

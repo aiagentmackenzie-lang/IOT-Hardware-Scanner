@@ -74,9 +74,11 @@ class YaraEngine:
                 for yar_file in sorted(d.rglob("*.yar")):
                     # Skip the meta-rule file that uses include directives
                     try:
-                        first_line = yar_file.read_text(
-                            encoding="utf-8", errors="ignore"
-                        ).splitlines()[0] if yar_file.exists() else ""
+                        first_line = (
+                            yar_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+                            if yar_file.exists()
+                            else ""
+                        )
                     except OSError:
                         first_line = ""
                     if first_line.strip().startswith("//") and "include" in first_line:
@@ -87,13 +89,8 @@ class YaraEngine:
                         content = yar_file.read_text(encoding="utf-8", errors="ignore")
                     except OSError:
                         continue
-                    if any(
-                        line.strip().startswith("include ")
-                        for line in content.splitlines()
-                    ):
-                        logger.debug(
-                            "Skipping include-based meta-rule: %s", yar_file
-                        )
+                    if any(line.strip().startswith("include ") for line in content.splitlines()):
+                        logger.debug("Skipping include-based meta-rule: %s", yar_file)
                         continue
 
                     # Check for compilation errors before adding
@@ -181,9 +178,7 @@ class YaraEngine:
                 return matches
 
             for m in results:
-                matches.append(
-                    self._to_yara_match(m, module_name or "default", file_path)
-                )
+                matches.append(self._to_yara_match(m, module_name or "default", file_path))
 
         except yara.Error as exc:
             logger.warning("YARA scan error: %s", exc)

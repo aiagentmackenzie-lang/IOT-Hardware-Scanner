@@ -62,9 +62,7 @@ class FirmwareExtractor:
             BinwalkNotFoundError: binwalk not installed.
         """
         if not self._binwalk_available:
-            raise BinwalkNotFoundError(
-                "binwalk not found. Install pybinwalk or binwalk CLI."
-            )
+            raise BinwalkNotFoundError("binwalk not found. Install pybinwalk or binwalk CLI.")
 
         signatures: list[SignatureResult] = []
         try:
@@ -77,9 +75,7 @@ class FirmwareExtractor:
                         offset=r.offset,
                         description=r.description,
                         size=getattr(r, "size", None),
-                        filesystem_type=self._classify_filesystem(
-                            r.description
-                        ),
+                        filesystem_type=self._classify_filesystem(r.description),
                     )
                 )
         except ImportError:
@@ -90,9 +86,7 @@ class FirmwareExtractor:
                 timeout=60,
             )
             if result.returncode != 0:
-                logger.warning(
-                    "binwalk scan returned non-zero: %s", result.stderr
-                )
+                logger.warning("binwalk scan returned non-zero: %s", result.stderr)
             signatures = self._parse_binwalk_output(result.stdout)
 
         logger.info(
@@ -102,9 +96,7 @@ class FirmwareExtractor:
         )
         return signatures
 
-    def extract(
-        self, firmware_path: Path, output_dir: Path
-    ) -> ExtractionResult:
+    def extract(self, firmware_path: Path, output_dir: Path) -> ExtractionResult:
         """Extract embedded filesystems recursively.
 
         Args:
@@ -120,9 +112,7 @@ class FirmwareExtractor:
             DiskSpaceError: insufficient disk space.
         """
         if not self._binwalk_available:
-            raise BinwalkNotFoundError(
-                "binwalk not found. Install pybinwalk or binwalk CLI."
-            )
+            raise BinwalkNotFoundError("binwalk not found. Install pybinwalk or binwalk CLI.")
 
         firmware_path = Path(firmware_path).resolve()
         firmware_size = firmware_path.stat().st_size
@@ -139,17 +129,13 @@ class FirmwareExtractor:
         try:
             import pybinwalk
 
-            results = pybinwalk.extract(
-                str(firmware_path), str(extraction_dir)
-            )
-            for r in (results or []):
+            results = pybinwalk.extract(str(firmware_path), str(extraction_dir))
+            for r in results or []:
                 signatures.append(
                     SignatureResult(
                         offset=r.offset,
                         description=r.description,
-                        filesystem_type=self._classify_filesystem(
-                            r.description
-                        ),
+                        filesystem_type=self._classify_filesystem(r.description),
                     )
                 )
         except ImportError:
@@ -169,32 +155,21 @@ class FirmwareExtractor:
                 )
             except subprocess.TimeoutExpired:
                 raise ExtractionFailedError(
-                    f"binwalk extraction timed out after "
-                    f"{self.config.extraction_timeout_seconds}s"
+                    f"binwalk extraction timed out after {self.config.extraction_timeout_seconds}s"
                 ) from None
 
             if result.returncode != 0 and not extraction_dir.exists():
-                raise ExtractionFailedError(
-                    f"binwalk extraction failed: {result.stderr}"
-                ) from None
+                raise ExtractionFailedError(f"binwalk extraction failed: {result.stderr}") from None
             if result.returncode != 0:
-                errors.append(
-                    f"binwalk returned code {result.returncode}: "
-                    f"{result.stderr[:200]}"
-                )
+                errors.append(f"binwalk returned code {result.returncode}: {result.stderr[:200]}")
             signatures = self._parse_binwalk_output(result.stdout)
         except Exception as exc:
-            raise ExtractionFailedError(
-                f"Extraction failed: {exc}"
-            ) from exc
+            raise ExtractionFailedError(f"Extraction failed: {exc}") from exc
 
         # ── Post-extraction symlink audit (Zip-Slip mitigation) ──
         removed_symlinks = self._audit_symlinks(extraction_dir)
         if removed_symlinks:
-            errors.append(
-                f"Removed {removed_symlinks} symlinks pointing "
-                f"outside extraction root"
-            )
+            errors.append(f"Removed {removed_symlinks} symlinks pointing outside extraction root")
 
         # ── Find extracted root filesystems ──
         root_filesystems = self.get_root_filesystems(extraction_dir)
@@ -209,8 +184,7 @@ class FirmwareExtractor:
                     total_size += f.stat().st_size
 
         logger.info(
-            "Extraction complete: %d files, %d root filesystems, "
-            "%d bytes extracted",
+            "Extraction complete: %d files, %d root filesystems, %d bytes extracted",
             file_count,
             len(root_filesystems),
             total_size,
@@ -252,9 +226,7 @@ class FirmwareExtractor:
 
         return found
 
-    def _check_disk_space(
-        self, firmware_size: int, output_dir: Path
-    ) -> None:
+    def _check_disk_space(self, firmware_size: int, output_dir: Path) -> None:
         """Verify sufficient disk space for extraction.
 
         SDR §8.1: Requires at least 3x firmware file size free.
@@ -300,8 +272,7 @@ class FirmwareExtractor:
                         target.relative_to(root)
                     except ValueError:
                         logger.warning(
-                            "Removing unsafe symlink: %s -> %s "
-                            "(escapes extraction root)",
+                            "Removing unsafe symlink: %s -> %s (escapes extraction root)",
                             item,
                             target,
                         )
@@ -344,11 +315,7 @@ class FirmwareExtractor:
             parts = line.split(None, 2)
             if len(parts) >= 2:
                 try:
-                    offset = (
-                        int(parts[0], 0)
-                        if parts[0].startswith("0x")
-                        else int(parts[0])
-                    )
+                    offset = int(parts[0], 0) if parts[0].startswith("0x") else int(parts[0])
                     desc = parts[2] if len(parts) > 2 else parts[1]
                     signatures.append(
                         SignatureResult(

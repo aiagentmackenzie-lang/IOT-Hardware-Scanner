@@ -125,14 +125,14 @@ class RiskScorer:
                 )
 
         if ctrl_id == 11 and context.c2_findings:  # No C2/malware indicators
-                c2_count = len(context.c2_findings)
-                pts = max(0, 5 - c2_count)
-                return (
-                    "PARTIAL" if pts > 0 else "FAIL",
-                    pts,
-                    [f"{c2_count} C2 findings"],
-                    "Investigate and remove C2 indicators",
-                )
+            c2_count = len(context.c2_findings)
+            pts = max(0, 5 - c2_count)
+            return (
+                "PARTIAL" if pts > 0 else "FAIL",
+                pts,
+                [f"{c2_count} C2 findings"],
+                "Investigate and remove C2 indicators",
+            )
 
         # Default: PASS (no findings for this control)
         max_pts = next((c[2] for c in CONTROLS if c[0] == ctrl_id), 10)

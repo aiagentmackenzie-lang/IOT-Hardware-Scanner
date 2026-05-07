@@ -20,9 +20,7 @@ from iot_hardware_scanner.models import CVEFinding, Severity, SoftwareComponent
 logger = logging.getLogger(__name__)
 
 # KEV catalog URL (CISA Known Exploited Vulnerabilities)
-KEV_CATALOG_URL = (
-    "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv"
-)
+KEV_CATALOG_URL = "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv"
 
 # Local KEV data path
 _KEV_DATA_PATH = Path(__file__).parent.parent.parent.parent / "data" / "kev_catalog.json"

@@ -143,9 +143,7 @@ class TestVersionStringExtraction:
         versions = bi._extract_version_strings(f)
         assert len(versions) == 0
 
-    def test_multiple_versions(
-        self, bi: BinaryIntelligence, tmp_path: Path
-    ) -> None:
+    def test_multiple_versions(self, bi: BinaryIntelligence, tmp_path: Path) -> None:
         f = tmp_path / "combined"
         f.write_text("BusyBox v1.30.0\nOpenSSL 1.1.1k\nnginx/1.20.0\n")
         versions = bi._extract_version_strings(f)
@@ -167,19 +165,13 @@ class TestArchitectureDetection:
         assert bi._detect_architecture("ELF 32-bit LSB x86") == "x86"
 
     def test_x86_64(self, bi: BinaryIntelligence) -> None:
-        assert (
-            bi._detect_architecture("ELF 64-bit LSB x86-64") == "x86_64"
-        )
+        assert bi._detect_architecture("ELF 64-bit LSB x86-64") == "x86_64"
 
     def test_aarch64(self, bi: BinaryIntelligence) -> None:
-        assert (
-            bi._detect_architecture("ELF 64-bit LSB AArch64") == "AArch64"
-        )
+        assert bi._detect_architecture("ELF 64-bit LSB AArch64") == "AArch64"
 
     def test_powerpc(self, bi: BinaryIntelligence) -> None:
-        assert (
-            bi._detect_architecture("ELF 32-bit MSB PowerPC") == "PowerPC"
-        )
+        assert bi._detect_architecture("ELF 32-bit MSB PowerPC") == "PowerPC"
 
     def test_riscv(self, bi: BinaryIntelligence) -> None:
         assert bi._detect_architecture("ELF 32-bit LSB RISC-V") == "RISC-V"
@@ -198,10 +190,7 @@ class TestEndiannessDetection:
         assert bi._detect_endianness("ELF 32-bit MSB MIPS") == "big"
 
     def test_explicit_endian(self, bi: BinaryIntelligence) -> None:
-        assert (
-            bi._detect_endianness("ELF 32-bit big endian MIPS")
-            == "big"
-        )
+        assert bi._detect_endianness("ELF 32-bit big endian MIPS") == "big"
 
     def test_unknown(self, bi: BinaryIntelligence) -> None:
         assert bi._detect_endianness("data") is None
@@ -286,14 +275,10 @@ class TestIsHardened:
 class TestAnalyzeWithInventory:
     """Full analysis with filesystem inventory."""
 
-    def test_analyze_with_empty_inventory(
-        self, bi: BinaryIntelligence, tmp_path: Path
-    ) -> None:
+    def test_analyze_with_empty_inventory(self, bi: BinaryIntelligence, tmp_path: Path) -> None:
         """No binary files → empty result, but still scans firmware for versions."""
         fw = tmp_path / "firmware.bin"
-        fw.write_bytes(
-            b"\x7fELF" + b"BusyBox v1.30.0" + b"\x00" * 100
-        )
+        fw.write_bytes(b"\x7fELF" + b"BusyBox v1.30.0" + b"\x00" * 100)
 
         inventory = FilesystemInventory(rootfs_path=tmp_path)
         context = _make_context(
@@ -308,16 +293,12 @@ class TestAnalyzeWithInventory:
         assert len(context.software_components) >= 1
         assert any(c.product == "busybox" for c in context.software_components)
 
-    def test_analyze_with_binary_in_inventory(
-        self, bi: BinaryIntelligence, tmp_path: Path
-    ) -> None:
+    def test_analyze_with_binary_in_inventory(self, bi: BinaryIntelligence, tmp_path: Path) -> None:
         """Binary files in inventory should be analyzed."""
         # Create a fake binary with version strings
         bin_file = tmp_path / "usr" / "bin" / "busybox"
         bin_file.parent.mkdir(parents=True, exist_ok=True)
-        bin_file.write_bytes(
-            b"\x7fELF" + b"BusyBox v1.30.0" + b"\x00" * 256
-        )
+        bin_file.write_bytes(b"\x7fELF" + b"BusyBox v1.30.0" + b"\x00" * 256)
 
         finding = FilesystemFinding(
             path=Path("usr/bin/busybox"),

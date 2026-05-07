@@ -1,0 +1,20 @@
+{"type": "domain", "value": "updates.firmware-vendor.su", "tags": ["mirai", "c2"], "confidence": 0.9, "source": "abuse_ch", "first_seen": "2025-01-15", "last_seen": "2025-05-01"}
+{"type": "domain", "value": "c2.mirai-botnet.top", "tags": ["mirai", "c2"], "confidence": 0.95, "source": "abuse_ch", "first_seen": "2025-03-10", "last_seen": "2025-06-01"}
+{"type": "domain", "value": "report.xn--mirai-9za.cc", "tags": ["mirai", "c2"], "confidence": 0.85, "source": "unit42", "first_seen": "2025-02-20", "last_seen": "2025-04-15"}
+{"type": "domain", "value": "vpnfilter-c2.su", "tags": ["vpnfilter", "c2"], "confidence": 0.92, "source": "cisa", "first_seen": "2018-05-23", "last_seen": "2025-01-10"}
+{"type": "domain", "value": "static.update-nas.xyz", "tags": ["vpnfilter", "c2", "stage2"], "confidence": 0.88, "source": "cisco_talos", "first_seen": "2018-05-24", "last_seen": "2024-11-01"}
+{"type": "domain", "value": "jackskid-c2.eth.link", "tags": ["jackskid", "c2", "ens"], "confidence": 0.9, "source": "unit42", "first_seen": "2025-06-01", "last_seen": "2026-02-15"}
+{"type": "domain", "value": "aisuru-v7.onion.sh", "tags": ["kimwolf", "aisuru", "c2", "tor"], "confidence": 0.85, "source": "abuse_ch", "first_seen": "2026-01-05", "last_seen": "2026-04-20"}
+{"type": "domain", "value": "fastflux.jackskid.click", "tags": ["jackskid", "c2", "fastflux"], "confidence": 0.93, "source": "unit42", "first_seen": "2025-11-01", "last_seen": "2026-03-01"}
+{"type": "domain", "value": "dga-botnet-c2.pw", "tags": ["botnet", "c2"], "confidence": 0.8, "source": "abuse_ch", "first_seen": "2025-07-15", "last_seen": "2025-12-01"}
+{"type": "domain", "value": "hajime-p2p.dht.link", "tags": ["hajime", "p2p", "c2"], "confidence": 0.82, "source": "kaspersky", "first_seen": "2024-10-01", "last_seen": "2025-08-15"}
+{"type": "ip", "value": "185.220.101.37", "tags": ["tor_exit", "c2"], "confidence": 0.7, "source": "tor_project", "first_seen": "2024-06-01"}
+{"type": "ip", "value": "91.234.99.42", "tags": ["mirai", "c2"], "confidence": 0.9, "source": "abuse_ch", "first_seen": "2025-01-20", "last_seen": "2025-05-01"}
+{"type": "ip", "value": "23.106.122.77", "tags": ["bulletproof_hosting", "c2"], "confidence": 0.85, "source": "spamhaus", "first_seen": "2024-03-01", "last_seen": "2025-02-15"}
+{"type": "ip", "value": "5.187.35.18", "tags": ["botnet_infra", "dropper"], "confidence": 0.88, "source": "unit42", "first_seen": "2025-11-01", "last_seen": "2026-01-15"}
+{"type": "ip", "value": "45.33.32.156", "tags": ["vpnfilter", "c2"], "confidence": 0.82, "source": "cisco_talos", "first_seen": "2018-05-23", "last_seen": "2024-12-01"}
+{"type": "ip", "value": "209.141.38.71", "tags": ["mirai", "c2"], "confidence": 0.91, "source": "abuse_ch", "first_seen": "2025-04-01", "last_seen": "2025-08-15"}
+{"type": "ip", "value": "107.181.168.13", "tags": ["jackskid", "c2", "fastflux"], "confidence": 0.87, "source": "unit42", "first_seen": "2025-09-01", "last_seen": "2026-02-01"}
+{"type": "ip", "value": "198.96.155.9", "tags": ["hajime", "p2p"], "confidence": 0.75, "source": "kaspersky", "first_seen": "2024-11-01"}
+{"type": "ip_range", "value": "5.187.35.0/24", "tags": ["botnet_infra", "dropper"], "confidence": 0.85, "source": "unit42", "first_seen": "2025-11-01"}
+{"type": "ip_range", "value": "91.234.99.0/24", "tags": ["mirai", "c2_infra"], "confidence": 0.8, "source": "abuse_ch", "first_seen": "2025-01-01"}

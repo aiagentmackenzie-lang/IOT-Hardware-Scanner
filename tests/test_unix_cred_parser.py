@@ -101,10 +101,7 @@ class TestParsePasswd:
 
     def test_empty_password_field(self, parser: UnixCredentialParser) -> None:
         """Empty password field (no 'x') is detected."""
-        content = (
-            "root:x:0:0:root:/root:/bin/bash\n"
-            "nopw::1000:1000::/home/nopw:/bin/bash\n"
-        )
+        content = "root:x:0:0:root:/root:/bin/bash\nnopw::1000:1000::/home/nopw:/bin/bash\n"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write(content)
             f.flush()
@@ -223,8 +220,7 @@ class TestParseShadow:
     def test_sha512_hash_low_severity(self, parser: UnixCredentialParser) -> None:
         """SHA-512 ($6$) hashes are flagged as LOW severity."""
         content = (
-            "user3:$6$salt$hash12345678901234567890"
-            "12345678901234567890123:19000:0:99999:7:::\n"
+            "user3:$6$salt$hash1234567890123456789012345678901234567890123:19000:0:99999:7:::\n"
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write(content)

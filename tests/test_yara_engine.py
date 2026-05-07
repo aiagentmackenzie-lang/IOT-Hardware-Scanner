@@ -81,15 +81,15 @@ class TestLoadRules:
         with tempfile.TemporaryDirectory() as tmpdir:
             rule_path = Path(tmpdir) / "test_rule.yar"
             rule_path.write_text(
-                'rule test_custom_rule {\n'
-                '    meta:\n'
+                "rule test_custom_rule {\n"
+                "    meta:\n"
                 '        description = "Test rule"\n'
                 '        severity = "HIGH"\n'
-                '    strings:\n'
+                "    strings:\n"
                 '        $s = "test_password_123"\n'
-                '    condition:\n'
-                '        $s\n'
-                '}\n'
+                "    condition:\n"
+                "        $s\n"
+                "}\n"
             )
             engine = YaraEngine(config)
             count = engine.load_rules(rule_dirs=[Path(tmpdir)])
@@ -99,7 +99,7 @@ class TestLoadRules:
         """Bad YARA syntax files are skipped, not crashing the engine."""
         with tempfile.TemporaryDirectory() as tmpdir:
             bad_rule = Path(tmpdir) / "bad_rule.yar"
-            bad_rule.write_text('rule { invalid yara syntax !!! }')
+            bad_rule.write_text("rule { invalid yara syntax !!! }")
             engine = YaraEngine(config)
             count = engine.load_rules(rule_dirs=[Path(tmpdir)])
             # Should not crash — bad rule skipped
@@ -168,9 +168,7 @@ class TestScanFile:
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
             f.write(
-                "-----BEGIN RSA PRIVATE KEY-----\n"
-                "MIIBogIBAAJBAKx1\n"
-                "-----END RSA PRIVATE KEY-----\n"
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBAKx1\n-----END RSA PRIVATE KEY-----\n"
             )
             f.flush()
             path = Path(f.name)
