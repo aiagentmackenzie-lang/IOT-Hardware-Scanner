@@ -37,3 +37,4 @@ tests/fixtures/*.elf
 *.key
 *.keystore
 .env
+.coverage

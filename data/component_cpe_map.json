@@ -1,0 +1,14 @@
+{
+    "busybox": {"vendor": "busybox", "product": "busybox"},
+    "openssl": {"vendor": "openssl", "product": "openssl"},
+    "dropbear": {"vendor": "matt_johnston", "product": "dropbear_ssh"},
+    "dnsmasq": {"vendor": "thekelleys", "product": "dnsmasq"},
+    "nginx": {"vendor": "f5", "product": "nginx"},
+    "lighttpd": {"vendor": "lighttpd", "product": "lighttpd"},
+    "linux_kernel": {"vendor": "linux", "product": "linux_kernel"},
+    "u_boot": {"vendor": "denx", "product": "u-boot"},
+    "curl": {"vendor": "haxx", "product": "curl"},
+    "openssh": {"vendor": "openbsd", "product": "openssh"},
+    "zlib": {"vendor": "zlib", "product": "zlib"},
+    "sqlite": {"vendor": "sqlite", "product": "sqlite"}
+}
