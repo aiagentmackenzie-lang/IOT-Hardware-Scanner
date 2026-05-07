@@ -4,6 +4,19 @@ Computes Shannon entropy across firmware images to identify
 compressed, encrypted, and structured regions.
 
 SDR §9.1 — Entropy & Binary Intelligence
+
+Three-tier analysis:
+- Fast: binwalk-compatible block size (overview)
+- Standard: 512B blocks (firmware < 100MB)
+- Detailed: 128B blocks (partition boundaries)
+
+Classification ranges (research-backed):
+- 0.00-0.30: padding/null regions
+- 0.30-0.50: headers, structured data, configs
+- 0.50-0.70: code, mixed data
+- 0.70-0.85: compressed (squashfs, gzip, LZMA)
+- 0.85-0.93: high-compression payloads
+- 0.93+: encrypted or random data
 """
 
 from __future__ import annotations
@@ -25,16 +38,16 @@ logger = logging.getLogger(__name__)
 class EntropyAnalyzer:
     """Compute Shannon entropy across firmware images.
 
-    Three-tier analysis strategy:
-    - Fast scan: binwalk-compatible block size (overview)
-    - Standard scan: 512B blocks (firmware < 100MB)
-    - Detailed scan: 128B blocks (around partition boundaries)
+    Identifies compressed, encrypted, code, and padding regions
+    to support security analysis decisions.
     """
 
     def __init__(self, config: ScannerConfig) -> None:
         self.config = config
 
-    def analyze(self, data: bytes, block_size: int | None = None) -> EntropyProfile:
+    def analyze(
+        self, data: bytes, block_size: int | None = None
+    ) -> EntropyProfile:
         """Compute entropy across the firmware image.
 
         Args:
@@ -44,6 +57,19 @@ class EntropyAnalyzer:
         Returns:
             EntropyProfile with per-block entropy and region classification.
         """
+        if not data:
+            return EntropyProfile(
+                firmware_path=Path(""),
+                total_blocks=0,
+                block_size=block_size or 512,
+                blocks=[],
+                regions=[],
+                overall_entropy=0.0,
+                has_encrypted_regions=False,
+                has_compressed_regions=False,
+                firmware_partially_readable=True,
+            )
+
         if block_size is None:
             block_size = self._auto_block_size(len(data))
 
@@ -55,17 +81,54 @@ class EntropyAnalyzer:
         has_encrypted = any(r.classification == "encrypted" for r in regions)
         has_compressed = any(r.classification == "compressed" for r in regions)
 
-        return EntropyProfile(
-            firmware_path=Path(""),  # Set by caller
+        # If fully encrypted (only encrypted regions), firmware is not readable
+        # If encrypted alongside other data, firmware is still partially readable
+        fully_encrypted = (
+            has_encrypted
+            and not has_compressed
+            and all(r.classification == "encrypted" for r in regions)
+        )
+        firmware_partially_readable = not fully_encrypted
+
+        profile = EntropyProfile(
+            firmware_path=Path(""),
             total_blocks=len(blocks),
             block_size=block_size,
             blocks=blocks,
             regions=regions,
-            overall_entropy=overall,
+            overall_entropy=round(overall, 4),
             has_encrypted_regions=has_encrypted,
             has_compressed_regions=has_compressed,
-            firmware_partially_readable=not has_encrypted or len(regions) == 0,
+            firmware_partially_readable=firmware_partially_readable,
         )
+
+        logger.info(
+            "Entropy analysis complete: %d blocks, %d regions, "
+            "overall=%.4f, encrypted=%s, compressed=%s",
+            profile.total_blocks,
+            len(profile.regions),
+            profile.overall_entropy,
+            profile.has_encrypted_regions,
+            profile.has_compressed_regions,
+        )
+        return profile
+
+    def analyze_file(
+        self, path: Path, block_size: int | None = None
+    ) -> EntropyProfile:
+        """Analyze entropy of a file on disk.
+
+        Args:
+            path: Path to firmware binary.
+            block_size: Block size. None = auto-compute.
+
+        Returns:
+            EntropyProfile.
+        """
+        data = path.read_bytes()
+        profile = self.analyze(data, block_size)
+        profile.firmware_path = path
+        return profile
 
     def find_high_entropy_regions(
         self, profile: EntropyProfile, threshold: float = 0.85
@@ -92,11 +155,12 @@ class EntropyAnalyzer:
         if file_size == 0:
             return 512
         raw = file_size / 2048
-        # Round to nearest 1024
         block_size = max(128, int(round(raw / 1024) * 1024))
         return block_size
 
-    def _compute_blocks(self, data: bytes, block_size: int) -> list[EntropyBlock]:
+    def _compute_blocks(
+        self, data: bytes, block_size: int
+    ) -> list[EntropyBlock]:
         """Compute Shannon entropy for each block."""
         blocks: list[EntropyBlock] = []
         offset = 0
@@ -107,7 +171,7 @@ class EntropyAnalyzer:
             blocks.append(
                 EntropyBlock(
                     offset=offset,
-                    entropy=entropy,
+                    entropy=round(entropy, 4),
                     byte_distribution=distribution,
                 )
             )
@@ -115,7 +179,9 @@ class EntropyAnalyzer:
 
         return blocks
 
-    def _shannon_entropy(self, data: bytes) -> tuple[float, dict[int, int]]:
+    def _shannon_entropy(
+        self, data: bytes
+    ) -> tuple[float, dict[int, int]]:
         """Compute Shannon entropy of a byte sequence.
 
         H = -Σ p(xi) * log2(p(xi))
@@ -126,7 +192,6 @@ class EntropyAnalyzer:
         if not data:
             return 0.0, {}
 
-        # Build byte frequency histogram
         distribution: dict[int, int] = {}
         for b in data:
             distribution[b] = distribution.get(b, 0) + 1
@@ -140,15 +205,18 @@ class EntropyAnalyzer:
 
         return entropy, distribution
 
-    def _classify_regions(self, blocks: list[EntropyBlock], block_size: int) -> list[EntropyRegion]:
+    def _classify_regions(
+        self, blocks: list[EntropyBlock], block_size: int
+    ) -> list[EntropyRegion]:
         """Classify contiguous blocks into entropy regions.
 
-        Uses the SDR §9.1 interpretation table:
+        SDR §9.1 interpretation table:
         - 0.00-0.30: padding
         - 0.30-0.50: data/headers
         - 0.50-0.70: code
         - 0.70-0.85: compressed
-        - 0.85-1.00: encrypted (0.93+) or high-compression (0.85-0.93)
+        - 0.85-0.93: high-compression payload (still compressed)
+        - 0.93+: encrypted or random
         """
         if not blocks:
             return []
@@ -160,8 +228,9 @@ class EntropyAnalyzer:
         for i in range(1, len(blocks)):
             block_class = self._entropy_to_classification(blocks[i].entropy)
             if block_class != current_class:
-                # End current region, start new one
-                region = self._build_region(blocks, region_start, i, block_size, current_class)
+                region = self._build_region(
+                    blocks, region_start, i, block_size, current_class
+                )
                 regions.append(region)
                 region_start = i
                 current_class = block_class
@@ -169,7 +238,11 @@ class EntropyAnalyzer:
         # Final region
         if region_start < len(blocks):
             region = self._build_region(
-                blocks, region_start, len(blocks), block_size, current_class
+                blocks,
+                region_start,
+                len(blocks),
+                block_size,
+                current_class,
             )
             regions.append(region)
 
@@ -183,10 +256,8 @@ class EntropyAnalyzer:
             return "data"
         elif entropy < 0.70:
             return "code"
-        elif entropy < 0.85:
-            return "compressed"
         elif entropy < 0.93:
-            return "compressed"  # High-compression payload
+            return "compressed"
         else:
             return "encrypted"
 
@@ -200,11 +271,17 @@ class EntropyAnalyzer:
     ) -> EntropyRegion:
         """Build an EntropyRegion from a range of blocks."""
         region_blocks = blocks[start_idx:end_idx]
-        avg_entropy = sum(b.entropy for b in region_blocks) / len(region_blocks)
+        avg_entropy = sum(b.entropy for b in region_blocks) / len(
+            region_blocks
+        )
 
         # Confidence based on how clearly the classification applies
         if classification == "encrypted":
-            confidence = min(1.0, (avg_entropy - 0.93) / 0.07) if avg_entropy > 0.93 else 0.5
+            confidence = (
+                min(1.0, (avg_entropy - 0.93) / 0.07)
+                if avg_entropy > 0.93
+                else 0.5
+            )
         elif classification == "compressed":
             confidence = 0.7
         elif classification == "code":
@@ -216,7 +293,7 @@ class EntropyAnalyzer:
             start_offset=blocks[start_idx].offset,
             end_offset=blocks[end_idx - 1].offset + block_size,
             size=(end_idx - start_idx) * block_size,
-            avg_entropy=avg_entropy,
+            avg_entropy=round(avg_entropy, 4),
             classification=classification,
-            confidence=confidence,
+            confidence=round(confidence, 2),
         )
