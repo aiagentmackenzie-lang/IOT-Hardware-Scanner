@@ -1,0 +1,46 @@
+{
+  "title": "CISA Known Exploited Vulnerabilities Catalog (Sample)",
+  "version": "2026-05-07",
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2021-44228",
+      "vendorProject": "Apache",
+      "product": "Log4j",
+      "vulnerabilityName": "Log4Shell",
+      "dateAdded": "2021-12-10",
+      "shortDescription": "Remote code execution in Apache Log4j",
+      "requiredAction": "Apply updates per vendor instructions.",
+      "dueDate": "2022-02-10"
+    },
+    {
+      "cveID": "CVE-2017-0144",
+      "vendorProject": "Microsoft",
+      "product": "Windows SMB",
+      "vulnerabilityName": "EternalBlue",
+      "dateAdded": "2017-03-29",
+      "shortDescription": "Remote code execution via SMBv1",
+      "requiredAction": "Apply security updates.",
+      "dueDate": "2017-05-12"
+    },
+    {
+      "cveID": "CVE-2016-1555",
+      "vendorProject": "Netgear",
+      "product": "Router",
+      "vulnerabilityName": "Netgear Password Recovery",
+      "dateAdded": "2016-06-07",
+      "shortDescription": "Password recovery vulnerability in Netgear routers",
+      "requiredAction": "Apply firmware updates.",
+      "dueDate": "2016-08-07"
+    },
+    {
+      "cveID": "CVE-2018-10562",
+      "vendorProject": "Dasan",
+      "product": "GPON Router",
+      "vulnerabilityName": "GPON Authentication Bypass",
+      "dateAdded": "2018-05-10",
+      "shortDescription": "Authentication bypass in Dasan GPON routers",
+      "requiredAction": "Apply firmware updates.",
+      "dueDate": "2018-07-10"
+    }
+  ]
+}
