@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 # ── Binary magic bytes ──
 _ELF_MAGIC = b"\x7fELF"
 _PE_MAGIC = b"MZ"
-_MACHO_MAGIC = b"\xfe\xed\xfe\xce"
-_MACHO_MAGIC_64 = b"\xfe\xed\xfe\xcf"
+_MACHO_MAGIC = b"\xfe\xed\xfa\xce"
+_MACHO_MAGIC_64 = b"\xfe\xed\xfa\xcf"
 
 # ── Placeholder values (case-insensitive) ──
 _PLACEHOLDERS = frozenset(
@@ -332,7 +332,7 @@ class CredentialScanner:
 
         # Find passwd/shadow files in CRITICAL_CREDENTIAL category
         cred_files = inventory.categories.get(FileCategory.CRITICAL_CREDENTIAL, [])
-        shadow_files = getattr(inventory, "shadow_files", [])
+        shadow_findings = getattr(inventory, "shadow_files", [])
 
         passwd_path: Path | None = None
         shadow_path: Path | None = None
@@ -345,22 +345,22 @@ class CredentialScanner:
 
         # Also check the shadow_files index
         if not shadow_path:
-            for ff in shadow_files:
+            for ff in shadow_findings:
                 if ff.path.name == "shadow":
                     shadow_path = ff.absolute_path
                     break
 
         if passwd_path and passwd_path.exists():
-            entries = parser.parse_passwd(passwd_path)
-            for entry in entries:
-                finding = self._passwd_entry_to_finding(entry, passwd_path)
+            passwd_entries = parser.parse_passwd(passwd_path)
+            for passwd_entry in passwd_entries:
+                finding = self._passwd_entry_to_finding(passwd_entry, passwd_path)
                 if finding:
                     findings.append(finding)
 
         if shadow_path and shadow_path.exists():
-            entries = parser.parse_shadow(shadow_path)
-            for entry in entries:
-                finding = self._shadow_entry_to_finding(entry, shadow_path)
+            shadow_entries = parser.parse_shadow(shadow_path)
+            for shadow_entry in shadow_entries:
+                finding = self._shadow_entry_to_finding(shadow_entry, shadow_path)
                 if finding:
                     findings.append(finding)
 

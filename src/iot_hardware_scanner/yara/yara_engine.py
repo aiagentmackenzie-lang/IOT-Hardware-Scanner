@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import YaraMatch
@@ -27,7 +28,7 @@ class YaraEngine:
 
     def __init__(self, config: ScannerConfig) -> None:
         self.config = config
-        self._rules: object | None = None
+        self._rules: Any = None
         self._rule_count: int = 0
         self._yara_available: bool = False
         self._check_yara()
@@ -159,7 +160,7 @@ class YaraEngine:
 
     def _scan(
         self,
-        rules: object,
+        rules: Any,
         file_path: Path | None = None,
         data: bytes | None = None,
         module_name: str = "",

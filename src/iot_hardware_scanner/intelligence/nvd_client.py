@@ -79,7 +79,7 @@ class NVDClient:
                 if row:
                     cached_at = row[1]
                     if time.time() - cached_at < ttl_seconds:
-                        return json.loads(row[0])
+                        return json.loads(row[0])  # type: ignore[no-any-return]
                     # Expired — delete
                     conn.execute("DELETE FROM nvd_cache WHERE query_key = ?", (query_key,))
                     conn.commit()
@@ -116,7 +116,7 @@ class NVDClient:
             with urlopen(req, timeout=30) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    return data
+                    return data  # type: ignore[no-any-return]
                 else:
                     logger.warning("NVD API returned status %d", resp.status)
                     return None

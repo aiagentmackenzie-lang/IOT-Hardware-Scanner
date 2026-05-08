@@ -540,6 +540,49 @@ class TestHelperMethods:
         result = C2Detector._is_email_domain("example.com", f)
         assert result is False
 
+    def test_macho_binary_detection(self, tmp_path: Path) -> None:
+        """Mach-O binaries should be correctly identified."""
+        # Mach-O 32-bit magic: 0xFEEDFACE
+        macho32 = tmp_path / "macho32"
+        macho32.write_bytes(b"\xfe\xed\xfa\xce" + b"\x00" * 100)
+        assert C2Detector._is_binary_file(macho32) is True
+
+        # Mach-O 64-bit magic: 0xFEEDFACF
+        macho64 = tmp_path / "macho64"
+        macho64.write_bytes(b"\xfe\xed\xfa\xcf" + b"\x00" * 100)
+        assert C2Detector._is_binary_file(macho64) is True
+
+    def test_rfc5737_ranges_filtered(self) -> None:
+        """RFC 5737 documentation ranges should be filtered."""
+        # TEST-NET-1 (192.0.2.0/24)
+        assert C2Detector._is_private_or_reserved("192.0.2.1") is True
+        # TEST-NET-2 (198.51.100.0/24)
+        assert C2Detector._is_private_or_reserved("198.51.100.1") is True
+        # TEST-NET-3 (203.0.113.0/24)
+        assert C2Detector._is_private_or_reserved("203.0.113.1") is True
+
+    def test_private_ranges_comprehensive(self) -> None:
+        """Test all standard private/reserved IP ranges."""
+        # RFC 1918 private
+        assert C2Detector._is_private_or_reserved("10.0.0.1") is True
+        assert C2Detector._is_private_or_reserved("172.16.0.1") is True
+        assert C2Detector._is_private_or_reserved("172.31.255.255") is True
+        assert C2Detector._is_private_or_reserved("192.168.1.1") is True
+        # Loopback
+        assert C2Detector._is_private_or_reserved("127.0.0.1") is True
+        # Link-local
+        assert C2Detector._is_private_or_reserved("169.254.1.1") is True
+        # Multicast
+        assert C2Detector._is_private_or_reserved("224.0.0.1") is True
+        # Reserved
+        assert C2Detector._is_private_or_reserved("240.0.0.1") is True
+        # CGN
+        assert C2Detector._is_private_or_reserved("100.64.0.1") is True
+        # Public IPs should NOT be filtered
+        assert C2Detector._is_private_or_reserved("8.8.8.8") is False
+        assert C2Detector._is_private_or_reserved("1.1.1.1") is False
+        assert C2Detector._is_private_or_reserved("142.250.80.46") is False
+
 
 # ──────────────────────────────────────────────
 # Integration

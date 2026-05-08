@@ -29,40 +29,14 @@ logger = logging.getLogger(__name__)
 # ── Binary magic bytes ──
 _ELF_MAGIC = b"\x7fELF"
 _PE_MAGIC = b"MZ"
-_MACHO_MAGIC = b"\xfe\xed\xfe\xce"
-_MACHO_MAGIC_64 = b"\xfe\xed\xfe\xcf"
+_MACHO_MAGIC = b"\xfe\xed\xfa\xce"
+_MACHO_MAGIC_64 = b"\xfe\xed\xfa\xcf"
 
 # ── Regex patterns ──
 _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b")
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-
-# ── Private/reserved IP ranges to skip ──
-_PRIVATE_PREFIXES = (
-    "10.",
-    "172.16.",
-    "172.17.",
-    "172.18.",
-    "172.19.",
-    "172.20.",
-    "172.21.",
-    "172.22.",
-    "172.23.",
-    "172.24.",
-    "172.25.",
-    "172.26.",
-    "172.27.",
-    "172.28.",
-    "172.29.",
-    "172.30.",
-    "172.31.",
-    "192.168.",
-    "127.",
-    "169.254.",
-)
-_MULTICAST_START = 224
-_RESERVED_START = 240
 
 # ── Known-benign file path prefixes ──
 _BENIGN_PATH_PREFIXES = ("docs/", "tests/", "test/", "documentation/")
@@ -463,9 +437,9 @@ class C2Detector:
     def _is_private_or_reserved(ip_str: str) -> bool:
         """Check if an IP is in private, loopback, or reserved ranges.
 
-        Documentation ranges (RFC 5737) like 203.0.113.0/24 are NOT
-        treated as private/reserved — they are public and routable for
-        testing purposes. We only filter truly non-routable addresses.
+        Filters RFC 1918 private ranges, loopback, link-local,
+        multicast, reserved, CGN, and RFC 5737 documentation ranges
+        (TEST-NET-1/2/3) since firmware should not connect to these.
         """
         try:
             ip = ipaddress.ip_address(ip_str)
@@ -486,9 +460,10 @@ class C2Detector:
             ipaddress.ip_network("240.0.0.0/4"),  # Reserved
             ipaddress.ip_network("0.0.0.0/8"),  # Current network
             ipaddress.ip_network("100.64.0.0/10"),  # CGN
-            ipaddress.ip_network("192.0.0.0/24"),  # IETF Protocol
-            ipaddress.ip_network("192.0.2.0/24"),  # TEST-NET-1
-            ipaddress.ip_network("198.51.100.0/24"),  # TEST-NET-2
+            ipaddress.ip_network("192.0.0.0/24"),  # IETF Protocol Assignments
+            ipaddress.ip_network("192.0.2.0/24"),  # RFC 5737 TEST-NET-1
+            ipaddress.ip_network("198.51.100.0/24"),  # RFC 5737 TEST-NET-2
+            ipaddress.ip_network("203.0.113.0/24"),  # RFC 5737 TEST-NET-3
         ]
         return any(ip in network for network in private_networks)
 

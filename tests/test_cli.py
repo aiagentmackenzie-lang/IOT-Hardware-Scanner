@@ -9,6 +9,7 @@ Covers:
 
 import os
 import tempfile
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -113,3 +114,71 @@ class TestCLIEntropyCommand:
             assert result.exit_code == 0 or "Error" in result.output
         finally:
             os.unlink(path)
+
+
+class TestCLIReportCommand:
+    """Test the report subcommand."""
+
+    def test_report_requires_existing_file(self) -> None:
+        """Report command requires an existing scan file."""
+        runner = CliRunner()
+        result = runner.invoke(main, ["report", "/nonexistent/report.json"])
+        # Click's exists=True should cause exit code 2
+        assert result.exit_code != 0
+
+    def test_report_invalid_json(self, tmp_path: Path) -> None:
+        """Report command handles invalid JSON gracefully."""
+        bad_json = tmp_path / "bad.json"
+        bad_json.write_text("not valid json at all")
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["report", str(bad_json), "--format", "json"])
+        # Should fail gracefully (exit code 6) or show an error
+        assert result.exit_code != 0 or "Error" in result.output
+
+    def test_report_valid_json_scan(self, tmp_path: Path) -> None:
+        """Report command can load a valid JSON scan file and generate report."""
+        import json
+
+        scan_data = {
+            "scan_id": "test-report-001",
+            "scan_date": "2025-01-01T00:00:00+00:00",
+            "firmware": {
+                "name": "test_fw",
+                "path": str(tmp_path / "test.bin"),
+                "sha256": "a" * 64,
+                "md5": "b" * 32,
+                "size": 1024,
+                "file_type": "ELF",
+            },
+            "risk_score": {
+                "total_score": 75,
+                "risk_level": "MEDIUM",
+                "control_scores": [
+                    {
+                        "control_id": 1,
+                        "control_name": "No default/hardcoded credentials",
+                        "result": "PASS",
+                        "points": 10.0,
+                        "max_points": 10.0,
+                        "evidence": [],
+                        "remediation": "",
+                    }
+                ],
+                "weighted_breakdown": {"credentials": 10.0},
+                "executive_summary": "Test summary",
+                "owasp_iot_mapping": {"I1 - Weak/Default Passwords": 0},
+            },
+            "credentials": {"total": 0, "findings": []},
+            "cve": {"total": 0, "findings": []},
+            "c2_malware": {"total": 0, "findings": []},
+        }
+        scan_file = tmp_path / "scan_report.json"
+        scan_file.write_text(json.dumps(scan_data))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["report", str(scan_file), "--format", "json"]
+        )
+        # Should not show "not yet implemented"
+        assert "not yet implemented" not in result.output

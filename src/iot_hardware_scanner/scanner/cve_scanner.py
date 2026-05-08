@@ -80,7 +80,7 @@ class CVEScanner:
         findings: list[CVEFinding] = []
 
         # Strategy 1: CPE-based query
-        cpe = component.cpe_string
+        cpe: str | None = component.cpe_string
         if not cpe:
             # Try to build CPE from product name
             cpe = self._cpe_builder.build(component.product, component.version)
@@ -97,11 +97,11 @@ class CVEScanner:
         # Convert raw results to CVEFinding
         kev_ids = self._load_kev_catalog()
         for raw in raw_results:
-            cve_id = raw.get("cve_id", "")
+            cve_id: str = str(raw.get("cve_id", ""))
             if not cve_id:
                 continue
 
-            cvss_score = raw.get("cvss_v3_score")
+            cvss_score: float | None = raw.get("cvss_v3_score")  # type: ignore[assignment]
             severity = self._cvss_to_severity(cvss_score)
 
             # KEV check
@@ -114,12 +114,12 @@ class CVEScanner:
                     cve_id=cve_id,
                     severity=severity,
                     cvss_v3_score=cvss_score,
-                    cvss_v3_vector=raw.get("cvss_v3_vector"),
-                    description=raw.get("description", ""),
+                    cvss_v3_vector=str(raw.get("cvss_v3_vector", "")),
+                    description=str(raw.get("description", "")),
                     affected_product=component.product,
                     affected_version=component.version,
-                    published_date=raw.get("published_date", ""),
-                    references=raw.get("references", []),
+                    published_date=str(raw.get("published_date", "")),
+                    references=list(raw.get("references", [])),  # type: ignore[arg-type]
                     is_in_kev=is_in_kev,
                     exploit_available=is_in_kev,  # KEV implies known exploitation
                 )

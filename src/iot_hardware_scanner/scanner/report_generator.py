@@ -429,6 +429,8 @@ code {{ background: #16213e; padding: 0.15rem 0.3rem; border-radius: 3px; }}
     def _md_risk_scorecard(context: ScanContext) -> str:
         """Generate risk scorecard as Markdown table."""
         rs = context.risk_score
+        if rs is None:
+            return ""
         lines = [
             "## Risk Scorecard",
             "",
@@ -458,6 +460,8 @@ code {{ background: #16213e; padding: 0.15rem 0.3rem; border-radius: 3px; }}
     def _md_owasp_mapping(context: ScanContext) -> str:
         """Generate OWASP IoT Top 10 mapping as Markdown."""
         rs = context.risk_score
+        if rs is None:
+            return ""
         lines = [
             "## OWASP IoT Top 10 Mapping",
             "",
@@ -476,6 +480,8 @@ code {{ background: #16213e; padding: 0.15rem 0.3rem; border-radius: 3px; }}
     def _md_extraction(context: ScanContext) -> str:
         """Generate extraction summary as Markdown."""
         er = context.extraction_result
+        if er is None:
+            return ""
         lines = [
             "## Extraction Summary",
             "",
@@ -492,6 +498,8 @@ code {{ background: #16213e; padding: 0.15rem 0.3rem; border-radius: 3px; }}
     def _md_entropy(context: ScanContext) -> str:
         """Generate entropy profile as Markdown."""
         ep = context.entropy_profile
+        if ep is None:
+            return ""
         lines = [
             "## Entropy Profile",
             "",

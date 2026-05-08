@@ -11,6 +11,7 @@ Provides the `iot-hardware-scanner` command with subcommands:
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -19,6 +20,7 @@ from rich.console import Console
 from iot_hardware_scanner import __version__
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.exceptions import ScannerError
+from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
 
 console = Console()
 
@@ -197,12 +199,95 @@ def entropy(firmware: str, block_size: int | None, verbose: bool) -> None:
 @click.option("--out", "report_file", type=click.Path(), default=None, help="Output file")
 def report(scan_file: str, report_format: str, report_file: str | None) -> None:
     """Generate report from a previous scan JSON file."""
-    console.print("[yellow]Report generation from file not yet implemented[/yellow]")
-    console.print(f"  Scan file: {scan_file}")
-    console.print(f"  Format: {report_format}")
+    import json
+
+    scan_path = Path(scan_file)
+    if not scan_path.exists():
+        console.print(f"[red]Error:[/red] File not found: {scan_file}")
+        sys.exit(3)
+
+    try:
+        data = json.loads(scan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        console.print(f"[red]Error:[/red] Cannot read scan file: {exc}")
+        sys.exit(6)
+
+    # Reconstruct ScanContext from JSON
+    from iot_hardware_scanner.scanner.report_generator import ReportGenerator
+
+    config = ScannerConfig(report_formats=[report_format])
+
+    # Build a minimal ScanContext from the JSON data
+    firmware_data = data.get("firmware", {})
+    context = ScanContext(
+        scan_id=data.get("scan_id", "unknown"),
+        firmware_path=Path(firmware_data.get("path", ".")),
+        output_dir=scan_path.parent,
+        file_hash_sha256=firmware_data.get("sha256", ""),
+        file_hash_md5=firmware_data.get("md5", ""),
+        file_size=firmware_data.get("size", 0),
+        file_type=firmware_data.get("file_type", "unknown"),
+        firmware_name=firmware_data.get("name", scan_path.stem),
+        size_category=FirmwareSizeCategory.MEDIUM,
+        started_at=datetime.fromisoformat(
+            data.get("scan_date", datetime.now(timezone.utc).isoformat())
+        )
+        if data.get("scan_date")
+        else datetime.now(timezone.utc),
+    )
+
+    # Populate from JSON
+    if data.get("risk_score"):
+        from iot_hardware_scanner.models import ControlScore, RiskLevel, RiskScore
+
+        rs = data["risk_score"]
+        control_scores = [
+            ControlScore(
+                control_id=cs["control_id"],
+                control_name=cs["control_name"],
+                result=cs["result"],
+                points=cs["points"],
+                max_points=cs["max_points"],
+                evidence=cs.get("evidence", []),
+                remediation=cs.get("remediation", ""),
+            )
+            for cs in rs.get("control_scores", [])
+        ]
+        context.risk_score = RiskScore(
+            total_score=rs["total_score"],
+            risk_level=RiskLevel(rs["risk_level"]),
+            control_scores=control_scores,
+            weighted_breakdown=rs.get("weighted_breakdown", {}),
+            executive_summary=rs.get("executive_summary", ""),
+            owasp_iot_mapping=rs.get("owasp_iot_mapping", {}),
+        )
+
+    # Set output file for report generator
+    if report_file:
+        context.output_dir = Path(report_file).parent
+        context.output_dir.mkdir(parents=True, exist_ok=True)
+
+    config.report_formats = [report_format]
+    generator = ReportGenerator(config)
+    paths = generator.generate(context)
+
+    if report_format == "terminal":
+        console.print("[green]Report rendered to terminal[/green]")
+    elif paths:
+        for fmt, path in paths.items():
+            output_path = Path(report_file) if report_file else path
+            if report_file and fmt in paths:
+                # Copy to desired output file
+                import shutil
+                shutil.copy2(str(paths[fmt]), str(output_path))
+                console.print(f"[green]Report saved:[/green] {output_path}")
+            else:
+                console.print(f"[green]Report saved:[/green] {path}")
+    else:
+        console.print("[yellow]No report generated[/yellow]")
 
 
-def _print_scan_summary(context: ScanContext) -> None:  # noqa: F821
+def _print_scan_summary(context: ScanContext) -> None:
     """Print a terminal summary of the scan results."""
 
     console.print()

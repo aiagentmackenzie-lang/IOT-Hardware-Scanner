@@ -141,7 +141,8 @@ class RiskScorer:
         evaluator = self._EVALUATORS.get(ctrl_id)
         if evaluator:
             method = getattr(self, evaluator)
-            return method(context)
+            result: tuple[str, float, list[str], str] = method(context)
+            return result
         # Unknown control → PASS with max points
         max_pts = next((c[2] for c in CONTROLS if c[0] == ctrl_id), 10)
         return "PASS", max_pts, [], ""

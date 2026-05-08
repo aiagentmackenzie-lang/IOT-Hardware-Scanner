@@ -708,3 +708,30 @@ class TestEdgeCases:
         assert CredentialScanner._mask_value("short") == "***"
         assert CredentialScanner._mask_value("longpassword123") == "lon***123"
         assert CredentialScanner._mask_value("abc") == "***"
+
+    def test_macho_binary_detection(self, tmp_path: Path) -> None:
+        """Mach-O binaries should be correctly identified as binary files."""
+        # Mach-O 32-bit magic: 0xFEEDFACE
+        macho32 = tmp_path / "macho32"
+        macho32.write_bytes(b"\xfe\xed\xfa\xce" + b"\x00" * 100)
+        assert CredentialScanner._is_binary_file(macho32) is True
+
+        # Mach-O 64-bit magic: 0xFEEDFACF
+        macho64 = tmp_path / "macho64"
+        macho64.write_bytes(b"\xfe\xed\xfa\xcf" + b"\x00" * 100)
+        assert CredentialScanner._is_binary_file(macho64) is True
+
+        # ELF binary
+        elf = tmp_path / "elf_bin"
+        elf.write_bytes(b"\x7fELF" + b"\x00" * 100)
+        assert CredentialScanner._is_binary_file(elf) is True
+
+        # PE binary
+        pe = tmp_path / "pe.exe"
+        pe.write_bytes(b"MZ" + b"\x00" * 100)
+        assert CredentialScanner._is_binary_file(pe) is True
+
+        # Plain text should not be detected as binary
+        txt = tmp_path / "plain.txt"
+        txt.write_text("hello world")
+        assert CredentialScanner._is_binary_file(txt) is False
