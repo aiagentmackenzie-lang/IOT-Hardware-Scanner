@@ -705,9 +705,9 @@ class TestEdgeCases:
 
     def test_mask_value_static(self) -> None:
         """_mask_value correctly masks sensitive values."""
-        assert CredentialScanner._mask_value("short") == "***"
-        assert CredentialScanner._mask_value("longpassword123") == "lon***123"
-        assert CredentialScanner._mask_value("abc") == "***"
+        assert CredentialScanner._mask_value("short") == "********"
+        assert CredentialScanner._mask_value("longpassword123") == "********"
+        assert CredentialScanner._mask_value("abc") == "********"
 
     def test_macho_binary_detection(self, tmp_path: Path) -> None:
         """Mach-O binaries should be correctly identified as binary files."""

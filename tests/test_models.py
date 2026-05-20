@@ -158,7 +158,7 @@ class TestFindingModels:
             category="password",
             file_path=Path("etc/shadow"),
             line_number=5,
-            masked_value="roo***456",
+            masked_value="********",
         )
         assert finding.severity == Severity.CRITICAL
         assert finding.is_default is False

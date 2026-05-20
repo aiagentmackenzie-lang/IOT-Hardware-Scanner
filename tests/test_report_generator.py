@@ -92,7 +92,7 @@ def full_context(output_dir: Path) -> ScanContext:
             file_path=Path("etc/shadow"),
             line_number=3,
             matched_pattern="root:admin",
-            masked_value="r***:****n",
+            masked_value="********",
             is_default=True,
             is_placeholder=False,
         ),

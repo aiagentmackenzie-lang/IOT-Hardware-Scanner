@@ -517,10 +517,12 @@ class CredentialScanner:
 
     @staticmethod
     def _mask_value(value: str) -> str:
-        """Mask sensitive parts of a discovered value."""
-        if len(value) <= 6:
-            return "***"
-        return value[:3] + "***" + value[-3:]
+        """Mask sensitive parts of a discovered value.
+
+        Returns a fixed-length redaction string to prevent
+        information leakage via prefix, suffix, or length.
+        """
+        return "*" * 8
 
     @staticmethod
     def _compute_entropy(value: str) -> float:

@@ -73,7 +73,7 @@ def _make_credential_finding(
         file_path=Path("etc/passwd"),
         line_number=1,
         matched_pattern="root:admin",
-        masked_value="r***:****n",
+        masked_value="********",
         is_default=is_default,
         is_placeholder=is_placeholder,
     )
