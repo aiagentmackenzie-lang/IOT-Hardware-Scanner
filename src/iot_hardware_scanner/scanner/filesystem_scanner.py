@@ -354,7 +354,7 @@ class FilesystemScanner:
         # Check path-based patterns first (more specific)
         for category, patterns in CATEGORY_PATTERNS.items():
             for pattern in patterns:
-                if pattern in rel_lower or pattern == ext:
+                if rel_lower.startswith(pattern) or pattern == ext:
                     return category
 
         # Check ELF binaries

@@ -117,6 +117,16 @@ class TestFileCategorization:
         assert any("passwd" in p for p in paths)
         assert any("shadow" in p for p in paths)
 
+    def test_no_false_positive_substring_match(
+        self, scanner: FilesystemScanner, temp_rootfs: Path
+    ) -> None:
+        """Regression: etc/myshadow.conf must NOT match etc/shadow."""
+        (temp_rootfs / "etc" / "myshadow.conf").write_text("not a credential\n")
+        inv = scanner.scan(temp_rootfs)
+        creds = inv.categories.get(FileCategory.CRITICAL_CREDENTIAL, [])
+        paths = [str(f.path) for f in creds]
+        assert "etc/myshadow.conf" not in paths
+
     def test_config_is_critical_config(self, scanner: FilesystemScanner, temp_rootfs: Path) -> None:
         inv = scanner.scan(temp_rootfs)
         configs = inv.categories.get(FileCategory.CRITICAL_CONFIG, [])
