@@ -129,7 +129,13 @@ class FirmwareExtractor:
         try:
             import pybinwalk
 
-            results = pybinwalk.extract(str(firmware_path), str(extraction_dir))
+            extract_kwargs: dict = {}
+            if self.config.extraction_depth > 1:
+                extract_kwargs["matryoshka"] = True
+                extract_kwargs["depth"] = self.config.extraction_depth
+            results = pybinwalk.extract(
+                str(firmware_path), str(extraction_dir), **extract_kwargs
+            )
             for r in results or []:
                 signatures.append(
                     SignatureResult(
@@ -140,15 +146,18 @@ class FirmwareExtractor:
                 )
         except ImportError:
             # Fallback subprocess extraction
+            cmd = [
+                "binwalk",
+                "-e",
+                "-C",
+                str(extraction_dir),
+                str(firmware_path),
+            ]
+            if self.config.extraction_depth > 1:
+                cmd.extend(["-M", f"--depth={self.config.extraction_depth}"])
             try:
                 result = subprocess.run(
-                    [
-                        "binwalk",
-                        "-e",
-                        "-C",
-                        str(extraction_dir),
-                        str(firmware_path),
-                    ],
+                    cmd,
                     capture_output=True,
                     text=True,
                     timeout=self.config.extraction_timeout_seconds,
