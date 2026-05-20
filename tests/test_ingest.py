@@ -262,6 +262,23 @@ class TestGetMetadata:
         with pytest.raises(FirmwareNotFoundError):
             ingest.get_metadata(Path("/nonexistent.bin"))
 
+    def test_metadata_path_traversal_dotdot(self, output_config: ScannerConfig) -> None:
+        """get_metadata rejects .. before resolve()."""
+        ingest = FirmwareIngest(output_config)
+        with pytest.raises(FirmwarePathTraversalError):
+            ingest.get_metadata(Path("../etc/passwd"))
+
+    def test_metadata_symlink(self, output_config: ScannerConfig, small_firmware: Path) -> None:
+        """get_metadata rejects symlinks."""
+        symlink = small_firmware.parent / "meta_link.bin"
+        symlink.symlink_to(small_firmware)
+        ingest = FirmwareIngest(output_config)
+        try:
+            with pytest.raises(FirmwareNotFoundError, match=r"(?i)symlink"):
+                ingest.get_metadata(symlink)
+        finally:
+            symlink.unlink(missing_ok=True)
+
 
 # ──────────────────────────────────────────────
 # Determinism

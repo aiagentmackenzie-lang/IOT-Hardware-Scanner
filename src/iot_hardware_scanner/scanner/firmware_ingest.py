@@ -188,8 +188,23 @@ class FirmwareIngest:
         Useful for quick inspection and validation checks
         without the overhead of output directory creation.
         """
+        original_path = Path(firmware_path)
+        firmware_str = str(original_path)
+        if "\x00" in firmware_str:
+            raise FirmwarePathTraversalError(
+                f"Path contains null byte: {firmware_str.split(chr(0))[0]}"
+            )
+        if ".." in original_path.parts:
+            raise FirmwarePathTraversalError(
+                f"Path contains traversal sequence '..': {firmware_path}"
+            )
+        if original_path.is_symlink():
+            raise FirmwareNotFoundError(
+                f"Symlinks are not accepted: {original_path}. "
+                f"Provide the actual firmware file path."
+            )
+
         firmware_path = Path(firmware_path).resolve()
-        self._validate_path_safety(firmware_path)
 
         if not firmware_path.exists():
             raise FirmwareNotFoundError(f"Firmware file not found: {firmware_path}")
