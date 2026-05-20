@@ -18,6 +18,7 @@ import click
 from rich.console import Console
 
 from iot_hardware_scanner import __version__
+from iot_hardware_scanner.models import Severity
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.exceptions import ScannerError
 from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
@@ -115,11 +116,18 @@ def scan(
         console.print(f"\n[green]Report saved:[/green] {report_file}")
 
     # Exit with CRITICAL findings code if any found
-    if context.credential_findings or context.cve_findings or context.c2_findings:
-        has_critical = any(
-            f.severity == "CRITICAL" for f in context.credential_findings + context.cve_findings
-        )
-        sys.exit(1 if has_critical else 0)
+    has_critical = any(
+        f.severity == Severity.CRITICAL
+        for f in context.credential_findings + context.cve_findings
+    )
+    has_likely_c2 = any(
+        f.severity == "LIKELY_C2" for f in context.c2_findings
+    )
+    if has_critical or has_likely_c2:
+        sys.exit(1)
+    elif context.credential_findings or context.cve_findings or context.c2_findings:
+        sys.exit(2)
+    sys.exit(0)
 
 
 @main.command()

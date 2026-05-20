@@ -80,7 +80,50 @@ class TestCLIScanCommand:
                     ],
                 )
                 # Phase 1 should succeed; later phases may fail gracefully
-                assert "Ingest" in result.output or result.exit_code == 0
+                assert "Ingest" in result.output or result.exit_code in (0, 2)
+        finally:
+            os.unlink(path)
+
+    def test_scan_exit_code_likely_c2(self) -> None:
+        """LIKELY_C2 findings trigger exit code 1."""
+        from unittest.mock import patch
+        from iot_hardware_scanner.orchestrator import Orchestrator
+        from iot_hardware_scanner.models import C2Finding
+
+        runner = CliRunner()
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+            f.write(os.urandom(1024))
+            path = f.name
+
+        def fake_run(_self, firmware_path):
+            from iot_hardware_scanner.models import ScanContext, FirmwareSizeCategory
+            from datetime import datetime, timezone
+            ctx = ScanContext(
+                scan_id="test",
+                firmware_path=firmware_path,
+                output_dir=firmware_path.parent,
+                file_hash_sha256="a" * 64,
+                file_hash_md5="b" * 32,
+                file_size=1024,
+                file_type="binary",
+                firmware_name="test",
+                size_category=FirmwareSizeCategory.SMALL,
+                started_at=datetime.now(timezone.utc),
+            )
+            ctx.c2_findings = [
+                C2Finding(
+                    severity="LIKELY_C2",
+                    indicator_type="domain",
+                    value="evil.example.com",
+                    file_path=firmware_path,
+                )
+            ]
+            return ctx
+
+        try:
+            with patch.object(Orchestrator, "run", fake_run):
+                result = runner.invoke(main, ["scan", path])
+                assert result.exit_code == 1
         finally:
             os.unlink(path)
 
