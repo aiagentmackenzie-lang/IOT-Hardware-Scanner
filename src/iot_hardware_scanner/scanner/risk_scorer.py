@@ -376,30 +376,59 @@ class RiskScorer:
         self, context: ScanContext
     ) -> tuple[str, float, list[str], str]:
         """Control 6: Secure boot/integrity verification (ISVS V4.1)."""
-        # If firmware has encrypted regions → good (indicates protection)
-        # If no encrypted regions and no signature checks → fail
-        entropy = context.entropy_profile
         evidence: list[str] = []
+        inv = context.filesystem_inventory
 
-        if entropy:
-            if entropy.has_encrypted_regions:
-                evidence.append("Encrypted regions detected (positive)")
-            else:
-                evidence.append("No encrypted regions detected")
-            if entropy.firmware_partially_readable:
-                evidence.append("Firmware is partially readable")
-        else:
-            evidence.append("No entropy profile available")
+        # Heuristic: look for secure-boot indicators
+        has_secure_boot = False
+        if inv:
+            for ff in inv.findings:
+                name_lower = str(ff.path).lower()
+                if any(
+                    kw in name_lower
+                    for kw in (
+                        "secure_boot",
+                        "sboot",
+                        "verified-boot",
+                        "trusted",
+                    )
+                ):
+                    has_secure_boot = True
+                    evidence.append(f"Secure-boot indicator: {ff.path}")
+                    break
+                try:
+                    content = ff.absolute_path.read_text(
+                        errors="ignore"
+                    ).lower()
+                    if any(
+                        sig in content
+                        for sig in (
+                            "verified boot",
+                            "secure boot",
+                            "signature verification",
+                            "crypto_verify",
+                        )
+                    ):
+                        has_secure_boot = True
+                        evidence.append(
+                            f"Secure-boot string in {ff.path}"
+                        )
+                        break
+                except (OSError, PermissionError):
+                    continue
 
-        if entropy and not entropy.has_encrypted_regions and entropy.firmware_partially_readable:
-            return (
-                "PARTIAL",
-                4.0,
-                evidence,
-                "Implement secure boot with firmware encryption "
-                "and integrity verification.",
-            )
-        return "PASS", 8.0, evidence, ""
+        if not evidence:
+            evidence.append("No secure boot indicators found")
+
+        if has_secure_boot:
+            return "PASS", 8.0, evidence, ""
+
+        return (
+            "PARTIAL",
+            4.0,
+            evidence,
+            "Implement secure boot with cryptographic integrity verification.",
+        )
 
     def _eval_no_backdoor_interfaces(
         self, context: ScanContext
