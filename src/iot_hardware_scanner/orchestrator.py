@@ -140,13 +140,36 @@ class Orchestrator:
         if context.extracted_rootfs and context.extracted_rootfs.exists():
             try:
                 from iot_hardware_scanner.scanner.filesystem_scanner import FilesystemScanner
+                from iot_hardware_scanner.models import FileCategory, FilesystemInventory
 
                 scanner = FilesystemScanner(self.config)
-                inventory = scanner.scan(context.extracted_rootfs)
-                context.filesystem_inventory = inventory
+                root_filesystems = context.extraction_result.root_filesystems if context.extraction_result else [context.extracted_rootfs]
+
+                merged = FilesystemInventory(
+                    rootfs_path=context.extracted_rootfs,
+                    findings=[],
+                    categories={cat: [] for cat in FileCategory},
+                )
+                for rootfs in root_filesystems:
+                    inv = scanner.scan(rootfs)
+                    merged.total_files += inv.total_files
+                    merged.total_directories += inv.total_directories
+                    merged.total_size += inv.total_size
+                    merged.findings.extend(inv.findings)
+                    for cat, items in inv.categories.items():
+                        merged.categories.setdefault(cat, []).extend(items)
+                    merged.suid_binaries.extend(inv.suid_binaries)
+                    merged.world_writable_files.extend(inv.world_writable_files)
+                    merged.shadow_files.extend(inv.shadow_files)
+                    merged.ssl_cert_files.extend(inv.ssl_cert_files)
+                    merged.init_scripts.extend(inv.init_scripts)
+                    merged.network_services.extend(inv.network_services)
+
+                context.filesystem_inventory = merged
                 console.print(
-                    f"  [green]✓[/green] {inventory.total_files} files,"
-                    f" {inventory.total_directories} directories"
+                    f"  [green]✓[/green] {merged.total_files} files,"
+                    f" {merged.total_directories} directories"
+                    f" ({len(root_filesystems)} root filesystem(s))"
                 )
             except ImportError:
                 console.print("  [yellow]![/yellow] FilesystemScanner not available")
