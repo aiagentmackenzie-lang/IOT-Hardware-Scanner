@@ -354,84 +354,31 @@ class C2Detector:
             return True
         return "etc" in str(path).lower()
 
-    @staticmethod
-    def _extract_domains_from_file(path: Path) -> set[str]:
-        """Extract domain names from a file using regex."""
-        domains: set[str] = set()
+    def _extract_domains_from_file(self, path: Path) -> set[str]:
+        """Extract domain names from a file, with OOM protection."""
+        max_size = self.config.max_scan_file_size_mb * 1024 * 1024
         try:
-            content = path.read_text(errors="ignore")
-        except (OSError, PermissionError):
-            return domains
+            if path.stat().st_size > max_size:
+                logger.debug("Skipping large file for domain extraction: %s (%s)", path, _fmt_size(path.stat().st_size))
+                return set()
+        except OSError:
+            return set()
+        return _extract_domains_text(path)
 
-        # First extract URLs and strip the protocol part
-        urls = _URL_RE.findall(content)
-        url_domains: set[str] = set()
-        for url in urls:
-            # Extract hostname from URL
-            try:
-                # Simple extraction: strip protocol
-                host_part = url.split("://", 1)[-1].split("/")[0].split(":")[0]
-                if _DOMAIN_RE.match(host_part):
-                    url_domains.add(host_part.lower())
-            except (IndexError, ValueError):
-                continue
+    def _is_email_domain(self, domain: str, path: Path) -> bool:
+        """Check if a domain appears only as part of an email address."""
+        return _is_email_domain_text(domain, path)
 
-        # Then extract bare domains
-        bare_domains = set(m.lower() for m in _DOMAIN_RE.findall(content))
-
-        # Combine, filtering out version strings and too-short matches
-        all_domains = url_domains | bare_domains
-        for d in all_domains:
-            # Skip if looks like a version number (e.g., "2.0" or "1.x")
-            parts = d.split(".")
-            if all(p.isdigit() for p in parts):
-                continue
-            # Skip single-char TLDs
-            if len(parts) >= 2 and len(parts[-1]) < 2:
-                continue
-            domains.add(d)
-
-        return domains
-
-    @staticmethod
-    def _is_email_domain(domain: str, path: Path) -> bool:
-        """Check if a domain appears only as part of an email address.
-
-        Quick heuristic: if the file contains the domain with an @ prefix,
-        it's likely just an email, not a C2 domain.
-        """
+    def _extract_ips_from_file(self, path: Path) -> set[str]:
+        """Extract IPv4 addresses from a file, with OOM protection."""
+        max_size = self.config.max_scan_file_size_mb * 1024 * 1024
         try:
-            content = path.read_text(errors="ignore")
-        except (OSError, PermissionError):
-            return False
-
-        # Count occurrences: email vs standalone
-        email_count = len(_EMAIL_RE.findall(content))
-        if email_count == 0:
-            return False
-
-        # Check if domain only appears in email context
-        standalone = content.lower().count(domain)
-        in_email = sum(1 for e in _EMAIL_RE.findall(content) if domain in e.lower())
-        # If all occurrences are in emails, skip it
-        return standalone == in_email and standalone > 0
-
-    @staticmethod
-    def _extract_ips_from_file(path: Path) -> set[str]:
-        """Extract IPv4 addresses from a file using regex."""
-        ips: set[str] = set()
-        try:
-            content = path.read_text(errors="ignore")
-        except (OSError, PermissionError):
-            return ips
-
-        for match in _IP_RE.findall(content):
-            # Validate octets
-            octets = match.split(".")
-            if all(0 <= int(o) <= 255 for o in octets):
-                ips.add(match)
-
-        return ips
+            if path.stat().st_size > max_size:
+                logger.debug("Skipping large file for IP extraction: %s (%s)", path, _fmt_size(path.stat().st_size))
+                return set()
+        except OSError:
+            return set()
+        return _extract_ips_text(path)
 
     @staticmethod
     def _is_private_or_reserved(ip_str: str) -> bool:
@@ -536,3 +483,79 @@ class C2Detector:
             breakdown["benign"] = _SCORE_BENIGN
 
         return breakdown
+
+
+# ── Module-level text extractors (usable without OOM gating) ──
+def _extract_domains_text(path: Path) -> set[str]:
+    """Extract domain names from file text (no size gating)."""
+    domains: set[str] = set()
+    try:
+        content = path.read_text(errors="ignore")
+    except (OSError, PermissionError):
+        return domains
+
+    urls = _URL_RE.findall(content)
+    url_domains: set[str] = set()
+    for url in urls:
+        try:
+            host_part = url.split("://", 1)[-1].split("/")[0].split(":")[0]
+            if _DOMAIN_RE.match(host_part):
+                url_domains.add(host_part.lower())
+        except (IndexError, ValueError):
+            continue
+
+    bare_domains = set(m.lower() for m in _DOMAIN_RE.findall(content))
+    all_domains = url_domains | bare_domains
+    for d in all_domains:
+        parts = d.split(".")
+        if all(p.isdigit() for p in parts):
+            continue
+        if len(parts) >= 2 and len(parts[-1]) < 2:
+            continue
+        domains.add(d)
+    return domains
+
+
+def _extract_ips_text(path: Path) -> set[str]:
+    """Extract IPv4 addresses from file text (no size gating)."""
+    ips: set[str] = set()
+    try:
+        content = path.read_text(errors="ignore")
+    except (OSError, PermissionError):
+        return ips
+
+    for match in _IP_RE.findall(content):
+        parts = match.split(".")
+        if all(0 <= int(o) <= 255 for o in parts):
+            ips.add(match)
+    return ips
+
+
+def _is_email_domain_text(domain: str, path: Path) -> bool:
+    """Check if a domain appears only as part of an email address.
+
+    Quick heuristic: if the file contains the domain with an @ prefix,
+    it's likely just an email, not a C2 domain.
+    """
+    try:
+        content = path.read_text(errors="ignore")
+    except (OSError, PermissionError):
+        return False
+
+    email_count = len(_EMAIL_RE.findall(content))
+    if email_count == 0:
+        return False
+
+    standalone = content.lower().count(domain)
+    in_email = sum(1 for e in _EMAIL_RE.findall(content) if domain in e.lower())
+    return standalone == in_email and standalone > 0
+
+
+# ── Module-level helper ──
+def _fmt_size(n: int) -> str:
+    """Format byte count as human-readable size."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n //= 1024
+    return f"{n:.1f} TB"

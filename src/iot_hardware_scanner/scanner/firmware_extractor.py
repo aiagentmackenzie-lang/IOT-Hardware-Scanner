@@ -180,6 +180,13 @@ class FirmwareExtractor:
         if removed_symlinks:
             errors.append(f"Removed {removed_symlinks} symlinks pointing outside extraction root")
 
+        # ── Post-extraction hard link audit ──
+        removed_hardlinks = self._audit_hardlinks(extraction_dir)
+        if removed_hardlinks:
+            errors.append(
+                f"Removed {removed_hardlinks} hard links to files outside extraction root"
+            )
+
         # ── Find extracted root filesystems ──
         root_filesystems = self.get_root_filesystems(extraction_dir)
 
@@ -294,6 +301,53 @@ class FirmwareExtractor:
 
         return removed
 
+    def _audit_hardlinks(self, extraction_dir: Path) -> int:
+        """Remove hard links referencing files outside the extraction root.
+
+        A malicious firmware could create hard links to /etc/shadow or
+        other sensitive host files during extraction (if run as root).
+        Uses nlink detection via os.stat() and inode comparison.
+        """
+        removed = 0
+        if not extraction_dir.exists():
+            return removed
+
+        root = str(extraction_dir.resolve())
+        inode_map: dict[int, Path] = {}
+
+        # First pass: collect all files in extraction root
+        for item in extraction_dir.rglob("*"):
+            if item.is_file() and not item.is_symlink():
+                try:
+                    st = item.stat()
+                    # Files with nlink > 1 inside the extraction root are
+                    # suspect — hard links to something outside the root
+                    # could escape the sandbox
+                    inode_map[st.st_ino] = item
+                except OSError:
+                    continue
+
+        # Second pass: remove files whose real path is outside extraction root
+        for item in extraction_dir.rglob("*"):
+            if item.is_file() and not item.is_symlink():
+                try:
+                    resolved = item.resolve()
+                    resolved_str = str(resolved)
+                    if not resolved_str.startswith(root):
+                        logger.warning(
+                            "Removing unsafe hard link: %s -> %s (escapes extraction root)",
+                            item,
+                            resolved,
+                        )
+                        item.unlink()
+                        removed += 1
+                except OSError:
+                    # Unreadable file
+                    item.unlink()
+                    removed += 1
+
+        return removed
+
     def _classify_filesystem(self, description: str) -> str | None:
         """Classify filesystem type from binwalk description."""
         desc_lower = description.lower()
@@ -340,8 +394,9 @@ class FirmwareExtractor:
 
 def _fmt_size(n: int) -> str:
     """Format byte count as human-readable size."""
+    value = float(n)
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024  # type: ignore[assignment]
-    return f"{n:.1f} TB"
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"

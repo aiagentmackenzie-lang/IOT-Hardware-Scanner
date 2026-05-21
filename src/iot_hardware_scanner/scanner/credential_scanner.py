@@ -250,6 +250,14 @@ class CredentialScanner:
 
         # ── Layer 2: Regex scanning (skip for binary files) ──
         if not is_binary:
+            max_size = self.config.max_scan_file_size_mb * 1024 * 1024
+            if abs_path.stat().st_size > max_size:
+                logger.debug(
+                    "Skipping large file for credential scan: %s (%s)",
+                    abs_path,
+                    self._fmt_size(abs_path.stat().st_size),
+                )
+                return findings
             try:
                 content = abs_path.read_text(errors="ignore")
             except (OSError, PermissionError):
@@ -570,6 +578,15 @@ class CredentialScanner:
         if header[:4] in (_ELF_MAGIC, _MACHO_MAGIC, _MACHO_MAGIC_64):
             return True
         return header[:2] == _PE_MAGIC
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        """Format byte count as human-readable size."""
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+            n //= 1024
+        return f"{n:.1f} TB"
 
     @staticmethod
     def _context_deprioritize(lines: list[str], match_idx: int) -> bool:

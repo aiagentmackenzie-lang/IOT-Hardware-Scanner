@@ -144,17 +144,10 @@ class DomainScorer:
         # ── Signal: Benign domain whitelist ──
         benign = self._load_benign_domains()
         if domain in benign or self._domain_in_benign(domain, benign):
-            total += _SCORE_BENIGN
-            # Benign domains still get other signals checked, but negative is strong
-            # Early return for clean domains with no positive signals
-            remaining_score = self._score_positive_signals(
-                domain, context, check_threat_intel=False
-            )
-            if remaining_score == 0:
-                return max(total, 0.0)
-            # If there are positive signals too, combine them
-            total += remaining_score
-            return max(total, 0.0)
+            # Known-benign domain: immediately cap at 0 and return INFORMATIONAL.
+            # A false-positive threat intel match should never override a
+            # verified benign domain.
+            return 0.0
 
         # ── Positive signals ──
         total += self._score_positive_signals(domain, context, check_threat_intel=True)
@@ -249,6 +242,8 @@ class DomainScorer:
         - 8+ char subdomain with low vowel ratio (< 0.3)
         - Pure hex subdomain (8+ chars)
         - Excessive consonant clusters (4+ consecutive consonants)
+        - Excludes legitimate CDN subdomains by checking for common
+          CDN patterns (e.g., CloudFront has very long subdomains)
         """
         parts = domain.split(".")
         if len(parts) < 2:
@@ -258,6 +253,22 @@ class DomainScorer:
 
         # Skip very short subdomains
         if len(subdomain) < _DGA_MIN_SUBDOMAIN_LEN:
+            return False
+
+        # Skip legitimate CDN subdomains (very long but well-structured)
+        # CloudFront: dXXXXXXXXXXXX.cloudfront.net
+        # Fastly/other CDNs use long subdomains too
+        if len(parts) > 2 and any(
+            tld in domain.lower()
+            for tld in (
+                ".cloudfront.net",
+                ".akamaihd.net",
+                ".fastly.net",
+                ".cdn77.org",
+                ".edgekey.net",
+                ".akamaiedge.net",
+            )
+        ):
             return False
 
         # Check pure hex pattern

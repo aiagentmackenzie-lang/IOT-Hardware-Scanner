@@ -649,3 +649,67 @@ class TestControlsMeta:
     def test_ids_sequential(self) -> None:
         ids = [c[0] for c in CONTROLS]
         assert ids == list(range(1, 13))
+
+    def test_encrypted_data_at_rest_entropy_based(self, minimal_context: ScanContext) -> None:
+        """Control 4 uses entropy profile for encryption check, not just credentials."""
+        from iot_hardware_scanner.models import EntropyProfile, EntropyRegion
+        # Add encrypted regions to entropy profile
+        minimal_context.entropy_profile = EntropyProfile(
+            firmware_path=Path("/tmp/test.bin"),
+            total_blocks=10,
+            block_size=512,
+            regions=[
+                EntropyRegion(
+                    start_offset=0, end_offset=5120, size=5120,
+                    avg_entropy=0.95, classification="encrypted", confidence=0.8
+                )
+            ],
+            overall_entropy=0.85,
+            has_encrypted_regions=True,
+            has_compressed_regions=False,
+        )
+        scorer = RiskScorer(ScannerConfig())
+        score = scorer.score(minimal_context)
+        # Find control 4
+        ctrl4 = next(c for c in score.control_scores if c.control_id == 4)
+        # With encrypted regions and no plaintext creds, should be PASS
+        assert ctrl4.result == "PASS"
+        assert ctrl4.points == 10.0
+
+    def test_encrypted_data_rest_plaintext_weakens(self, minimal_context: ScanContext) -> None:
+        """Encrypted FS with plaintext creds gets PARTIAL, not FAIL."""
+        from iot_hardware_scanner.models import (
+            CredentialFinding,
+            EntropyProfile,
+            EntropyRegion,
+            Severity,
+        )
+        minimal_context.entropy_profile = EntropyProfile(
+            firmware_path=Path("/tmp/test.bin"),
+            total_blocks=10,
+            block_size=512,
+            regions=[
+                EntropyRegion(
+                    start_offset=0, end_offset=5120, size=5120,
+                    avg_entropy=0.95, classification="encrypted", confidence=0.8
+                )
+            ],
+            overall_entropy=0.85,
+            has_encrypted_regions=True,
+            has_compressed_regions=False,
+        )
+        minimal_context.credential_findings = [
+            CredentialFinding(
+                severity=Severity.CRITICAL,
+                category="password",
+                file_path=Path("etc/config.ini"),
+                matched_pattern="password = \"admin123\"",
+                raw_value_hash="abc",
+            )
+        ]
+        scorer = RiskScorer(ScannerConfig())
+        score = scorer.score(minimal_context)
+        ctrl4 = next(c for c in score.control_scores if c.control_id == 4)
+        # Encrypted but has plaintext creds -> PARTIAL, not FAIL
+        assert ctrl4.result == "PARTIAL"
+        assert ctrl4.points > 0

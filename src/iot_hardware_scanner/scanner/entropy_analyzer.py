@@ -114,17 +114,52 @@ class EntropyAnalyzer:
     def analyze_file(self, path: Path, block_size: int | None = None) -> EntropyProfile:
         """Analyze entropy of a file on disk.
 
-        Args:
-            path: Path to firmware binary.
-            block_size: Block size. None = auto-compute.
-
-        Returns:
-            EntropyProfile.
+        Uses memory-mapped I/O for large files to avoid OOM.
+        Files larger than max_entropy_scan_size_mb are sampled
+        at regular intervals instead of being fully loaded.
         """
-        data = path.read_bytes()
+        file_size = path.stat().st_size
+        max_bytes = self.config.max_entropy_scan_size_mb * 1024 * 1024
+
+        if file_size <= max_bytes:
+            data = path.read_bytes()
+        else:
+            # Memory-map and sample for large files
+            import mmap
+
+            logger.warning(
+                "Large file (%s): using mmap sampling instead of full load",
+                self._fmt_size(file_size),
+            )
+            data = bytearray()
+            with path.open("rb") as f:
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    # Sample first MB, last MB, and evenly-spaced chunks
+                    sample_size = min(max_bytes, file_size)
+                    if sample_size >= file_size:
+                        data = mm[:].tobytes()
+                    else:
+                        # First chunk
+                        data.extend(mm[: sample_size // 3])
+                        # Middle chunk
+                        mid_start = file_size // 2 - sample_size // 6
+                        data.extend(mm[mid_start : mid_start + sample_size // 3])
+                        # Last chunk
+                        data.extend(mm[-sample_size // 3 :])
+                        data = bytes(data)
+
         profile = self.analyze(data, block_size)
         profile.firmware_path = path
         return profile
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        """Format byte count as human-readable size."""
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n:.1f} {unit}"
+            n //= 1024  # Use integer division to avoid type: ignore
+        return f"{n:.1f} TB"
 
     def find_high_entropy_regions(
         self, profile: EntropyProfile, threshold: float = 0.85

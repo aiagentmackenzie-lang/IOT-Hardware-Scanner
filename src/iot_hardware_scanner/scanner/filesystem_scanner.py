@@ -131,6 +131,16 @@ SERVICE_BINARIES: set[str] = {
 HASH_SIZE_LIMIT = 10 * 1024 * 1024  # Only hash files < 10MB for speed
 
 
+def _fmt_size(n: int) -> str:
+    """Format byte count as human-readable size."""
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
 class FilesystemScanner:
     """Walk extracted filesystem and categorize files by security relevance.
 
@@ -305,7 +315,23 @@ class FilesystemScanner:
         services: list[str],
         findings: list[str],
     ) -> None:
-        """Check an init script for service startup commands."""
+        """Check an init script for service startup commands.
+
+        Skips files larger than max_scan_file_size_mb to avoid
+        reading large binaries mis-categorized as scripts.
+        """
+        max_size = self.config.max_scan_file_size_mb * 1024 * 1024
+        try:
+            st = script_path.stat()
+            if st.st_size > max_size:
+                logger.debug(
+                    "Skipping large file for service check: %s (%s)",
+                    script_path,
+                    _fmt_size(st.st_size),
+                )
+                return
+        except OSError:
+            return
         try:
             content = script_path.read_text(errors="replace").lower()
         except OSError:

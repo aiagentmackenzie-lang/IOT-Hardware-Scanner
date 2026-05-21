@@ -21,7 +21,7 @@ from iot_hardware_scanner.models import (
     FilesystemFinding,
     FilesystemInventory,
 )
-from iot_hardware_scanner.scanner.c2_detector import C2Detector
+from iot_hardware_scanner.scanner.c2_detector import C2Detector, _extract_domains_text, _extract_ips_text, _is_email_domain_text
 
 # ──────────────────────────────────────────────
 # Fixtures
@@ -473,7 +473,7 @@ class TestHelperMethods:
         """Domain extraction from text files works correctly."""
         f = tmp_path / "config.txt"
         f.write_text("server updates.example.com\napi api.vendor.org\n")
-        domains = C2Detector._extract_domains_from_file(f)
+        domains = _extract_domains_text(f)
         assert "updates.example.com" in domains
         assert "api.vendor.org" in domains
 
@@ -481,7 +481,7 @@ class TestHelperMethods:
         """Version-like strings (e.g., '2.0') are not extracted as domains."""
         f = tmp_path / "version.txt"
         f.write_text("version 2.0 and 1.5\n")
-        domains = C2Detector._extract_domains_from_file(f)
+        domains = _extract_domains_text(f)
         # "2.0" and "1.5" should not appear as domains
         assert "2.0" not in domains
         assert "1.5" not in domains
@@ -490,7 +490,7 @@ class TestHelperMethods:
         """IP extraction from text files works correctly."""
         f = tmp_path / "config.txt"
         f.write_text("server 192.168.1.1\npeer 10.0.0.5\nntp 203.0.113.50\n")
-        ips = C2Detector._extract_ips_from_file(f)
+        ips = _extract_ips_text(f)
         assert "192.168.1.1" in ips
         assert "10.0.0.5" in ips
         assert "203.0.113.50" in ips
@@ -499,13 +499,13 @@ class TestHelperMethods:
         """Invalid IP octets (>255) are filtered out."""
         f = tmp_path / "bad.txt"
         f.write_text("server 999.999.999.999\n")
-        ips = C2Detector._extract_ips_from_file(f)
+        ips = _extract_ips_text(f)
         assert "999.999.999.999" not in ips
 
     def test_extract_ips_missing_file(self, tmp_path: Path) -> None:
         """Missing files return empty set."""
         missing = tmp_path / "nonexistent"
-        ips = C2Detector._extract_ips_from_file(missing)
+        ips = _extract_ips_text(missing)
         assert ips == set()
 
     def test_get_mitre_techniques_mirai(self) -> None:
@@ -529,7 +529,7 @@ class TestHelperMethods:
         """Email-only domains are correctly identified."""
         f = tmp_path / "contact.txt"
         f.write_text("Contact: admin@example.com\n")
-        result = C2Detector._is_email_domain("example.com", f)
+        result = _is_email_domain_text("example.com", f)
         # example.com appears in email context only
         assert result is True
 
@@ -537,7 +537,7 @@ class TestHelperMethods:
         """Domains that appear standalone are not email-only."""
         f = tmp_path / "config.txt"
         f.write_text("server example.com\n")
-        result = C2Detector._is_email_domain("example.com", f)
+        result = _is_email_domain_text("example.com", f)
         assert result is False
 
     def test_macho_binary_detection(self, tmp_path: Path) -> None:

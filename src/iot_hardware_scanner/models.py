@@ -84,6 +84,7 @@ class ScanContext:
     firmware_name: str
     size_category: FirmwareSizeCategory
     started_at: datetime
+    completed_at: datetime | None = None
 
     # Populated by Phase 2
     extracted_rootfs: Path | None = None

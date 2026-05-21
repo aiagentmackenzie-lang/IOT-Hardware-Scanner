@@ -287,8 +287,27 @@ class RiskScorer:
     def _eval_encrypted_data_at_rest(
         self, context: ScanContext
     ) -> tuple[str, float, list[str], str]:
-        """Control 4: Encrypted data at rest (OWASP I7)."""
-        # Check for plaintext passwords and sensitive data
+        """Control 4: Encrypted data at rest (OWASP I7).
+
+        Evaluates whether sensitive data at rest is encrypted by checking:
+        1. Entropy profile — encrypted regions indicate data-at-rest encryption
+        2. Credential findings — plaintext credentials weaken even encrypted FS
+
+        An encrypted filesystem with hardcoded credentials still gets a PARTIAL
+        (not FAIL) because the encryption control is partially effective.
+        """
+        evidence: list[str] = []
+        has_encrypted_regions = False
+
+        # Check entropy profile for encrypted regions
+        if context.entropy_profile:
+            if context.entropy_profile.has_encrypted_regions:
+                has_encrypted_regions = True
+                evidence.append("Encrypted regions detected via entropy analysis")
+            else:
+                evidence.append("No encrypted regions detected via entropy analysis")
+
+        # Check for plaintext credentials (weaken even encrypted FS)
         plaintext_creds = [
             f
             for f in context.credential_findings
@@ -296,14 +315,24 @@ class RiskScorer:
             and not f.is_placeholder
             and f.category in ("password", "connection_string")
         ]
-
-        evidence: list[str] = []
         if plaintext_creds:
             evidence.append(
                 f"{len(plaintext_creds)} plaintext credential findings"
             )
 
-        if len(plaintext_creds) > 3:
+        if has_encrypted_regions and not plaintext_creds:
+            return "PASS", 10.0, evidence, ""
+
+        if has_encrypted_regions and plaintext_creds:
+            return (
+                "PARTIAL",
+                6.0,
+                evidence,
+                "Data at rest is encrypted but contains plaintext credentials. "
+                "Remove hardcoded credentials even with encrypted storage.",
+            )
+
+        if not has_encrypted_regions and len(plaintext_creds) > 3:
             return (
                 "FAIL",
                 0.0,
@@ -311,13 +340,15 @@ class RiskScorer:
                 "Encrypt sensitive data at rest. "
                 "Remove plaintext credentials from firmware.",
             )
+
         if plaintext_creds:
             return (
                 "PARTIAL",
-                5.0,
+                3.0,
                 evidence,
                 "Encrypt or hash remaining plaintext credentials.",
             )
+
         return "PASS", 10.0, [], ""
 
     def _eval_secure_update(

@@ -316,3 +316,28 @@ class TestEdgeCases:
             context={"in_hosts": True},
         )
         assert isinstance(score, float)
+
+    def test_benign_domain_returns_zero(self, scorer: DomainScorer) -> None:
+        """Known-benign domain returns score of 0, regardless of other signals."""
+        scorer._benign_domains = {"google.com", "github.com", "microsoft.com"}
+        score = scorer.score("google.com", context={"in_binary": True})
+        assert score == 0.0
+
+    def test_benign_domain_overrides_threat_intel(self, scorer: DomainScorer) -> None:
+        """Even if threat intel has a false-positive, benign override wins."""
+        from unittest.mock import patch
+        scorer._benign_domains = {"safe-company.com"}
+        with patch.object(scorer.threat_intel, 'check_domain', return_value={"tags": ["malware"]}):
+            score = scorer.score("safe-company.com")
+            assert score == 0.0
+
+    def test_dga_cdn_false_positive(self, scorer: DomainScorer) -> None:
+        """CDN subdomains like CloudFront are not flagged as DGA."""
+        assert scorer._is_dga("d3k7v8f5j2p1.cloudfront.net") is False
+        assert scorer._is_dga("a1b2c3d4.akamaihd.net") is False
+        assert scorer._is_dga("random.example.fastly.net") is False
+
+    def test_dga_still_detects_real_dga(self, scorer: DomainScorer) -> None:
+        """Real DGA domains are still detected."""
+        assert scorer._is_dga("f4b9c2d7e8a1.malware.top") is True
+        assert scorer._is_dga("bgfxjkmnprstv.malware.xyz") is True

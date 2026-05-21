@@ -35,6 +35,10 @@ class TestConfigDefaults:
         assert "json" in config.report_formats
         assert "markdown" in config.report_formats
         assert config.verbose is False
+        # New safety config fields
+        assert config.max_entropy_scan_size_mb == 256
+        assert config.max_scan_file_size_mb == 50
+        assert config.nvd_max_retries == 3
 
 
 class TestConfigValidation:

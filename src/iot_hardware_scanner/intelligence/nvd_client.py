@@ -101,7 +101,14 @@ class NVDClient:
             logger.warning("Cache write error: %s", exc)
 
     def _make_request(self, url: str) -> dict | None:
-        """Make an HTTP GET request to the NVD API."""
+        """Make an HTTP GET request to the NVD API.
+
+        Returns:
+            Response dict on success, None on failure.
+
+        May raise NVDClientError on persistent failures to allow
+        upstream callers to distinguish "API down" from "no results".
+        """
         if self.config.offline_mode:
             logger.info("NVD query skipped (offline mode): %s", url)
             return None
@@ -110,25 +117,40 @@ class NVDClient:
         if self.config.nvd_api_key:
             headers["apiKey"] = self.config.nvd_api_key
 
-        req = Request(url, headers=headers)
-        try:
-            self._rate_limit()
-            with urlopen(req, timeout=30) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    return data  # type: ignore[no-any-return]
-                else:
-                    logger.warning("NVD API returned status %d", resp.status)
-                    return None
-        except HTTPError as exc:
-            logger.warning("NVD API HTTP error: %s %s", exc.code, exc.reason)
-            return None
-        except URLError as exc:
-            logger.warning("NVD API URL error: %s", exc)
-            return None
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("NVD API request error: %s", exc)
-            return None
+        last_error: str | None = None
+        for attempt in range(self.config.nvd_max_retries + 1):
+            if attempt > 0:
+                delay = min(2 ** attempt, 30)  # Exponential backoff: 2, 4, 8, ... max 30s
+                logger.info("NVD retry attempt %d/%d in %.1fs", attempt, self.config.nvd_max_retries, delay)
+                time.sleep(delay)
+
+            req = Request(url, headers=headers)
+            try:
+                self._rate_limit()
+                with urlopen(req, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        return data  # type: ignore[no-any-return]
+                    else:
+                        logger.warning("NVD API returned status %d", resp.status)
+                        return None
+            except HTTPError as exc:
+                status_code = getattr(exc, 'code', None)
+                last_error = f"HTTP {status_code}: {exc.reason}"
+                logger.warning("NVD API HTTP error: %s", last_error)
+                if status_code in (429, 503):
+                    continue  # Retryable
+                return None
+            except URLError as exc:
+                last_error = f"URL error: {exc}"
+                logger.warning("NVD API URL error: %s", exc)
+                continue  # Retryable (network)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("NVD API request error: %s", exc)
+                return None
+
+        logger.warning("NVD API request failed after %d retries: %s", self.config.nvd_max_retries, last_error)
+        return None
 
     def _parse_cve_results(self, data: dict) -> list[dict]:
         """Parse NVD API response into simplified CVE records."""

@@ -10,6 +10,7 @@ SDR §5 — Architecture Overview
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
@@ -80,6 +81,7 @@ class Orchestrator:
             context = self._phase_risk(context)
             context = self._phase_report(context)
 
+        context.completed_at = datetime.now(timezone.utc)
         return context
 
     # ──────────────────────────────────────────
@@ -185,8 +187,7 @@ class Orchestrator:
             from iot_hardware_scanner.scanner.entropy_analyzer import EntropyAnalyzer
 
             analyzer = EntropyAnalyzer(self.config)
-            data = context.firmware_path.read_bytes()
-            profile = analyzer.analyze(data)
+            profile = analyzer.analyze_file(context.firmware_path)
             context.entropy_profile = profile
             console.print(f"  [green]✓[/green] Overall entropy: {profile.overall_entropy:.4f}")
             if profile.has_encrypted_regions:

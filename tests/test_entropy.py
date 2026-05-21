@@ -262,3 +262,30 @@ class TestEntropyProfileStructure:
             assert 0.0 <= block.entropy <= 8.0
         for region in profile.regions:
             assert 0.0 <= region.avg_entropy <= 8.0
+
+    def test_analyze_file_uses_mmap_for_large_files(self, tmp_path: Path) -> None:
+        """Large files above max_entropy_scan_size_mb use mmap sampling instead of full read."""
+        from iot_hardware_scanner.scanner.entropy_analyzer import EntropyAnalyzer
+        config = ScannerConfig(max_entropy_scan_size_mb=1)  # 1MB limit
+        analyzer = EntropyAnalyzer(config)
+        # Create a 2MB file (exceeds 1MB limit)
+        f = tmp_path / "large_firmware.bin"
+        data = os.urandom(2 * 1024 * 1024)
+        f.write_bytes(data)
+        profile = analyzer.analyze_file(f)
+        assert profile.total_blocks > 0
+        assert profile.firmware_path == f
+        # Should still produce valid entropy values
+        assert 0.0 <= profile.overall_entropy <= 8.0
+
+    def test_analyze_file_small_file_reads_fully(self, tmp_path: Path) -> None:
+        """Small files below the limit are read fully (not sampled)."""
+        from iot_hardware_scanner.scanner.entropy_analyzer import EntropyAnalyzer
+        config = ScannerConfig(max_entropy_scan_size_mb=256)
+        analyzer = EntropyAnalyzer(config)
+        f = tmp_path / "small.bin"
+        data = b"\x00" * 1024 + b"\xff" * 1024  # 2KB mixed
+        f.write_bytes(data)
+        profile = analyzer.analyze_file(f)
+        assert profile.total_blocks > 0
+        assert profile.firmware_path == f

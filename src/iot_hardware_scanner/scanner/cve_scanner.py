@@ -76,6 +76,8 @@ class CVEScanner:
         2. If no results, try keyword-based query
         3. Cross-reference KEV catalog
         4. Map CVSS scores to severity levels
+
+        Returns empty list on API failure with warning logged.
         """
         findings: list[CVEFinding] = []
 
@@ -89,7 +91,7 @@ class CVEScanner:
         if cpe:
             raw_results = self._nvd.query_cpe(cpe)
 
-        # Strategy 2: Keyword fallback
+        # Strategy 2: Keyword fallback (when CPE is unavailable or returns no results)
         if not raw_results:
             keyword = f"{component.product} {component.version}"
             raw_results = self._nvd.query_keyword(keyword)

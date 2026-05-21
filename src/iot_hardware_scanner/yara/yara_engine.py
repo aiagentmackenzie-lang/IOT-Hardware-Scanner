@@ -9,6 +9,7 @@ Compiles them for fast matching. Scans files and raw data.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -73,24 +74,16 @@ class YaraEngine:
         for d in dirs:
             if d.exists() and d.is_dir():
                 for yar_file in sorted(d.rglob("*.yar")):
-                    # Skip the meta-rule file that uses include directives
-                    try:
-                        first_line = (
-                            yar_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
-                            if yar_file.exists()
-                            else ""
-                        )
-                    except OSError:
-                        first_line = ""
-                    if first_line.strip().startswith("//") and "include" in first_line:
-                        logger.debug("Skipping include-based meta-rule: %s", yar_file)
-                        continue
-                    # Also skip if any line starts with 'include '
                     try:
                         content = yar_file.read_text(encoding="utf-8", errors="ignore")
                     except OSError:
                         continue
-                    if any(line.strip().startswith("include ") for line in content.splitlines()):
+
+                    # Skip meta-rule files containing YARA include directives
+                    # Use regex to only match actual 'include' statements, not
+                    # comments/strings containing the word "include"
+                    _include_stmt = re.compile(r'^\s*include\s+')
+                    if any(_include_stmt.match(line) for line in content.splitlines()):
                         logger.debug("Skipping include-based meta-rule: %s", yar_file)
                         continue
 
