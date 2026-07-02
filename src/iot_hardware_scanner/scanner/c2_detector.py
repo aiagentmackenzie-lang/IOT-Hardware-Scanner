@@ -359,7 +359,11 @@ class C2Detector:
         max_size = self.config.max_scan_file_size_mb * 1024 * 1024
         try:
             if path.stat().st_size > max_size:
-                logger.debug("Skipping large file for domain extraction: %s (%s)", path, _fmt_size(path.stat().st_size))
+                logger.debug(
+                    "Skipping large file for domain extraction: %s (%s)",
+                    path,
+                    _fmt_size(path.stat().st_size),
+                )
                 return set()
         except OSError:
             return set()
@@ -374,7 +378,11 @@ class C2Detector:
         max_size = self.config.max_scan_file_size_mb * 1024 * 1024
         try:
             if path.stat().st_size > max_size:
-                logger.debug("Skipping large file for IP extraction: %s (%s)", path, _fmt_size(path.stat().st_size))
+                logger.debug(
+                    "Skipping large file for IP extraction: %s (%s)",
+                    path,
+                    _fmt_size(path.stat().st_size),
+                )
                 return set()
         except OSError:
             return set()

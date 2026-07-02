@@ -609,7 +609,10 @@ class TestSummary:
         ]
         result = scorer.score(minimal_context)
         # Some controls default to PARTIAL when unverifiable
-        assert "All controls passed" in result.executive_summary or "Partial" in result.executive_summary
+        assert (
+            "All controls passed" in result.executive_summary
+            or "Partial" in result.executive_summary
+        )
 
     def test_failed_controls_in_summary(
         self, scorer: RiskScorer, minimal_context: ScanContext

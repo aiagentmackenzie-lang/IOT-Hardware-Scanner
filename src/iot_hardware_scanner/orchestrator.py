@@ -141,11 +141,15 @@ class Orchestrator:
         console.print("[bold]═══ Phase 2b: Filesystem ═══[/bold]")
         if context.extracted_rootfs and context.extracted_rootfs.exists():
             try:
-                from iot_hardware_scanner.scanner.filesystem_scanner import FilesystemScanner
                 from iot_hardware_scanner.models import FileCategory, FilesystemInventory
+                from iot_hardware_scanner.scanner.filesystem_scanner import FilesystemScanner
 
                 scanner = FilesystemScanner(self.config)
-                root_filesystems = context.extraction_result.root_filesystems if context.extraction_result else [context.extracted_rootfs]
+                root_filesystems = (
+                    context.extraction_result.root_filesystems
+                    if context.extraction_result
+                    else [context.extracted_rootfs]
+                )
 
                 merged = FilesystemInventory(
                     rootfs_path=context.extracted_rootfs,

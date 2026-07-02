@@ -87,8 +87,9 @@ class TestCLIScanCommand:
     def test_scan_exit_code_likely_c2(self) -> None:
         """LIKELY_C2 findings trigger exit code 1."""
         from unittest.mock import patch
-        from iot_hardware_scanner.orchestrator import Orchestrator
+
         from iot_hardware_scanner.models import C2Finding
+        from iot_hardware_scanner.orchestrator import Orchestrator
 
         runner = CliRunner()
         with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
@@ -96,8 +97,9 @@ class TestCLIScanCommand:
             path = f.name
 
         def fake_run(_self, firmware_path):
-            from iot_hardware_scanner.models import ScanContext, FirmwareSizeCategory
             from datetime import datetime, timezone
+
+            from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
             ctx = ScanContext(
                 scan_id="test",
                 firmware_path=firmware_path,

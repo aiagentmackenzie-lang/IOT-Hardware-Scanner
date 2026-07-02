@@ -120,6 +120,7 @@ class EntropyAnalyzer:
         """
         file_size = path.stat().st_size
         max_bytes = self.config.max_entropy_scan_size_mb * 1024 * 1024
+        data: bytes
 
         if file_size <= max_bytes:
             data = path.read_bytes()
@@ -131,22 +132,25 @@ class EntropyAnalyzer:
                 "Large file (%s): using mmap sampling instead of full load",
                 self._fmt_size(file_size),
             )
-            data = bytearray()
-            with path.open("rb") as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                    # Sample first MB, last MB, and evenly-spaced chunks
-                    sample_size = min(max_bytes, file_size)
-                    if sample_size >= file_size:
-                        data = mm[:].tobytes()
-                    else:
-                        # First chunk
-                        data.extend(mm[: sample_size // 3])
-                        # Middle chunk
-                        mid_start = file_size // 2 - sample_size // 6
-                        data.extend(mm[mid_start : mid_start + sample_size // 3])
-                        # Last chunk
-                        data.extend(mm[-sample_size // 3 :])
-                        data = bytes(data)
+            sample_data = bytearray()
+            with path.open("rb") as f, mmap.mmap(
+                f.fileno(), 0, access=mmap.ACCESS_READ
+            ) as mm:
+                # Sample first MB, last MB, and evenly-spaced chunks
+                sample_size = min(max_bytes, file_size)
+                if sample_size >= file_size:
+                    data = bytes(mm[:])
+                else:
+                    # First chunk
+                    sample_data.extend(mm[: sample_size // 3])
+                    # Middle chunk
+                    mid_start = file_size // 2 - sample_size // 6
+                    sample_data.extend(
+                        mm[mid_start : mid_start + sample_size // 3]
+                    )
+                    # Last chunk
+                    sample_data.extend(mm[-sample_size // 3 :])
+                    data = bytes(sample_data)
 
         profile = self.analyze(data, block_size)
         profile.firmware_path = path

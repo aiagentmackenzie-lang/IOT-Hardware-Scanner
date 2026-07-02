@@ -18,10 +18,9 @@ import click
 from rich.console import Console
 
 from iot_hardware_scanner import __version__
-from iot_hardware_scanner.models import Severity
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.exceptions import ScannerError
-from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
+from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext, Severity
 
 console = Console()
 

@@ -56,13 +56,19 @@ class ScannerConfig:
     )
     max_entropy_scan_size_mb: int = Field(
         default=256,
-        description="Max firmware file size in MB for full entropy analysis. Larger files get sampled/streamed.",
+        description=(
+            "Max firmware file size in MB for full entropy analysis. "
+            "Larger files get sampled/streamed."
+        ),
         ge=1,
         le=4096,
     )
     max_scan_file_size_mb: int = Field(
         default=50,
-        description="Max size in MB for full-text file scanning (credentials, C2). Larger files are skipped.",
+        description=(
+            "Max size in MB for full-text file scanning (credentials, C2). "
+            "Larger files are skipped."
+        ),
         ge=1,
         le=1024,
     )

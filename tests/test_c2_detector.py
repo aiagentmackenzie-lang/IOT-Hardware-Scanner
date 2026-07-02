@@ -21,7 +21,12 @@ from iot_hardware_scanner.models import (
     FilesystemFinding,
     FilesystemInventory,
 )
-from iot_hardware_scanner.scanner.c2_detector import C2Detector, _extract_domains_text, _extract_ips_text, _is_email_domain_text
+from iot_hardware_scanner.scanner.c2_detector import (
+    C2Detector,
+    _extract_domains_text,
+    _extract_ips_text,
+    _is_email_domain_text,
+)
 
 # ──────────────────────────────────────────────
 # Fixtures

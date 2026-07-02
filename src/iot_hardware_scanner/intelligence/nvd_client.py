@@ -121,7 +121,12 @@ class NVDClient:
         for attempt in range(self.config.nvd_max_retries + 1):
             if attempt > 0:
                 delay = min(2 ** attempt, 30)  # Exponential backoff: 2, 4, 8, ... max 30s
-                logger.info("NVD retry attempt %d/%d in %.1fs", attempt, self.config.nvd_max_retries, delay)
+                logger.info(
+                    "NVD retry attempt %d/%d in %.1fs",
+                    attempt,
+                    self.config.nvd_max_retries,
+                    delay,
+                )
                 time.sleep(delay)
 
             req = Request(url, headers=headers)
@@ -149,7 +154,11 @@ class NVDClient:
                 logger.warning("NVD API request error: %s", exc)
                 return None
 
-        logger.warning("NVD API request failed after %d retries: %s", self.config.nvd_max_retries, last_error)
+        logger.warning(
+            "NVD API request failed after %d retries: %s",
+            self.config.nvd_max_retries,
+            last_error,
+        )
         return None
 
     def _parse_cve_results(self, data: dict) -> list[dict]:
