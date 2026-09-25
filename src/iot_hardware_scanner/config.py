@@ -172,7 +172,10 @@ class ScannerConfig:
 
             data = yaml.safe_load(text)
         elif path.suffix == ".toml":
-            import tomllib
+            try:
+                import tomllib
+            except ModuleNotFoundError:  # Python 3.10 — stdlib tomllib is 3.11+
+                import tomli as tomllib
 
             data = tomllib.loads(text)
         else:
