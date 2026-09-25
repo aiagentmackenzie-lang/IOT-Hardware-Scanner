@@ -344,8 +344,12 @@ class TestGetFileType:
         assert "ELF" in ft
 
     def test_pe_magic_bytes(self, bi: BinaryIntelligence, tmp_path: Path) -> None:
+        # Minimal-but-real PE: MZ header with e_lfanew pointing at the
+        # PE\0\0 signature — a bare MZ stub is reported as "MS-DOS" by
+        # older libmagic databases (version-dependent string).
+        pe = b"MZ" + b"\x00" * 0x3A + (0x40).to_bytes(4, "little") + b"PE\x00\x00" + b"\x00" * 64
         f = tmp_path / "test.exe"
-        f.write_bytes(b"MZ" + b"\x00" * 100)
+        f.write_bytes(pe)
         ft = bi._get_file_type(f)
         assert "PE" in ft
 
