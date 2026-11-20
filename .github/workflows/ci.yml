@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref instead of queueing them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -101,7 +111,10 @@ jobs:
       - name: Acceptance harness against the installed console script
         env:
           IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
-        run: pytest tests/test_installed_cli.py -v
+        run: |
+          # The repository's conftest imports the package, so pytest must run
+          # under the interpreter that has it installed -- not the job default.
+          /tmp/ihs-venv/bin/python -m pytest tests/test_installed_cli.py -v
 
       - name: Blank-image contract
         run: |
@@ -143,13 +156,14 @@ jobs:
                  tests/test_cli.py -v
 
   # ---------------------------------------------------------------------------
-  # Reference-image job. Runs only when a checksum-verified OpenWrt image has
-  # been staged as a workflow artefact or cache; the suite never downloads it.
+  # Reference-image job. Fetches the pinned image in its own step, verifies the
+  # publisher digest, and only then scans it -- the scan itself stays offline.
+  # Set the repository variable IHS_REFERENCE_IMAGE_ENABLED=false to skip.
   # ---------------------------------------------------------------------------
   reference-image:
     name: OpenWrt reference image (backend absent)
     runs-on: ubuntu-latest
-    if: vars.IHS_REFERENCE_IMAGE_ENABLED == 'true'
+    if: vars.IHS_REFERENCE_IMAGE_ENABLED != 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
