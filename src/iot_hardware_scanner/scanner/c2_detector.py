@@ -90,75 +90,88 @@ class C2Detector:
     # ──────────────────────────────────────────
 
     def detect_domains(self, inventory: FilesystemInventory) -> list[C2Finding]:
-        """Extract and score domains from firmware for C2 indicators.
+        """Extract domains from the inventory and derive one decision per indicator.
 
-        Scans text-readable files, extracts domains via regex,
-        scores each with DomainScorer, cross-references threat intel.
+        Occurrences are collected **first**, then each occurrence is scored in
+        its own context, and a single documented aggregate is applied. The
+        previous implementation deduplicated by domain before scoring, so the
+        first file seen decided the verdict and reversing enumeration order
+        flipped a domain between SUSPICIOUS and LIKELY_C2.
+
+        Aggregate rule: an indicator takes the **highest** score of any of its
+        occurrences. One occurrence inside a binary is not made safer by the
+        same string also appearing in a config file. The reported location is
+        the highest-scoring occurrence, ties broken by path, so the finding is
+        byte-for-byte stable for a given inventory.
         """
-        findings: list[C2Finding] = []
-        seen_hashes: set[str] = set()
+        occurrences: dict[str, list[tuple[Path, dict]]] = {}
 
-        for ff in inventory.findings:
+        for ff in sorted(inventory.findings, key=lambda f: str(f.path)):
             if self._is_benign_path(ff.path):
                 continue
             if self._is_binary_file(ff.absolute_path):
-                # Still check binary files — domains can be embedded
-                # But mark context as in_binary=True
-                domains = self._extract_domains_from_file(ff.absolute_path)
-                context = {"in_binary": True, "file_path": str(ff.path)}
+                context: dict = {"in_binary": True, "in_hosts": False}
             else:
-                # Check if file is a config/hosts file
-                is_hosts = self._is_hosts_or_config(ff.path)
-                domains = self._extract_domains_from_file(ff.absolute_path)
                 context = {
                     "in_binary": False,
-                    "in_hosts": is_hosts,
-                    "file_path": str(ff.path),
+                    "in_hosts": self._is_hosts_or_config(ff.path),
                 }
-
-            for domain in domains:
-                # Skip email local parts
+            for domain in sorted(self._extract_domains_from_file(ff.absolute_path)):
                 if self._is_email_domain(domain, ff.absolute_path):
                     continue
+                occurrences.setdefault(domain.lower(), []).append((ff.path, context))
 
-                raw_hash = hashlib.sha256(domain.encode()).hexdigest()
-                if raw_hash in seen_hashes:
-                    continue
-                seen_hashes.add(raw_hash)
+        findings = self._aggregate_domains(occurrences)
+        logger.info(
+            "C2 domain detection: %d indicators from %d occurrence(s)",
+            len(findings),
+            sum(len(v) for v in occurrences.values()),
+        )
+        return findings
 
-                score = self._domain_scorer.score(domain, context)
-                classification = self._domain_scorer.classify(score)
+    def _aggregate_domains(
+        self, occurrences: dict[str, list[tuple[Path, dict]]]
+    ) -> list[C2Finding]:
+        """Apply the documented aggregate once, deterministically."""
+        findings: list[C2Finding] = []
 
-                if classification == "INFORMATIONAL":
-                    continue
+        for domain in sorted(occurrences):
+            scored = [
+                (self._domain_scorer.score(domain, context), path, context)
+                for path, context in occurrences[domain]
+            ]
+            best_score = max(score for score, _path, _ctx in scored)
+            classification = self._domain_scorer.classify(best_score)
+            if classification == "INFORMATIONAL":
+                continue
 
-                # Build score breakdown
-                breakdown = self._domain_score_breakdown(domain, context)
+            _score, best_path, best_context = sorted(
+                scored, key=lambda item: (-item[0], str(item[1]))
+            )[0]
+            intel = self._threat_intel.check_domain(domain)
+            threat_desc = None
+            if intel:
+                tags = intel.get("tags", [])
+                threat_desc = f"Threat intel: {', '.join(tags)}" if tags else "Threat intel match"
 
-                # Get threat intel match description
-                intel = self._threat_intel.check_domain(domain)
-                threat_desc = None
-                if intel:
-                    tags = intel.get("tags", [])
-                    if tags:
-                        threat_desc = f"Threat intel: {', '.join(tags)}"
-                    else:
-                        threat_desc = "Threat intel match"
-
-                findings.append(
-                    C2Finding(
-                        severity=classification,
-                        indicator_type="domain",
-                        value=domain,
-                        file_path=ff.path,
-                        suspicion_score=score,
-                        score_breakdown=breakdown,
-                        threat_intel_match=threat_desc,
-                        description=(f"Domain scored {score:.0f}: {classification}"),
-                    )
+            locations = sorted({str(path) for path, _ctx in occurrences[domain]})
+            findings.append(
+                C2Finding(
+                    severity=classification,
+                    indicator_type="domain",
+                    value=domain,
+                    file_path=best_path,
+                    suspicion_score=best_score,
+                    score_breakdown=self._domain_score_breakdown(domain, best_context),
+                    threat_intel_match=threat_desc,
+                    description=(
+                        f"Domain scored {best_score:.0f}: {classification} "
+                        f"across {len(locations)} occurrence(s)"
+                    ),
+                    occurrences=locations,
                 )
+            )
 
-        logger.info("C2 domain detection: %d findings", len(findings))
         return findings
 
     # ──────────────────────────────────────────
@@ -166,67 +179,58 @@ class C2Detector:
     # ──────────────────────────────────────────
 
     def detect_ips(self, inventory: FilesystemInventory) -> list[C2Finding]:
-        """Extract and score IP addresses for malicious indicators.
+        """Extract public IP addresses and decide once per indicator."""
+        occurrences: dict[str, list[Path]] = {}
 
-        Filters private/local ranges, cross-references threat intel.
-        """
-        findings: list[C2Finding] = []
-        seen_hashes: set[str] = set()
-
-        for ff in inventory.findings:
+        for ff in sorted(inventory.findings, key=lambda f: str(f.path)):
             if self._is_benign_path(ff.path):
                 continue
-
-            ips = self._extract_ips_from_file(ff.absolute_path)
-            for ip_str in ips:
+            for ip_str in sorted(self._extract_ips_from_file(ff.absolute_path)):
                 if self._is_private_or_reserved(ip_str):
                     continue
+                occurrences.setdefault(ip_str, []).append(ff.path)
 
-                raw_hash = hashlib.sha256(ip_str.encode()).hexdigest()
-                if raw_hash in seen_hashes:
-                    continue
-                seen_hashes.add(raw_hash)
+        findings: list[C2Finding] = []
+        for ip_str in sorted(occurrences):
+            score = 0.0
+            breakdown: dict[str, float] = {}
+            threat_desc = None
 
-                score = 0.0
-                breakdown: dict[str, float] = {}
-                threat_desc = None
+            intel = self._threat_intel.check_ip(ip_str)
+            if intel:
+                score += _IP_THREAT_INTEL_SCORE
+                breakdown["threat_intel"] = _IP_THREAT_INTEL_SCORE
+                tags = intel.get("tags", [])
+                threat_desc = f"Threat intel: {', '.join(tags)}" if tags else "Threat intel match"
 
-                # Check threat intel
-                intel = self._threat_intel.check_ip(ip_str)
-                if intel:
-                    score += _IP_THREAT_INTEL_SCORE
-                    breakdown["threat_intel"] = _IP_THREAT_INTEL_SCORE
-                    tags = intel.get("tags", [])
-                    if tags:
-                        threat_desc = f"Threat intel: {', '.join(tags)}"
-                    else:
-                        threat_desc = "Threat intel match"
+            if self._is_suspicious_ip_range(ip_str):
+                score += _IP_SUSPICIOUS_RANGE_SCORE
+                breakdown["suspicious_range"] = _IP_SUSPICIOUS_RANGE_SCORE
 
-                # Check if IP is in suspicious ranges (Tor exits, known bad ranges)
-                if self._is_suspicious_ip_range(ip_str):
-                    score += _IP_SUSPICIOUS_RANGE_SCORE
-                    breakdown["suspicious_range"] = _IP_SUSPICIOUS_RANGE_SCORE
+            if score >= self.config.c2_likely_threshold:
+                classification = "LIKELY_C2"
+            elif score >= self.config.c2_suspicion_threshold:
+                classification = "SUSPICIOUS"
+            else:
+                continue
 
-                # Classify
-                if score >= self.config.c2_likely_threshold:
-                    classification = "LIKELY_C2"
-                elif score >= self.config.c2_suspicion_threshold:
-                    classification = "SUSPICIOUS"
-                else:
-                    continue  # Skip informational IPs
-
-                findings.append(
-                    C2Finding(
-                        severity=classification,
-                        indicator_type="ip",
-                        value=ip_str,
-                        file_path=ff.path,
-                        suspicion_score=score,
-                        score_breakdown=breakdown,
-                        threat_intel_match=threat_desc,
-                        description=f"IP scored {score:.0f}: {classification}",
-                    )
+            locations = sorted({str(p) for p in occurrences[ip_str]})
+            findings.append(
+                C2Finding(
+                    severity=classification,
+                    indicator_type="ip",
+                    value=ip_str,
+                    file_path=sorted(occurrences[ip_str], key=str)[0],
+                    suspicion_score=score,
+                    score_breakdown=breakdown,
+                    threat_intel_match=threat_desc,
+                    description=(
+                        f"IP scored {score:.0f}: {classification} "
+                        f"across {len(locations)} occurrence(s)"
+                    ),
+                    occurrences=locations,
                 )
+            )
 
         logger.info("C2 IP detection: %d findings", len(findings))
         return findings
@@ -314,6 +318,111 @@ class C2Detector:
                     )
 
         logger.info("Malware signature detection: %d findings", len(findings))
+        return findings
+
+    def detect_artifact(self, artifact: Path) -> list[C2Finding]:
+        """Scan a whole artifact as one unit, for input with no enumeration.
+
+        The artifact is bounded by ``max_scan_file_size_mb``; a larger artifact
+        is truncated at that boundary and the truncation is reported in the
+        finding description rather than silently analysed in full.
+        """
+        findings: list[C2Finding] = []
+        if artifact.is_dir() or not artifact.is_file():
+            return findings
+
+        limit = self.config.max_scan_file_size_mb * 1024 * 1024
+        size = artifact.stat().st_size
+        try:
+            with artifact.open("rb") as handle:
+                data = handle.read(limit)
+        except (OSError, PermissionError) as exc:
+            logger.warning("Cannot read artifact for indicator sweep: %s", exc)
+            return findings
+
+        truncated = size > limit
+        text = data.decode("latin-1", errors="ignore")
+        context = {"in_binary": True, "in_hosts": False}
+
+        domains: set[str] = set()
+        for url in _URL_RE.findall(text):
+            host = url.split("://", 1)[-1].split("/")[0].split(":")[0]
+            if _DOMAIN_RE.match(host):
+                domains.add(host.lower())
+        domains |= {d.lower() for d in _DOMAIN_RE.findall(text)}
+        domains = {d for d in domains if not all(p.isdigit() for p in d.split("."))}
+
+        occurrences: dict[str, list[tuple[Path, dict]]] = {
+            domain: [(Path(artifact.name), context)] for domain in sorted(domains)
+        }
+        findings.extend(self._aggregate_domains(occurrences))
+
+        for ip_str in sorted(set(_IP_RE.findall(text))):
+            if not all(0 <= int(octet) <= 255 for octet in ip_str.split(".")):
+                continue
+            if self._is_private_or_reserved(ip_str):
+                continue
+            score = 0.0
+            breakdown: dict[str, float] = {}
+            intel = self._threat_intel.check_ip(ip_str)
+            if intel:
+                score += _IP_THREAT_INTEL_SCORE
+                breakdown["threat_intel"] = _IP_THREAT_INTEL_SCORE
+            if self._is_suspicious_ip_range(ip_str):
+                score += _IP_SUSPICIOUS_RANGE_SCORE
+                breakdown["suspicious_range"] = _IP_SUSPICIOUS_RANGE_SCORE
+            if score >= self.config.c2_likely_threshold:
+                classification = "LIKELY_C2"
+            elif score >= self.config.c2_suspicion_threshold:
+                classification = "SUSPICIOUS"
+            else:
+                continue
+            findings.append(
+                C2Finding(
+                    severity=classification,
+                    indicator_type="ip",
+                    value=ip_str,
+                    file_path=Path(artifact.name),
+                    suspicion_score=score,
+                    score_breakdown=breakdown,
+                    description=f"IP scored {score:.0f}: {classification} in artifact",
+                )
+            )
+
+        yara_engine = self._init_yara()
+        if yara_engine.is_available:
+            for match in yara_engine.scan_data(data, module_name=artifact.name):
+                yara_category = match.meta.get("category", "")
+                if yara_category not in ("malware_signature", "backdoor_service"):
+                    continue
+                indicator_type = (
+                    "backdoor_service"
+                    if yara_category == "backdoor_service"
+                    else "malware_signature"
+                )
+                severe = match.meta.get("severity", "HIGH").upper() in ("CRITICAL", "HIGH")
+                findings.append(
+                    C2Finding(
+                        severity="LIKELY_C2" if severe else "SUSPICIOUS",
+                        indicator_type=indicator_type,
+                        value=f"{match.rule_name}:{artifact.name}",
+                        file_path=Path(artifact.name),
+                        suspicion_score=80.0 if severe else 50.0,
+                        score_breakdown={"yara_match": 80.0 if severe else 50.0},
+                        mitre_attack=self._get_mitre_techniques(
+                            match.meta.get("family", "").lower(), indicator_type
+                        ),
+                        description=match.meta.get("description", match.rule_name),
+                    )
+                )
+
+        if truncated:
+            for finding in findings:
+                finding.description += f" (artifact truncated at {limit:,} bytes of {size:,})"
+            logger.warning(
+                "Indicator sweep read the first %s of %s", _fmt_size(limit), _fmt_size(size)
+            )
+
         return findings
 
     # ──────────────────────────────────────────

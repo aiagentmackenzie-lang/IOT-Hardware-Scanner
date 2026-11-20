@@ -21,12 +21,15 @@ from iot_hardware_scanner.models import (
     CredentialFinding,
     FileCategory,
     FilesystemInventory,
-    PasswdEntry,
     Severity,
-    ShadowEntry,
     YaraMatch,
 )
-from iot_hardware_scanner.scanner.unix_cred_parser import UnixCredentialParser
+from iot_hardware_scanner.scanner.unix_cred_parser import (
+    STATE_EMPTY,
+    AccountRecord,
+    UnixCredentialParser,
+    discover_account_databases,
+)
 from iot_hardware_scanner.yara.yara_engine import YaraEngine
 
 logger = logging.getLogger(__name__)
@@ -129,6 +132,23 @@ for _pat, _cat, _sev in [
     _REGEX_PATTERNS.append((re.compile(_pat, re.IGNORECASE), _cat, _sev, False))
 
 
+def _rel_label(path: Path | None, root_id: str) -> str:
+    """Locate a record inside the root it came from.
+
+    The root name qualifies the path so two roots that both contain
+    ``etc/shadow`` produce two distinguishable locations, and a second
+    extraction of the same image cannot silently overwrite the first one's
+    evidence.
+    """
+    if path is None:
+        return f"{Path(root_id).name or '<root>'}/etc/shadow"
+    try:
+        relative = path.relative_to(root_id)
+    except ValueError:
+        return str(path)
+    return f"{Path(root_id).name or '<root>'}/{relative}"
+
+
 class CredentialScanner:
     """Detect hardcoded credentials and secrets in firmware files.
 
@@ -146,6 +166,8 @@ class CredentialScanner:
         self._yara_engine: YaraEngine | None = None
         self._default_creds: list[dict] = []
         self._default_creds_loaded = False
+        #: Number of passwd/shadow pairs parsed by the last unix account scan.
+        self.last_account_pairs: int = 0
 
     def _init_yara(self) -> YaraEngine:
         """Lazy-init the YARA engine and load rules."""
@@ -159,14 +181,12 @@ class CredentialScanner:
         if self._default_creds_loaded:
             return self._default_creds
 
-        creds_path = (
-            Path(__file__).parent.parent.parent.parent / "data" / "default_credentials.json"
-        )
+        from iot_hardware_scanner import resources
+
         try:
-            if creds_path.exists():
-                data = json.loads(creds_path.read_text(encoding="utf-8"))
-                self._default_creds = data.get("credentials", [])
-        except (OSError, json.JSONDecodeError) as exc:
+            data = json.loads(resources.read_text("default_credentials.json"))
+            self._default_creds = data.get("credentials", [])
+        except (OSError, json.JSONDecodeError, RuntimeError) as exc:
             logger.warning("Cannot load default credentials: %s", exc)
             self._default_creds = []
 
@@ -206,8 +226,8 @@ class CredentialScanner:
                         seen_hashes.add(f.raw_value_hash)
                     findings.append(f)
 
-        # Unix credential parsing
-        unix_findings = self._unix_findings(inventory)
+        # Unix credential parsing (account records are joined, not guessed)
+        unix_findings = self.scan_unix_accounts(inventory)
         for f in unix_findings:
             h = f.raw_value_hash
             if h and h in seen_hashes:
@@ -321,7 +341,7 @@ class CredentialScanner:
                         line_number=line_num,
                         matched_pattern=pattern.pattern[:80],
                         raw_value=raw,
-                        context=line.strip()[:128],
+                        context=self._redact(line, raw),
                         is_default=is_default,
                         is_placeholder=False,
                     )
@@ -333,55 +353,179 @@ class CredentialScanner:
     # Unix Credential Integration
     # ──────────────────────────────────────────
 
-    def _unix_findings(self, inventory: FilesystemInventory) -> list[CredentialFinding]:
-        """Parse /etc/passwd and /etc/shadow from inventory."""
-        findings: list[CredentialFinding] = []
+    def scan_unix_accounts(
+        self,
+        inventory: FilesystemInventory | None,
+        root: Path | None = None,
+    ) -> list[CredentialFinding]:
+        """Join passwd/shadow per root and username, then type the evidence.
+
+        Every root that contains ``etc/passwd`` is handled independently: two
+        roots with the same path produce two sets of account records.
+
+        Returns:
+            Findings for accounts whose *observed* state warrants one. A locked
+            password is not one of those states.
+        """
         parser = UnixCredentialParser()
+        findings: list[CredentialFinding] = []
+        pairs = 0
 
-        # Find passwd/shadow files in CRITICAL_CREDENTIAL category
-        cred_files = inventory.categories.get(FileCategory.CRITICAL_CREDENTIAL, [])
-        shadow_findings = getattr(inventory, "shadow_files", [])
+        roots: list[tuple[str, Path, Path | None]] = []
+        if inventory is not None:
+            seen: set[Path] = set()
+            for ff in inventory.findings:
+                if ff.path.name != "passwd" or str(ff.path.parent) != "etc":
+                    continue
+                root_dir = ff.absolute_path.parent.parent
+                if root_dir in seen:
+                    continue
+                seen.add(root_dir)
+                shadow = root_dir / "etc" / "shadow"
+                roots.append((str(root_dir), ff.absolute_path, shadow if shadow.exists() else None))
+        elif root is not None and root.is_dir():
+            for passwd, shadow_opt in discover_account_databases(root):
+                roots.append((str(passwd.parent.parent), passwd, shadow_opt))
 
-        passwd_path: Path | None = None
-        shadow_path: Path | None = None
+        for root_id, passwd_path, shadow_path in roots:
+            records = parser.join(
+                passwd_path,
+                shadow_path,
+                root_id=root_id,
+                passwd_label=_rel_label(passwd_path, root_id),
+                shadow_label=_rel_label(shadow_path, root_id) if shadow_path else None,
+            )
+            if records:
+                pairs += 1
+            for record in records:
+                findings.extend(self._account_to_findings(record))
 
-        for ff in cred_files:
-            if ff.path.name == "passwd" and "etc" in str(ff.path):
-                passwd_path = ff.absolute_path
-            elif ff.path.name == "shadow" and "etc" in str(ff.path):
-                shadow_path = ff.absolute_path
+        self.last_account_pairs = pairs
+        return findings
 
-        # Also check the shadow_files index
-        if not shadow_path:
-            for ff in shadow_findings:
-                if ff.path.name == "shadow":
-                    shadow_path = ff.absolute_path
-                    break
+    def _account_to_findings(self, record: AccountRecord) -> list[CredentialFinding]:
+        """Convert one joined account record into zero or more findings.
 
-        if passwd_path and passwd_path.exists():
-            passwd_entries = parser.parse_passwd(passwd_path)
-            for passwd_entry in passwd_entries:
-                finding = self._passwd_entry_to_finding(passwd_entry, passwd_path)
-                if finding:
-                    findings.append(finding)
+        Rules, in descending confidence:
 
-        if shadow_path and shadow_path.exists():
-            shadow_entries = parser.parse_shadow(shadow_path)
-            for shadow_entry in shadow_entries:
-                finding = self._shadow_entry_to_finding(shadow_entry, shadow_path)
-                if finding:
-                    findings.append(finding)
+        ``credential.unix.empty_password``
+            A blank password field on an account that can log in. Critical.
+        ``credential.unix.uid0_account``
+            An additional UID 0 account, reviewed separately from root's own
+            password state.
+        ``credential.unix.md5_hash``
+            A stored MD5 password hash.
+        """
+        findings: list[CredentialFinding] = []
+        locations = f"{record.passwd_source}:{record.passwd_line}"
+        if record.shadow_source and record.shadow_line:
+            locations += f" and {record.shadow_source}:{record.shadow_line}"
+
+        if record.password_state == STATE_EMPTY and record.is_login_shell:
+            description = (
+                f"{record.username} (UID {record.uid}) has an empty password field "
+                f"and a login shell ({record.shell})"
+            )
+            findings.append(
+                self._make_finding(
+                    severity=Severity.CRITICAL,
+                    category="password",
+                    file_path=Path(record.shadow_source or record.passwd_source),
+                    line_number=record.shadow_line or record.passwd_line,
+                    matched_pattern="credential.unix.empty_password",
+                    raw_value=description,
+                    context=f"{description} — {locations}",
+                ).with_rule_id("credential.unix.empty_password")
+            )
+
+        # Root's own privilege is expected. A *second* UID 0 account is not.
+        if record.is_root and record.username != "root":
+            description = (
+                f"Additional UID 0 account: {record.username} "
+                f"(shell {record.shell}, password state {record.password_state})"
+            )
+            findings.append(
+                self._make_finding(
+                    severity=Severity.MEDIUM,
+                    category="account",
+                    file_path=Path(record.passwd_source),
+                    line_number=record.passwd_line,
+                    matched_pattern="credential.unix.uid0_account",
+                    raw_value=description,
+                    context=f"{description} — {locations}",
+                ).with_rule_id("credential.unix.uid0_account")
+            )
+
+        if record.hash_algorithm == "MD5":
+            description = f"{record.username} stores an MD5 password hash"
+            findings.append(
+                self._make_finding(
+                    severity=Severity.HIGH,
+                    category="password",
+                    file_path=Path(record.shadow_source or record.passwd_source),
+                    line_number=record.shadow_line or record.passwd_line,
+                    matched_pattern="credential.unix.md5_hash",
+                    raw_value=description,
+                    context=f"{description} — {locations}",
+                ).with_rule_id("credential.unix.md5_hash")
+            )
 
         return findings
+
+    def scan_artifact(self, artifact: Path, input_kind: object = None) -> list[CredentialFinding]:
+        """Scan a whole artifact as one unit when no inventory exists.
+
+        For a single image the artifact is the file. For a staged tree every
+        regular file is scanned. Either way the scanned unit is recorded, so a
+        zero result means "this population was inspected", not "nothing ran".
+        """
+        findings: list[CredentialFinding] = []
+        if artifact.is_dir():
+            for entry in sorted(artifact.rglob("*")):
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                rel = entry.relative_to(artifact)
+                findings.extend(self.scan_file(entry, rel, self._category_for(rel, entry)))
+        else:
+            findings.extend(self.scan_file(artifact, Path(artifact.name), None))
+        return findings
+
+    @staticmethod
+    def _category_for(rel: Path, entry: Path) -> FileCategory | None:
+        """Best-effort category for a staged-tree file (mirrors the scanner)."""
+        name = rel.name.lower()
+        if name in {"passwd", "shadow", "gshadow"}:
+            return FileCategory.CRITICAL_CREDENTIAL
+        if name in {"inittab", "rc.local"} or rel.suffix.lower() in {".conf", ".cfg", ".ini"}:
+            return FileCategory.CRITICAL_CONFIG
+        if rel.suffix.lower() in {".pem", ".crt", ".p12", ".pfx", ".cer", ".key"}:
+            return FileCategory.HIGH_CRYPTO
+        if rel.suffix.lower() in {".db", ".sqlite", ".sql"}:
+            return FileCategory.HIGH_DATABASE
+        return None
 
     # ──────────────────────────────────────────
     # YARA match conversion
     # ──────────────────────────────────────────
 
+    #: YARA categories this scanner owns. Service, malware and crypto matches
+    #: belong to their own detectors and must not be relabelled as credentials.
+    _CREDENTIAL_YARA_CATEGORIES = frozenset(
+        {"credential", "password", "api_key", "private_key", "token", "connection_string"}
+    )
+
     def _yara_match_to_finding(self, ym: YaraMatch, rel_path: Path) -> CredentialFinding | None:
-        """Convert a YaraMatch to a CredentialFinding."""
+        """Convert a credential YARA match; ignore rules owned elsewhere."""
         meta = ym.meta
         category = meta.get("category", "password")
+        if category not in self._CREDENTIAL_YARA_CATEGORIES:
+            logger.debug(
+                "Ignoring %s match from %s: category %s belongs to another detector",
+                ym.rule_name,
+                rel_path,
+                category,
+            )
+            return None
         severity_str = meta.get("severity", "HIGH").upper()
         severity = Severity(severity_str) if severity_str in Severity.__members__ else Severity.HIGH
         description = meta.get("description", ym.rule_name)
@@ -411,79 +555,7 @@ class CredentialScanner:
             context=description[:128],
             is_default=False,
             is_placeholder=False,
-        )
-
-    # ──────────────────────────────────────────
-    # Unix entry conversion
-    # ──────────────────────────────────────────
-
-    def _passwd_entry_to_finding(
-        self, entry: PasswdEntry, abs_path: Path
-    ) -> CredentialFinding | None:
-        """Convert a PasswdEntry to a CredentialFinding if security-relevant."""
-        # Only flag entries that are security-relevant
-        if not entry.is_root_equivalent and not entry.has_login_shell and entry.has_password_field:
-            return None
-
-        if entry.is_root_equivalent:
-            severity = Severity.CRITICAL
-            desc = f"Root-equivalent user: {entry.username} (UID={entry.uid})"
-        elif entry.has_login_shell:
-            severity = Severity.MEDIUM
-            desc = f"Login shell user: {entry.username} (shell={entry.shell})"
-        elif not entry.has_password_field:
-            severity = Severity.HIGH
-            desc = f"User without password field: {entry.username}"
-        else:
-            return None
-
-        rel_path = Path("etc") / "passwd"
-        raw_hash = hashlib.sha256(desc.encode()).hexdigest()
-
-        return CredentialFinding(
-            severity=severity,
-            category="password",
-            file_path=rel_path,
-            line_number=None,
-            matched_pattern="unix_passwd_parse",
-            masked_value=f"{entry.username}:***",
-            raw_value_hash=raw_hash,
-            context=desc[:128],
-            is_default=False,
-            is_placeholder=False,
-        )
-
-    def _shadow_entry_to_finding(
-        self, entry: ShadowEntry, abs_path: Path
-    ) -> CredentialFinding | None:
-        """Convert a ShadowEntry to a CredentialFinding if security-relevant."""
-        if entry.is_locked or entry.severity == Severity.INFO:
-            return None
-
-        rel_path = Path("etc") / "shadow"
-        algo_label = entry.hash_algorithm or "unknown"
-        desc = f"{entry.username}: {algo_label} hash"
-
-        if entry.is_empty:
-            desc = f"{entry.username}: NO PASSWORD SET"
-        elif entry.hash_algorithm == "MD5":
-            desc = f"{entry.username}: weak MD5 hash"
-
-        raw_hash = hashlib.sha256(desc.encode()).hexdigest()
-
-        masked_value = f"${algo_label.lower()}$***" if algo_label != "unknown" else "***"
-
-        return CredentialFinding(
-            severity=entry.severity,
-            category="password",
-            file_path=rel_path,
-            line_number=None,
-            matched_pattern="unix_shadow_parse",
-            masked_value=f"{entry.username}:{masked_value}",
-            raw_value_hash=raw_hash,
-            context=desc[:128],
-            is_default=False,
-            is_placeholder=False,
+            rule_id=f"credential.yara.{ym.rule_name}",
         )
 
     # ──────────────────────────────────────────
@@ -517,6 +589,7 @@ class CredentialScanner:
             context=context,
             is_default=is_default,
             is_placeholder=is_placeholder,
+            rule_id=f"credential.regex.{category}",
         )
 
     # ──────────────────────────────────────────
@@ -550,6 +623,18 @@ class CredentialScanner:
                 entropy -= p * math.log2(p)
 
         return entropy
+
+    @staticmethod
+    def _redact(line: str, raw_value: str) -> str:
+        """Return the source line with the matched secret replaced.
+
+        The context is useful for locating a finding and must never carry the
+        value itself into a report, a log or a CI artefact.
+        """
+        masked = "*" * 8
+        if raw_value:
+            line = line.replace(raw_value, masked)
+        return line.strip()[:128]
 
     @staticmethod
     def _is_placeholder(value: str) -> bool:

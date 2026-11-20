@@ -12,12 +12,10 @@ import json
 import logging
 from pathlib import Path
 
+from iot_hardware_scanner import resources
 from iot_hardware_scanner.config import ScannerConfig
 
 logger = logging.getLogger(__name__)
-
-# Default data directory (project root / data)
-_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 
 
 class ThreatIntelManager:
@@ -39,14 +37,14 @@ class ThreatIntelManager:
         Returns total number of indicators loaded.
         """
         dirs: list[Path] = list(self.config.threat_intel_dirs)
-        # Always include project data directory
-        if _DATA_DIR not in dirs:
-            dirs.append(_DATA_DIR)
 
         total = 0
+        # Bundled indicators always load; they are labelled as a sample in the
+        # report unless the operator supplies a current feed instead.
+        for path in sorted(resources.data_dir().glob("*.jsonl")):
+            total += self._load_jsonl(path)
         for d in dirs:
-            count = self._load_directory(d)
-            total += count
+            total += self._load_directory(d)
 
         self._loaded = True
         logger.info(

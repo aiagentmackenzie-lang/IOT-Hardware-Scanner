@@ -120,7 +120,7 @@ class NVDClient:
         last_error: str | None = None
         for attempt in range(self.config.nvd_max_retries + 1):
             if attempt > 0:
-                delay = min(2 ** attempt, 30)  # Exponential backoff: 2, 4, 8, ... max 30s
+                delay = min(2**attempt, 30)  # Exponential backoff: 2, 4, 8, ... max 30s
                 logger.info(
                     "NVD retry attempt %d/%d in %.1fs",
                     attempt,
@@ -140,7 +140,7 @@ class NVDClient:
                         logger.warning("NVD API returned status %d", resp.status)
                         return None
             except HTTPError as exc:
-                status_code = getattr(exc, 'code', None)
+                status_code = getattr(exc, "code", None)
                 last_error = f"HTTP {status_code}: {exc.reason}"
                 logger.warning("NVD API HTTP error: %s", last_error)
                 if status_code in (429, 503):

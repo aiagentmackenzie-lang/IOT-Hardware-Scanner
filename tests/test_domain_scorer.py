@@ -326,8 +326,9 @@ class TestEdgeCases:
     def test_benign_domain_overrides_threat_intel(self, scorer: DomainScorer) -> None:
         """Even if threat intel has a false-positive, benign override wins."""
         from unittest.mock import patch
+
         scorer._benign_domains = {"safe-company.com"}
-        with patch.object(scorer.threat_intel, 'check_domain', return_value={"tags": ["malware"]}):
+        with patch.object(scorer.threat_intel, "check_domain", return_value={"tags": ["malware"]}):
             score = scorer.score("safe-company.com")
             assert score == 0.0
 

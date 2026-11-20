@@ -6,10 +6,16 @@ All values have sensible defaults — zero-config operation works out of the box
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
+
+#: Environment variable prefix for every setting.
+ENV_PREFIX = "IOT_HARDWARE_SCANNER_"
 
 
 @dataclass
@@ -103,8 +109,11 @@ class ScannerConfig:
         le=30,
     )
     offline_mode: bool = Field(
-        default=False,
-        description="Disable all network requests (NVD, threat intel)",
+        default=True,
+        description=(
+            "Disable all network requests (NVD, threat intel). Default true: a "
+            "scan never reaches the network unless the operator asks it to."
+        ),
     )
 
     # ── C2 Detector ──
@@ -163,12 +172,77 @@ class ScannerConfig:
             )
         return self
 
+    # ── Precedence: explicit CLI > environment > config file > defaults ──
+
+    @classmethod
+    def field_names(cls) -> set[str]:
+        """Every configurable field name."""
+        return set(cls.__dataclass_fields__)
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+        """Read ``IOT_HARDWARE_SCANNER_<FIELD>`` variables into a dict.
+
+        Values are coerced using the field's declared default type, so
+        ``..._OFFLINE_MODE=false`` becomes ``False`` and
+        ``..._MAX_FILE_SIZE_MB=64`` becomes ``64``.
+        """
+        environ = os.environ if environ is None else environ
+        values: dict[str, Any] = {}
+        known = cls.field_names()
+        for key, raw in environ.items():
+            if not key.startswith(ENV_PREFIX):
+                continue
+            name = key[len(ENV_PREFIX) :].lower()
+            if name not in known:
+                continue
+            values[name] = _coerce(name, raw)
+        return values
+
+    @classmethod
+    def resolve(
+        cls,
+        config_file: Path | None = None,
+        environ: Mapping[str, str] | None = None,
+        cli_overrides: Mapping[str, Any] | None = None,
+    ) -> ScanConfigAlias:
+        """Build a config from all four layers, in precedence order."""
+        values: dict[str, Any] = {}
+        values.update(cls.from_env(environ))
+        values.update(cls._file_values(config_file, environ))
+        values.update({k: v for k, v in (cli_overrides or {}).items() if v is not None})
+        return cls(**values)
+
+    @classmethod
+    def _file_values(
+        cls, config_file: Path | None, environ: Mapping[str, str] | None
+    ) -> dict[str, Any]:
+        """Values from the config file, located by argument or environment."""
+        environ = os.environ if environ is None else environ
+        path = config_file
+        if path is None:
+            from_env_path = environ.get(f"{ENV_PREFIX}CONFIG")
+            path = Path(from_env_path) if from_env_path else None
+        if path is None:
+            return {}
+        if not path.exists():
+            raise ValueError(f"config file not found: {path}")
+        loaded = cls.from_file(path)
+        return {name: getattr(loaded, name) for name in cls.field_names()}
+
     @classmethod
     def from_file(cls, path: Path) -> ScannerConfig:
         """Load configuration from a YAML or TOML file."""
         text = path.read_text(encoding="utf-8")
         if path.suffix in (".yaml", ".yml"):
-            import yaml
+            try:
+                import yaml
+            except ModuleNotFoundError as exc:  # pragma: no cover - optional extra
+                raise ValueError(
+                    "YAML config files need the yaml_support extra: "
+                    "pip install 'iot-hardware-scanner[yaml_support]' "
+                    "(or use a .toml file)"
+                ) from exc
 
             data = yaml.safe_load(text)
         elif path.suffix == ".toml":
@@ -180,4 +254,36 @@ class ScannerConfig:
             data = tomllib.loads(text)
         else:
             raise ValueError(f"Unsupported config format: {path.suffix}. Use .yaml or .toml")
-        return cls(**(data or {}))
+        if not isinstance(data, dict):
+            raise ValueError(f"config file must contain a mapping: {path}")
+        unknown = sorted(set(data) - cls.field_names())
+        if unknown:
+            raise ValueError(
+                f"unknown setting(s) in {path}: {', '.join(unknown)}. "
+                f"Valid settings: {', '.join(sorted(cls.field_names()))}"
+            )
+        return cls(**data)
+
+
+#: Self-reference alias that keeps ``from __future__ import annotations`` happy.
+ScanConfigAlias = ScannerConfig
+
+
+def _coerce(field_name: str, raw: str) -> Any:
+    """Coerce a string environment value using the field's default type."""
+    default = ScannerConfig.__dataclass_fields__[field_name].default
+    if isinstance(default, bool):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(default, int) and not isinstance(default, bool):
+        return int(raw)
+    if isinstance(default, float):
+        return float(raw)
+    if isinstance(default, Path):
+        return Path(raw)
+    if field_name.endswith("_dirs") or isinstance(default, list):
+        return [Path(part) if "dirs" in field_name else part for part in raw.split(",") if part]
+    if field_name == "log_file":
+        return Path(raw)
+    if field_name == "nvd_api_key":
+        return raw
+    return raw

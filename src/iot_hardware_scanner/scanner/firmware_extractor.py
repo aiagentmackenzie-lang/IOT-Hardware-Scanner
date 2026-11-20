@@ -133,9 +133,7 @@ class FirmwareExtractor:
             if self.config.extraction_depth > 1:
                 extract_kwargs["matryoshka"] = True
                 extract_kwargs["depth"] = self.config.extraction_depth
-            results = pybinwalk.extract(
-                str(firmware_path), str(extraction_dir), **extract_kwargs
-            )
+            results = pybinwalk.extract(str(firmware_path), str(extraction_dir), **extract_kwargs)
             for r in results or []:
                 signatures.append(
                     SignatureResult(

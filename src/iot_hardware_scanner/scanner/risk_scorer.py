@@ -1,9 +1,21 @@
-"""Risk Scorer — Phase 7a.
+"""Named security checks — one question at a time, with its evidence status.
 
-Evaluates 12 security controls and computes a numerical risk score
-based on findings from all prior scan phases.
+The 12 control names are kept for continuity with earlier reports, but the
+aggregate 0-100 grade is retired: there is no calibrated relationship between
+the old weights and real device risk, and several of the questions cannot be
+answered from a static image at all.
 
-SDR §13.1 — Risk Scoring Model
+Rules this module enforces:
+
+* No check returns PASS without positive evidence. Missing evidence yields
+  INCONCLUSIVE, NOT_APPLICABLE or OMITTED with a reason — never a silent pass.
+* An entropy measurement never establishes encryption, readability or a pass.
+* A binary being present is not a service being configured or listening.
+* A locked password field describes one authentication method, not the
+  absence of every way to log in.
+
+Legacy ``ControlScore``/``RiskScore`` objects are only ever produced when
+replaying a v1 report that already contains them.
 """
 
 from __future__ import annotations
@@ -13,33 +25,34 @@ from typing import ClassVar
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import (
-    ControlScore,
-    RiskLevel,
-    RiskScore,
+    CheckStatus,
+    ControlResult,
     ScanContext,
+    Severity,
+    StageId,
+    StageStatus,
 )
 
 logger = logging.getLogger(__name__)
 
-# ── SDR §13.1 — 12 security controls ──
-# (control_id, control_name, max_points)
-CONTROLS: list[tuple[int, str, float]] = [
-    (1, "No default/hardcoded credentials", 10),
-    (2, "No unnecessary network services", 10),
-    (3, "No outdated/vulnerable components", 10),
-    (4, "Encrypted data at rest", 10),
-    (5, "Secure firmware update mechanism", 10),
-    (6, "Secure boot/integrity verification", 8),
-    (7, "No backdoor interfaces", 10),
-    (8, "Strong cryptography used", 8),
-    (9, "Minimal attack surface", 8),
-    (10, "Binary hardening present", 8),
-    (11, "No C2/malware indicators", 5),
-    (12, "Accurate component inventory (SBOM)", 3),
+# ── Control names, kept stable for continuity ──
+CONTROLS: list[tuple[int, str]] = [
+    (1, "No default/hardcoded credentials"),
+    (2, "No unnecessary network services"),
+    (3, "No outdated/vulnerable components"),
+    (4, "Encrypted data at rest"),
+    (5, "Secure firmware update mechanism"),
+    (6, "Secure boot/integrity verification"),
+    (7, "No backdoor interfaces"),
+    (8, "Strong cryptography used"),
+    (9, "Minimal attack surface"),
+    (10, "Binary hardening present"),
+    (11, "No C2/malware indicators"),
+    (12, "Accurate component inventory (SBOM)"),
 ]
 
-# ── OWASP IoT Top 10 mapping ──
-_OWASP_IOT_MAP: dict[str, list[int]] = {
+#: OWASP IoT Top 10 mapping. Values are the control ids that inform each item.
+OWASP_IOT_MAP: dict[str, list[int]] = {
     "I1 - Weak/Default Passwords": [1],
     "I2 - Insecure Network Services": [2, 9],
     "I3 - Insecure Ecosystem Interfaces": [5, 12],
@@ -52,698 +65,536 @@ _OWASP_IOT_MAP: dict[str, list[int]] = {
     "I10 - Lack of Physical Hardening": [6],
 }
 
+#: Programs whose configured startup is a genuine exposure concern.
+DANGEROUS_SERVICES = frozenset({"telnetd", "ftpd", "rshd", "rlogind", "tftpd"})
 
-class RiskScorer:
-    """Compute numerical risk score from all findings.
 
-    Each control is evaluated independently:
-    - PASS (full points): No findings for this control
-    - PARTIAL (50% points): Some findings, mitigated
-    - FAIL (0 points): Findings indicate control is absent
-
-    Total possible: 100 points → mapped to LOW/MEDIUM/HIGH/CRITICAL
-    """
+class ControlEvaluator:
+    """Evaluate each control independently and record why it reached a verdict."""
 
     def __init__(self, config: ScannerConfig) -> None:
         self.config = config
 
-    def score(self, context: ScanContext) -> RiskScore:
-        """Compute risk score from all scan findings."""
-        control_scores: list[ControlScore] = []
-        total = 0.0
-        max_total = sum(c[2] for c in CONTROLS)
+    #: Controls a profile actually asks about. Everything else is reported as
+    #: not applicable rather than quietly "omitted", so a narrow run cannot be
+    #: read as a broad one.
+    PROFILE_CONTROLS: ClassVar[dict[str, frozenset[int]]] = {
+        "firmware-static": frozenset(range(1, 13)),
+        "credentials-only": frozenset({1}),
+    }
 
-        for ctrl_id, ctrl_name, max_pts in CONTROLS:
-            result, points, evidence, remediation = self._evaluate_control(
-                ctrl_id, context
-            )
-            control_scores.append(
-                ControlScore(
-                    control_id=ctrl_id,
-                    control_name=ctrl_name,
-                    result=result,
-                    points=points,
-                    max_points=max_pts,
-                    evidence=evidence,
-                    remediation=remediation,
+    def evaluate(
+        self, context: ScanContext, advisory_assessed: bool = False
+    ) -> list[ControlResult]:
+        """Return one :class:`ControlResult` per control, in stable id order."""
+        in_scope = self.PROFILE_CONTROLS.get(context.profile, frozenset(range(1, 13)))
+        results: list[ControlResult] = []
+        for control_id, name in CONTROLS:
+            if control_id not in in_scope:
+                results.append(
+                    ControlResult(
+                        control_id=control_id,
+                        control_name=name,
+                        status=CheckStatus.NOT_APPLICABLE,
+                        result="NOT_APPLICABLE",
+                        evidence=[
+                            f"not part of the {context.profile} profile; "
+                            "select another profile to assess it"
+                        ],
+                    )
                 )
+                continue
+            method = getattr(self, self._EVALUATORS[control_id])
+            result = method(context, advisory_assessed)
+            result.control_id = control_id
+            result.control_name = name
+            results.append(result)
+        return results
+
+    # ── Control 1: credentials ──
+    def _eval_credentials(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        findings = context.credential_findings
+        if not findings:
+            if not _stage_completed(context, StageId.CREDENTIAL_SCAN):
+                return _omitted(
+                    "Credential scanning did not run to completion",
+                    "Run the credential stage or supply a scanned artifact.",
+                    StageId.CREDENTIAL_SCAN,
+                )
+            return ControlResult(
+                control_id=1,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="PASS",
+                evidence=["Credential scan completed with no findings"],
+                source_stage=StageId.CREDENTIAL_SCAN,
             )
-            total += points
 
-        # Determine risk level (SDR §13.1)
-        if total >= 90:
-            level = RiskLevel.LOW
-        elif total >= 70:
-            level = RiskLevel.MEDIUM
-        elif total >= 50:
-            level = RiskLevel.HIGH
-        else:
-            level = RiskLevel.CRITICAL
-
-        # Weighted breakdown
-        breakdown = self._compute_breakdown(control_scores)
-
-        # Executive summary
-        failed = [c.control_name for c in control_scores if c.result == "FAIL"]
-        partial = [c.control_name for c in control_scores if c.result == "PARTIAL"]
-        summary = f"Risk Score: {total:.0f}/{max_total:.0f} ({level.value}). "
-        if failed:
-            summary += f"Failed controls: {', '.join(failed)}. "
-        if partial:
-            summary += f"Partial: {', '.join(partial)}. "
-        if not failed and not partial:
-            summary += "All controls passed."
-
-        # OWASP IoT Top 10 mapping
-        owasp_mapping = self._compute_owasp_mapping(control_scores)
-
-        return RiskScore(
-            total_score=total,
-            risk_level=level,
-            control_scores=control_scores,
-            weighted_breakdown=breakdown,
-            executive_summary=summary,
-            owasp_iot_mapping=owasp_mapping,
-        )
-
-    # ──────────────────────────────────────────
-    # Control evaluation
-    # ──────────────────────────────────────────
-
-    def _evaluate_control(
-        self, ctrl_id: int, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Evaluate a single security control.
-
-        Returns:
-            (result, points, evidence, remediation)
-        """
-        evaluator = self._EVALUATORS.get(ctrl_id)
-        if evaluator:
-            method = getattr(self, evaluator)
-            result: tuple[str, float, list[str], str] = method(context)
-            return result
-        # Unknown control → PASS with max points
-        max_pts = next((c[2] for c in CONTROLS if c[0] == ctrl_id), 10)
-        return "PASS", max_pts, [], ""
-
-    def _eval_no_default_credentials(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 1: No default/hardcoded credentials (OWASP I1)."""
-        if not context.credential_findings:
-            return "PASS", 10.0, [], ""
-
-        critical = sum(
-            1 for f in context.credential_findings if f.severity.value == "CRITICAL"
-        )
-        high = sum(
-            1 for f in context.credential_findings if f.severity.value == "HIGH"
-        )
-        medium = sum(
-            1 for f in context.credential_findings if f.severity.value == "MEDIUM"
-        )
-
-        evidence: list[str] = []
+        critical = sum(1 for f in findings if f.severity is Severity.CRITICAL)
+        high = sum(1 for f in findings if f.severity is Severity.HIGH)
+        evidence = []
         if critical:
-            evidence.append(f"{critical} CRITICAL credential findings")
+            evidence.append(f"{critical} CRITICAL credential finding(s)")
         if high:
-            evidence.append(f"{high} HIGH credential findings")
-        if medium:
-            evidence.append(f"{medium} MEDIUM credential findings")
+            evidence.append(f"{high} HIGH credential finding(s)")
+        evidence.append(f"{len(findings)} credential finding(s) in total")
 
-        if critical > 0:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Remove all hardcoded and default credentials. "
-                "Implement proper credential management.",
-            )
-        if high > 0:
-            return (
-                "PARTIAL",
-                5.0,
-                evidence,
-                "Review and remove high-severity credential exposures.",
-            )
-        # Only medium/low → partial
-        return (
-            "PARTIAL",
-            7.0,
-            evidence,
-            "Review remaining credential findings for hardening.",
+        return ControlResult(
+            control_id=1,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="FAIL" if critical else "REVIEW",
+            evidence=evidence,
+            remediation=(
+                "Remove hardcoded and default credentials from the image; "
+                "provision secrets at manufacture or first boot."
+            ),
+            source_stage=StageId.CREDENTIAL_SCAN,
         )
 
-    def _eval_no_unnecessary_services(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 2: No unnecessary network services (OWASP I2)."""
-        inv = context.filesystem_inventory
-        if not inv:
-            return "PASS", 10.0, [], ""
-
-        network_svcs = inv.network_services
-        init_scripts = inv.init_scripts
-
-        # Check for dangerous services: telnet, ftp, rsh
-        dangerous_found: list[str] = []
-        for svc in network_svcs:
-            name_lower = str(svc.path).lower()
-            if any(d in name_lower for d in ("telnet", "ftp", "rsh", "rlogin")):
-                dangerous_found.append(str(svc.path))
-
-        evidence: list[str] = []
-        if dangerous_found:
-            evidence.append(f"Dangerous services: {', '.join(dangerous_found[:5])}")
-        if network_svcs:
-            evidence.append(f"{len(network_svcs)} network services detected")
-        if init_scripts:
-            evidence.append(f"{len(init_scripts)} init scripts")
-
-        if dangerous_found:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Remove insecure services (telnetd, ftpd, rshd). "
-                "Use SSH with key-based auth instead.",
+    # ── Control 2: network services ──
+    def _eval_services(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        inventory = context.filesystem_inventory
+        if inventory is None:
+            return _omitted(
+                "No filesystem inventory — no startup directives could be read",
+                "Extract the root filesystem and re-run the service check.",
+                StageId.SERVICE_ANALYSIS,
             )
-        if len(network_svcs) > 10:
-            return (
-                "PARTIAL",
-                5.0,
-                evidence,
-                "Reduce network attack surface by disabling "
-                "unnecessary services.",
-            )
-        return "PASS", 10.0, evidence, ""
 
-    def _eval_no_outdated_components(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 3: No outdated/vulnerable components (OWASP I5)."""
+        configured = [e for e in inventory.boot_evidence if e.configured]
+        if configured:
+            names = sorted({_program_name(e.program) for e in configured})
+            dangerous = sorted(set(names) & DANGEROUS_SERVICES)
+            evidence = [f"{e.source}:{e.line_number} — {e.action} {e.program}" for e in configured]
+            if dangerous:
+                return ControlResult(
+                    control_id=2,
+                    control_name="",
+                    status=CheckStatus.PERFORMED,
+                    result="FAIL",
+                    evidence=[
+                        f"Configured insecure service(s): {', '.join(dangerous)}",
+                        *evidence,
+                    ],
+                    remediation=(
+                        "Remove telnet/ftp/rsh startup entries; use SSH with key authentication."
+                    ),
+                    source_stage=StageId.SERVICE_ANALYSIS,
+                )
+            return ControlResult(
+                control_id=2,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="REVIEW",
+                evidence=[
+                    *evidence,
+                    "A configured startup entry is not a listening socket; "
+                    "exposed services require device evidence.",
+                ],
+                remediation=(
+                    "Confirm on the device which configured services actually "
+                    "listen, and on which interfaces."
+                ),
+                source_stage=StageId.SERVICE_ANALYSIS,
+            )
+
+        return ControlResult(
+            control_id=2,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="PASS",
+            evidence=[
+                "No startup directive configuring a network service was found in "
+                "the enumerated boot paths"
+            ],
+            source_stage=StageId.SERVICE_ANALYSIS,
+        )
+
+    # ── Control 3: outdated components ──
+    def _eval_components(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        if not advisory_assessed:
+            return _omitted(
+                "No advisory snapshot was applied — applicability was not assessed",
+                "Supply a local intelligence snapshot and request advisory assessment.",
+                StageId.ADVISORY,
+            )
         if not context.cve_findings:
-            return "PASS", 10.0, [], ""
-
-        critical_cves = sum(
-            1 for f in context.cve_findings if f.severity.value == "CRITICAL"
-        )
-        high_cves = sum(
-            1 for f in context.cve_findings if f.severity.value == "HIGH"
-        )
-        kev_count = sum(1 for f in context.cve_findings if f.is_in_kev)
-
-        evidence: list[str] = []
-        if critical_cves:
-            evidence.append(f"{critical_cves} CRITICAL CVEs")
-        if high_cves:
-            evidence.append(f"{high_cves} HIGH CVEs")
-        if kev_count:
-            evidence.append(f"{kev_count} in CISA KEV catalog")
-
-        if kev_count > 0 or critical_cves > 0:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Update components with known exploited vulnerabilities. "
-                "Prioritize CISA KEV catalog entries.",
+            return ControlResult(
+                control_id=3,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="PASS",
+                evidence=["Advisory assessment ran with no applicable matches"],
+                source_stage=StageId.ADVISORY,
             )
-        if high_cves > 0:
-            return (
-                "PARTIAL",
-                5.0,
-                evidence,
-                "Update components with high-severity CVEs.",
-            )
-        return (
-            "PARTIAL",
-            7.0,
-            evidence,
-            "Review remaining CVEs and plan component updates.",
+
+        kev = [f for f in context.cve_findings if f.is_in_kev]
+        critical = [f for f in context.cve_findings if f.severity is Severity.CRITICAL]
+        evidence = [f"{len(context.cve_findings)} applicable advisory finding(s)"]
+        if kev:
+            evidence.append(f"{len(kev)} listed in CISA KEV")
+        return ControlResult(
+            control_id=3,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="FAIL" if kev or critical else "REVIEW",
+            evidence=evidence,
+            remediation="Update the affected components before shipping.",
+            source_stage=StageId.ADVISORY,
         )
 
-    def _eval_encrypted_data_at_rest(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 4: Encrypted data at rest (OWASP I7).
-
-        Evaluates whether sensitive data at rest is encrypted by checking:
-        1. Entropy profile — encrypted regions indicate data-at-rest encryption
-        2. Credential findings — plaintext credentials weaken even encrypted FS
-
-        An encrypted filesystem with hardcoded credentials still gets a PARTIAL
-        (not FAIL) because the encryption control is partially effective.
-        """
+    # ── Control 4: data at rest ──
+    def _eval_data_at_rest(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
         evidence: list[str] = []
-        has_encrypted_regions = False
+        if context.entropy_profile is not None:
+            evidence.append(
+                "Entropy observation: "
+                f"{context.entropy_profile.overall_entropy:.2f} bits/byte "
+                "(byte distribution only — not evidence of encryption)"
+            )
 
-        # Check entropy profile for encrypted regions
-        if context.entropy_profile:
-            if context.entropy_profile.has_encrypted_regions:
-                has_encrypted_regions = True
-                evidence.append("Encrypted regions detected via entropy analysis")
-            else:
-                evidence.append("No encrypted regions detected via entropy analysis")
-
-        # Check for plaintext credentials (weaken even encrypted FS)
-        plaintext_creds = [
+        # Only a plaintext secret in the artifact is evidence about plaintext
+        # at rest. A locked or hashed shadow entry is not.
+        plaintext = [
             f
             for f in context.credential_findings
-            if f.severity.value in ("CRITICAL", "HIGH")
-            and not f.is_placeholder
-            and f.category in ("password", "connection_string")
+            if f.rule_id.startswith("credential.regex.") and f.category == "password"
         ]
-        if plaintext_creds:
-            evidence.append(
-                f"{len(plaintext_creds)} plaintext credential findings"
+        if plaintext:
+            return ControlResult(
+                control_id=4,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="FAIL",
+                evidence=[
+                    *evidence,
+                    f"{len(plaintext)} plaintext password value(s) stored in the artifact",
+                ],
+                remediation="Do not ship plaintext secrets; derive or provision them.",
+                source_stage=StageId.CREDENTIAL_SCAN,
             )
 
-        if has_encrypted_regions and not plaintext_creds:
-            return "PASS", 10.0, evidence, ""
+        return ControlResult(
+            control_id=4,
+            control_name="",
+            status=CheckStatus.INCONCLUSIVE,
+            result="UNKNOWN",
+            evidence=[
+                *evidence,
+                "No format evidence identifies encrypted storage; at-rest "
+                "encryption is not established by entropy.",
+            ],
+            remediation=(
+                "Provide evidence of the storage format (encrypted container, "
+                "key management) to assess this control."
+            ),
+            source_stage=StageId.ENTROPY,
+        )
 
-        if has_encrypted_regions and plaintext_creds:
-            return (
-                "PARTIAL",
-                6.0,
-                evidence,
-                "Data at rest is encrypted but contains plaintext credentials. "
-                "Remove hardcoded credentials even with encrypted storage.",
+    # ── Control 5: update mechanism ──
+    def _eval_update(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        inventory = context.filesystem_inventory
+        if inventory is None:
+            return _omitted(
+                "No filesystem inventory — update mechanism not inspected",
+                "Extract the root filesystem and re-run.",
+                StageId.ENUMERATION,
             )
 
-        if not has_encrypted_regions and len(plaintext_creds) > 3:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Encrypt sensitive data at rest. "
-                "Remove plaintext credentials from firmware.",
-            )
-
-        if plaintext_creds:
-            return (
-                "PARTIAL",
-                3.0,
-                evidence,
-                "Encrypt or hash remaining plaintext credentials.",
-            )
-
-        return "PASS", 10.0, [], ""
-
-    def _eval_secure_update(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 5: Secure firmware update mechanism (OWASP I4)."""
-        inv = context.filesystem_inventory
-        if not inv:
-            return "PASS", 10.0, ["No filesystem inventory available"], ""
-
-        # Check for firmware update scripts/services
-        update_related = [
-            ff
-            for ff in inv.findings
+        update_files = [
+            f
+            for f in inventory.findings
             if any(
-                kw in str(ff.path).lower()
+                kw in str(f.path).lower()
                 for kw in ("update", "upgrade", "firmware", "ota", "sysupgrade")
             )
         ]
+        if not update_files:
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=["No update-related files were found in the inventory"],
+                remediation="Document the update mechanism and its verification step.",
+                source_stage=StageId.ENUMERATION,
+            )
 
-        # Check for signature verification in update scripts
-        has_sig_check = False
-        for ff in update_related:
+        verifying: list[str] = []
+        for entry in update_files:
             try:
-                content = ff.absolute_path.read_text(errors="ignore")
-                if any(
-                    kw in content.lower()
-                    for kw in ("verify", "signature", "gpg", "sha256sum", "checksum")
-                ):
-                    has_sig_check = True
-                    break
+                content = entry.absolute_path.read_text(errors="ignore").lower()
             except (OSError, PermissionError):
                 continue
+            if any(kw in content for kw in ("verify", "signature", "gpg", "sha256sum", "checksum")):
+                verifying.append(str(entry.path))
 
-        evidence: list[str] = []
-        if update_related:
-            evidence.append(f"{len(update_related)} update-related files found")
-        if has_sig_check:
-            evidence.append("Signature verification detected")
-        else:
-            evidence.append("No signature verification detected")
-
-        if not update_related:
-            return "PASS", 10.0, evidence, ""
-        if not has_sig_check:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Implement signed firmware updates with "
-                "cryptographic verification.",
+        if verifying:
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=[
+                    f"{len(update_files)} update-related file(s); verification string "
+                    f"present in {', '.join(verifying[:3])}"
+                ],
+                remediation=(
+                    "A verification string is not proof the check runs; confirm "
+                    "signed updates on the device."
+                ),
+                source_stage=StageId.ENUMERATION,
             )
-        return "PASS", 10.0, evidence, ""
 
-    def _eval_secure_boot(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 6: Secure boot/integrity verification (ISVS V4.1)."""
-        evidence: list[str] = []
-        inv = context.filesystem_inventory
-
-        # Heuristic: look for secure-boot indicators
-        has_secure_boot = False
-        if inv:
-            for ff in inv.findings:
-                name_lower = str(ff.path).lower()
-                if any(
-                    kw in name_lower
-                    for kw in (
-                        "secure_boot",
-                        "sboot",
-                        "verified-boot",
-                        "trusted",
-                    )
-                ):
-                    has_secure_boot = True
-                    evidence.append(f"Secure-boot indicator: {ff.path}")
-                    break
-                try:
-                    content = ff.absolute_path.read_text(
-                        errors="ignore"
-                    ).lower()
-                    if any(
-                        sig in content
-                        for sig in (
-                            "verified boot",
-                            "secure boot",
-                            "signature verification",
-                            "crypto_verify",
-                        )
-                    ):
-                        has_secure_boot = True
-                        evidence.append(
-                            f"Secure-boot string in {ff.path}"
-                        )
-                        break
-                except (OSError, PermissionError):
-                    continue
-
-        if not evidence:
-            evidence.append("No secure boot indicators found")
-
-        if has_secure_boot:
-            return "PASS", 8.0, evidence, ""
-
-        return (
-            "PARTIAL",
-            4.0,
-            evidence,
-            "Implement secure boot with cryptographic integrity verification.",
+        return ControlResult(
+            control_id=5,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="FAIL",
+            evidence=[f"{len(update_files)} update-related file(s), none verifying a signature"],
+            remediation="Implement signed firmware updates with cryptographic verification.",
+            source_stage=StageId.ENUMERATION,
         )
 
-    def _eval_no_backdoor_interfaces(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 7: No backdoor interfaces (ISTG-FW-SCRT-003)."""
-        # C2 findings with LIKELY_C2 severity
-        c2_likely = [f for f in context.c2_findings if f.severity == "LIKELY_C2"]
-        c2_suspicious = [f for f in context.c2_findings if f.severity == "SUSPICIOUS"]
+    # ── Control 6: secure boot ──
+    def _eval_secure_boot(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        return ControlResult(
+            control_id=6,
+            control_name="",
+            status=CheckStatus.INCONCLUSIVE,
+            result="UNKNOWN",
+            evidence=[
+                "Boot enforcement happens on the device; a static image cannot "
+                "establish that a verified boot chain runs or cannot be bypassed."
+            ],
+            remediation="Provide boot log or fuse/OTP state from the device.",
+            source_stage=StageId.ENUMERATION,
+        )
 
-        # Backdoor service indicators from YARA
-        backdoor_findings = [
-            f for f in context.c2_findings if f.indicator_type == "backdoor_service"
-        ]
-
-        evidence: list[str] = []
-        if c2_likely:
-            evidence.append(f"{len(c2_likely)} LIKELY_C2 findings")
-        if c2_suspicious:
-            evidence.append(f"{len(c2_suspicious)} SUSPICIOUS findings")
-        if backdoor_findings:
-            evidence.append(f"{len(backdoor_findings)} backdoor service detections")
-
-        if c2_likely or backdoor_findings:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Remove backdoor services and C2 indicators. "
-                "Investigate and eliminate unauthorized access paths.",
+    # ── Control 7: backdoors ──
+    def _eval_backdoors(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        if not _stage_completed(context, StageId.C2_INDICATORS):
+            return _omitted(
+                "Indicator detection did not run to completion",
+                "Run the C2 indicator stage.",
+                StageId.C2_INDICATORS,
             )
-        if c2_suspicious:
-            return (
-                "PARTIAL",
-                5.0,
-                evidence,
-                "Investigate suspicious indicators for potential "
-                "backdoor access.",
+        likely = [f for f in context.c2_findings if f.severity == "LIKELY_C2"]
+        suspicious = [f for f in context.c2_findings if f.severity == "SUSPICIOUS"]
+        if likely:
+            return ControlResult(
+                control_id=7,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="FAIL",
+                evidence=[f"{len(likely)} indicator(s) scored LIKELY_C2"],
+                remediation="Investigate and remove the indicator; treat the image as suspect.",
+                source_stage=StageId.C2_INDICATORS,
             )
-        return "PASS", 10.0, evidence, ""
+        if suspicious:
+            return ControlResult(
+                control_id=7,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=[f"{len(suspicious)} indicator(s) scored SUSPICIOUS"],
+                remediation="Review each indicator; heuristic scores are not proof.",
+                source_stage=StageId.C2_INDICATORS,
+            )
+        return ControlResult(
+            control_id=7,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="PASS",
+            evidence=["No indicator exceeded the review threshold"],
+            source_stage=StageId.C2_INDICATORS,
+        )
 
-    def _eval_strong_crypto(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 8: Strong cryptography used (ISTG-FW-CRYPT-001)."""
-        # Check binary intelligence for weak crypto
-        bi = context.binary_intelligence
-        evidence: list[str] = []
-
-        if bi:
-            total = bi.total_binaries
-            unhardened = bi.unhardened_binaries
-            evidence.append(f"{total} binaries, {unhardened} unhardened")
-            if unhardened > total * 0.5 and total > 0:
-                return (
-                    "FAIL",
-                    0.0,
-                    evidence,
-                    "Most binaries lack hardening. "
-                    "Enable NX, stack canaries, RELRO, PIE.",
-                )
-            if unhardened > 0:
-                return (
-                    "PARTIAL",
-                    4.0,
-                    evidence,
-                    "Enable binary hardening for all compiled binaries.",
-                )
-        else:
-            evidence.append("No binary intelligence available")
-
-        # Check for weak crypto in credential findings
-        weak_crypto_creds = [
+    # ── Control 8: cryptography ──
+    def _eval_crypto(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        weak = [
             f
             for f in context.credential_findings
-            if f.category == "password" and f.matched_pattern and "md5" in f.matched_pattern.lower()
+            if f.category == "password" and f.rule_id == "credential.unix.md5_hash"
         ]
-        if weak_crypto_creds:
-            evidence.append(f"{len(weak_crypto_creds)} MD5-related findings")
-            return (
-                "PARTIAL",
-                4.0,
-                evidence,
-                "Replace weak cryptographic hashes (MD5) with SHA-256+.",
+        if weak:
+            return ControlResult(
+                control_id=8,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="FAIL",
+                evidence=[f"{len(weak)} account(s) use an MD5 password hash"],
+                remediation="Re-hash account credentials with SHA-512 or bcrypt.",
+                source_stage=StageId.UNIX_ACCOUNTS,
             )
-
-        return "PASS", 8.0, evidence, ""
-
-    def _eval_minimal_attack_surface(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 9: Minimal attack surface (ISVS V3.2)."""
-        inv = context.filesystem_inventory
-        if not inv:
-            return "PASS", 8.0, [], ""
-
-        suid = len(inv.suid_binaries)
-        world_writable = len(inv.world_writable_files)
-
-        evidence: list[str] = []
-        if suid:
-            evidence.append(f"{suid} SUID binaries")
-        if world_writable:
-            evidence.append(f"{world_writable} world-writable files")
-
-        if suid > 5 or world_writable > 10:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Reduce attack surface: audit SUID binaries, "
-                "fix world-writable permissions.",
-            )
-        if suid > 0 or world_writable > 0:
-            return (
-                "PARTIAL",
-                4.0,
-                evidence,
-                "Review SUID binaries and world-writable files.",
-            )
-        return "PASS", 8.0, evidence, ""
-
-    def _eval_binary_hardening(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 10: Binary hardening present (FSTM Stage 5)."""
-        bi = context.binary_intelligence
-        if not bi or bi.total_binaries == 0:
-            return "PASS", 8.0, ["No binaries analyzed"], ""
-
-        hardened = bi.hardened_binaries
-        total = bi.total_binaries
-
-        # Calculate hardening ratio
-        ratio = hardened / total if total > 0 else 1.0
-        evidence = [f"{hardened}/{total} binaries hardened ({ratio:.0%})"]
-
-        if ratio < 0.3:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Enable NX, stack canaries, full RELRO, and PIE "
-                "for all compiled binaries.",
-            )
-        if ratio < 0.7:
-            return (
-                "PARTIAL",
-                4.0,
-                evidence,
-                "Increase binary hardening coverage. "
-                "Compile with -fstack-protector-strong, -D_FORTIFY_SOURCE=2.",
-            )
-        return "PASS", 8.0, evidence, ""
-
-    def _eval_no_c2_malware(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 11: No C2/malware indicators (MITRE ATT&CK ICS)."""
-        c2_count = len(context.c2_findings)
-        if c2_count == 0:
-            return "PASS", 5.0, [], ""
-
-        c2_likely = sum(1 for f in context.c2_findings if f.severity == "LIKELY_C2")
-        evidence = [f"{c2_count} C2/malware findings ({c2_likely} LIKELY_C2)"]
-
-        if c2_likely > 0:
-            return (
-                "FAIL",
-                0.0,
-                evidence,
-                "Investigate and remove C2 indicators. "
-                "Potential malware compromise detected.",
-            )
-        if c2_count > 3:
-            return (
-                "PARTIAL",
-                2.0,
-                evidence,
-                "Review suspicious indicators for potential compromise.",
-            )
-        return (
-            "PARTIAL",
-            3.0,
-            evidence,
-            "Review flagged indicators for false positives.",
+        return _omitted(
+            "No evidence source identifies cryptographic algorithms in this release",
+            "Qualify a crypto-algorithm detector before claiming this control.",
+            StageId.ELF_METADATA,
         )
 
-    def _eval_sbom_inventory(
-        self, context: ScanContext
-    ) -> tuple[str, float, list[str], str]:
-        """Control 12: Accurate component inventory (ISVS V1.1.1)."""
+    # ── Control 9: attack surface ──
+    def _eval_attack_surface(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        inventory = context.filesystem_inventory
+        if inventory is None:
+            return _omitted(
+                "No filesystem inventory — permissions not inspected",
+                "Extract the root filesystem and re-run.",
+                StageId.ENUMERATION,
+            )
+        suid = len(inventory.suid_binaries)
+        world_writable = len(inventory.world_writable_files)
+        if suid or world_writable:
+            return ControlResult(
+                control_id=9,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=[
+                    f"{suid} SUID binary/binaries",
+                    f"{world_writable} world-writable file(s)",
+                ],
+                remediation="Audit SUID binaries and fix world-writable permissions.",
+                source_stage=StageId.ENUMERATION,
+            )
+        return ControlResult(
+            control_id=9,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="PASS",
+            evidence=["No SUID binaries or world-writable files in the enumerated tree"],
+            source_stage=StageId.ENUMERATION,
+        )
+
+    # ── Control 10: binary hardening ──
+    def _eval_hardening(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        bi = context.binary_intelligence
+        if bi is None or bi.total_binaries == 0:
+            return _omitted(
+                "No binaries were analyzed — hardening was not assessed",
+                "Analyze the target ELF binaries.",
+                StageId.ELF_METADATA,
+            )
+        unknown = sum(1 for b in bi.binaries if b.hardening.nx_enabled is None)
+        evidence = [f"{bi.hardened_binaries}/{bi.total_binaries} binaries show hardening evidence"]
+        if unknown:
+            evidence.append(f"{unknown} binary/binaries with unknown hardening state")
+        if bi.hardened_binaries == 0:
+            return ControlResult(
+                control_id=10,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=evidence,
+                remediation="Read ELF program headers before drawing a conclusion.",
+                source_stage=StageId.ELF_METADATA,
+            )
+        return ControlResult(
+            control_id=10,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="REVIEW" if bi.hardened_binaries < bi.total_binaries else "PASS",
+            evidence=evidence,
+            remediation="Enable NX, stack canaries, full RELRO and PIE for all binaries.",
+            source_stage=StageId.ELF_METADATA,
+        )
+
+    # ── Control 11: C2 / malware ──
+    def _eval_c2(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        if not _stage_completed(context, StageId.C2_INDICATORS):
+            return _omitted(
+                "Indicator detection did not run to completion",
+                "Run the C2 indicator stage.",
+                StageId.C2_INDICATORS,
+            )
+        if not context.c2_findings:
+            return ControlResult(
+                control_id=11,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="PASS",
+                evidence=["No C2 or malware indicator was observed"],
+                source_stage=StageId.C2_INDICATORS,
+            )
+        likely = sum(1 for f in context.c2_findings if f.severity == "LIKELY_C2")
+        return ControlResult(
+            control_id=11,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="FAIL" if likely else "REVIEW",
+            evidence=[f"{len(context.c2_findings)} indicator(s), {likely} LIKELY_C2"],
+            remediation="Investigate the indicators; heuristic scores are not proof of compromise.",
+            source_stage=StageId.C2_INDICATORS,
+        )
+
+    # ── Control 12: inventory ──
+    def _eval_inventory(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
         components = context.software_components
         if not components:
-            return (
-                "PARTIAL",
-                1.0,
-                ["No software components detected"],
-                "Improve component detection. "
-                "Generate SBOM with CycloneDX format.",
+            return ControlResult(
+                control_id=12,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=["No software components were recovered from the artifact"],
+                remediation=(
+                    "Read the installed package database and ELF metadata to build "
+                    "a component inventory."
+                ),
+                source_stage=StageId.OPKG_INVENTORY,
             )
+        return ControlResult(
+            control_id=12,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="PASS",
+            evidence=[f"{len(components)} component(s) recovered"],
+            source_stage=StageId.OPKG_INVENTORY,
+        )
 
-        evidence = [f"{len(components)} components identified"]
-        # Check version coverage
-        with_version = sum(1 for c in components if c.version and c.version != "unknown")
-        if with_version < len(components) * 0.8:
-            evidence.append(
-                f"Version coverage: {with_version}/{len(components)}"
-            )
-            return (
-                "PARTIAL",
-                2.0,
-                evidence,
-                "Improve version detection coverage. "
-                "Many components have unknown versions.",
-            )
-        return "PASS", 3.0, evidence, ""
-
-    # ── Evaluator dispatch ──
     _EVALUATORS: ClassVar[dict[int, str]] = {
-        1: "_eval_no_default_credentials",
-        2: "_eval_no_unnecessary_services",
-        3: "_eval_no_outdated_components",
-        4: "_eval_encrypted_data_at_rest",
-        5: "_eval_secure_update",
+        1: "_eval_credentials",
+        2: "_eval_services",
+        3: "_eval_components",
+        4: "_eval_data_at_rest",
+        5: "_eval_update",
         6: "_eval_secure_boot",
-        7: "_eval_no_backdoor_interfaces",
-        8: "_eval_strong_crypto",
-        9: "_eval_minimal_attack_surface",
-        10: "_eval_binary_hardening",
-        11: "_eval_no_c2_malware",
-        12: "_eval_sbom_inventory",
+        7: "_eval_backdoors",
+        8: "_eval_crypto",
+        9: "_eval_attack_surface",
+        10: "_eval_hardening",
+        11: "_eval_c2",
+        12: "_eval_inventory",
     }
 
-    # ──────────────────────────────────────────
-    # Helpers
-    # ──────────────────────────────────────────
 
-    @staticmethod
-    def _compute_breakdown(
-        control_scores: list[ControlScore],
-    ) -> dict[str, float]:
-        """Compute weighted breakdown by control category."""
-        categories: dict[str, float] = {
-            "credentials": 0.0,
-            "network": 0.0,
-            "components": 0.0,
-            "encryption": 0.0,
-            "hardening": 0.0,
-            "c2_malware": 0.0,
-        }
-        category_map = {
-            1: "credentials",
-            2: "network",
-            3: "components",
-            4: "encryption",
-            5: "encryption",
-            6: "encryption",
-            7: "c2_malware",
-            8: "hardening",
-            9: "network",
-            10: "hardening",
-            11: "c2_malware",
-            12: "components",
-        }
-        for cs in control_scores:
-            cat = category_map.get(cs.control_id, "other")
-            categories[cat] = categories.get(cat, 0.0) + cs.points
-        return categories
+def _stage_completed(context: ScanContext, stage_id: StageId) -> bool:
+    """Whether a stage ran to completion, so its silence means something."""
+    return any(s.stage_id is stage_id and s.status is StageStatus.COMPLETE for s in context.stages)
 
-    @staticmethod
-    def _compute_owasp_mapping(
-        control_scores: list[ControlScore],
-    ) -> dict[str, int]:
-        """Map OWASP IoT Top 10 items to finding counts."""
-        fail_ids = {cs.control_id for cs in control_scores if cs.result == "FAIL"}
-        partial_ids = {cs.control_id for cs in control_scores if cs.result == "PARTIAL"}
 
-        mapping: dict[str, int] = {}
-        for owasp_item, ctrl_ids in _OWASP_IOT_MAP.items():
-            # 0 = pass, 1 = partial, 2 = fail
-            if any(cid in fail_ids for cid in ctrl_ids):
-                mapping[owasp_item] = 2
-            elif any(cid in partial_ids for cid in ctrl_ids):
-                mapping[owasp_item] = 1
-            else:
-                mapping[owasp_item] = 0
-        return mapping
+def _omitted(reason: str, remediation: str, stage: StageId) -> ControlResult:
+    """A check that did not run, with the reason stated rather than implied."""
+    return ControlResult(
+        control_id=0,
+        control_name="",
+        status=CheckStatus.OMITTED,
+        result="UNKNOWN",
+        evidence=[reason],
+        remediation=remediation,
+        source_stage=stage,
+    )
+
+
+def _program_name(program: str) -> str:
+    """Basename of a startup program, ignoring arguments."""
+    return program.split()[0].rsplit("/", 1)[-1].lower()
+
+
+def summarize_controls(controls: list[ControlResult]) -> dict[str, int]:
+    """Counts of performed / inconclusive / not-applicable / omitted checks."""
+    counts = {status.value: 0 for status in CheckStatus}
+    for control in controls:
+        counts[control.status.value] = counts.get(control.status.value, 0) + 1
+    return counts
