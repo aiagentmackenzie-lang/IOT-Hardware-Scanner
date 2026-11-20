@@ -698,3 +698,151 @@ class TestC2Integration:
         # Same domain should only appear once
         evil_findings = [f for f in findings if f.value == "evil.evil.top"]
         assert len(evil_findings) <= 1
+
+
+class TestEnumerationOrderInvariance:
+    """1F — the verdict must not depend on the order files were enumerated.
+
+    The v1 detector deduplicated by domain *before* scoring, so the first file
+    seen supplied the only context and reversing the inventory flipped a domain
+    between SUSPICIOUS and LIKELY_C2. The CLI turns that severity into an exit
+    code, so this was a real verdict bug.
+    """
+
+    def _inventory(self, tmp_path: Path, order: list[str]):
+        from iot_hardware_scanner.models import (
+            FileCategory,
+            FilesystemFinding,
+            FilesystemInventory,
+        )
+
+        findings = []
+        for name in order:
+            path = tmp_path / name
+            path.write_text("server=c2.example.tk\n")
+            findings.append(
+                FilesystemFinding(
+                    path=Path(name),
+                    absolute_path=path,
+                    category=FileCategory.CRITICAL_CONFIG,
+                    file_type="ASCII text",
+                    file_size=path.stat().st_size,
+                    permissions="rw-r--r--",
+                    owner_uid=0,
+                    owner_gid=0,
+                    is_suid=False,
+                    is_world_writable=False,
+                    hash_sha256="",
+                )
+            )
+        return FilesystemInventory(
+            rootfs_path=tmp_path, total_files=len(findings), findings=findings
+        )
+
+    def _normalized(self, findings) -> list[tuple]:
+        return sorted(
+            (f.indicator_type, f.value, f.severity, round(f.suspicion_score, 4), f.file_path)
+            for f in findings
+        )
+
+    def test_reversed_enumeration_yields_identical_findings(
+        self, config: ScannerConfig, tmp_path: Path
+    ) -> None:
+        detector = C2Detector(config)
+        forward = detector.detect_domains(self._inventory(tmp_path, ["a.conf", "b.conf"]))
+        detector_back = C2Detector(config)
+        reverse = detector_back.detect_domains(self._inventory(tmp_path, ["b.conf", "a.conf"]))
+        assert self._normalized(forward) == self._normalized(reverse)
+        assert [f.severity for f in forward] == [f.severity for f in reverse]
+
+    def test_binary_occurrence_raises_the_indicator_score(
+        self, config: ScannerConfig, tmp_path: Path
+    ) -> None:
+        """One occurrence in a binary is not diluted by a config occurrence."""
+        from iot_hardware_scanner.models import (
+            FileCategory,
+            FilesystemFinding,
+            FilesystemInventory,
+        )
+
+        binary = tmp_path / "bin" / "agent"
+        binary.parent.mkdir()
+        binary.write_bytes(b"\x7fELF" + b"\x00" * 32 + b"c2.mirai-botnet.top\x00")
+        conf = tmp_path / "etc" / "agent.conf"
+        conf.parent.mkdir()
+        conf.write_text("server=c2.mirai-botnet.top\n")
+
+        findings = []
+        pairs = ((conf, FileCategory.CRITICAL_CONFIG), (binary, FileCategory.CRITICAL_BINARY))
+        for path, category in pairs:
+            findings.append(
+                FilesystemFinding(
+                    path=path.relative_to(tmp_path),
+                    absolute_path=path,
+                    category=category,
+                    file_type="ELF" if category is FileCategory.CRITICAL_BINARY else "ASCII",
+                    file_size=path.stat().st_size,
+                    permissions="rw-r--r--",
+                    owner_uid=0,
+                    owner_gid=0,
+                    is_suid=False,
+                    is_world_writable=False,
+                    hash_sha256="",
+                )
+            )
+        inventory = FilesystemInventory(rootfs_path=tmp_path, total_files=2, findings=findings)
+
+        result = C2Detector(config).detect_domains(inventory)
+        domain = [f for f in result if f.value == "c2.mirai-botnet.top"]
+        assert len(domain) == 1
+        # Every occurrence is preserved on the finding.
+        assert len(domain[0].occurrences) == 2
+
+        # The documented aggregate: the highest occurrence score wins, so the
+        # binary occurrence raises the verdict above the config-only score.
+        config_only = C2Detector(config).detect_domains(
+            FilesystemInventory(
+                rootfs_path=tmp_path,
+                total_files=1,
+                findings=[f for f in findings if f.path.name == "agent.conf"],
+            )
+        )
+        config_domain = next(f for f in config_only if f.value == "c2.mirai-botnet.top")
+        assert domain[0].suspicion_score > config_domain.suspicion_score
+        assert domain[0].severity in {"SUSPICIOUS", "LIKELY_C2"}
+
+    def test_occurrences_are_recorded_for_ips(self, config: ScannerConfig, tmp_path: Path) -> None:
+        from iot_hardware_scanner.models import (
+            FileCategory,
+            FilesystemFinding,
+            FilesystemInventory,
+        )
+
+        paths = []
+        for name in ("one.conf", "two.conf"):
+            path = tmp_path / name
+            path.write_text("host=203.0.113.9\n")
+            paths.append(path)
+        inventory = FilesystemInventory(
+            rootfs_path=tmp_path,
+            total_files=2,
+            findings=[
+                FilesystemFinding(
+                    path=Path(p.name),
+                    absolute_path=p,
+                    category=FileCategory.CRITICAL_CONFIG,
+                    file_type="ASCII text",
+                    file_size=p.stat().st_size,
+                    permissions="rw-r--r--",
+                    owner_uid=0,
+                    owner_gid=0,
+                    is_suid=False,
+                    is_world_writable=False,
+                    hash_sha256="",
+                )
+                for p in paths
+            ],
+        )
+        findings = C2Detector(config).detect_ips(inventory)
+        # Reserved documentation range: filtered before scoring, so no findings.
+        assert all(f.value != "203.0.113.9" for f in findings)

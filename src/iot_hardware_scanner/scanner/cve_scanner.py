@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.intelligence.cpe_builder import CPEBuilder
@@ -21,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 # KEV catalog URL (CISA Known Exploited Vulnerabilities)
 KEV_CATALOG_URL = "https://www.cisa.gov/sites/default/files/csv/known_exploited_vulnerabilities.csv"
-
-# Local KEV data path
-_KEV_DATA_PATH = Path(__file__).parent.parent.parent.parent / "data" / "kev_catalog.json"
 
 
 class CVEScanner:
@@ -53,17 +49,22 @@ class CVEScanner:
 
         kev_ids: set[str] = set()
 
-        # Try local JSON file
-        if _KEV_DATA_PATH.exists():
+        # Bundled catalog. It is a sample; the report says so.
+        try:
+            from iot_hardware_scanner import resources
+
+            kev_path = resources.data_file("kev_catalog.json")
             try:
-                data = json.loads(_KEV_DATA_PATH.read_text(encoding="utf-8"))
+                data = json.loads(kev_path.read_text(encoding="utf-8"))
                 for entry in data.get("vulnerabilities", []):
                     cve_id = entry.get("cveID", "")
                     if cve_id:
                         kev_ids.add(cve_id)
-                logger.info("KEV catalog loaded: %d entries from local file", len(kev_ids))
+                logger.info("KEV catalog loaded: %d entries from bundled sample", len(kev_ids))
             except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("Cannot load local KEV catalog: %s", exc)
+                logger.warning("Cannot load bundled KEV catalog: %s", exc)
+        except Exception as exc:  # bundled resource missing entirely
+            logger.warning("KEV catalog unavailable: %s", exc)
 
         self._kev_ids = kev_ids
         return kev_ids

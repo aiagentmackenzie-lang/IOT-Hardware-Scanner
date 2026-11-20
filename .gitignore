@@ -26,6 +26,9 @@ Thumbs.db
 # Scan outputs
 reports/
 *.extracted/
+report.json
+report.md
+report.html
 
 # Test artifacts
 tests/fixtures/*.bin
@@ -35,6 +38,8 @@ tests/fixtures/*.elf
 # Internal documents - NOT for public repo
 SDR.md
 HANDOVER.md
+FIRMWARE_SCANNER_PLAN.md
+PHASE_1_WORKER_PROMPT.md
 
 # Secrets - NEVER commit
 *.pem

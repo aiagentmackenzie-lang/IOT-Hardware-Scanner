@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
   python-gate:
+    name: Lint, types, tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -28,10 +32,137 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint with ruff
-        run: ruff check src/ tests/
+        run: |
+          ruff check src/ tests/
+          ruff format --check src/ tests/
 
       - name: Type check with mypy
         run: mypy src/
 
       - name: Test with pytest (coverage gate)
         run: pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80
+
+  # ---------------------------------------------------------------------------
+  # Installed-wheel job. The backend is deliberately absent: no extraction tool
+  # is installed, which is the exact configuration a caller gets from
+  #   pip install iot-hardware-scanner
+  # and the case the scanner must report honestly (exit 5, not a clean 0).
+  # ---------------------------------------------------------------------------
+  installed-wheel-no-backend:
+    name: Installed wheel, no extraction backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+          sha256sum dist/*.whl
+
+      - name: Install outside the checkout
+        run: |
+          python -m venv /tmp/ihs-venv
+          /tmp/ihs-venv/bin/pip install --upgrade pip
+          /tmp/ihs-venv/bin/pip install dist/*.whl
+          /tmp/ihs-venv/bin/pip install pytest
+
+      - name: Audited extras
+        run: |
+          # Every advertised extra must resolve from the built wheel, and the
+          # two that could not be honoured (`extraction`: no installable
+          # binding; `sbom`: no export path) must not be advertised.
+          WHEEL=$(ls dist/*.whl)
+          /tmp/ihs-venv/bin/pip install "${WHEEL}[nvd]" "${WHEEL}[yaml-support]"
+          python - "$WHEEL" <<'PY'
+          import sys, zipfile
+          wheel = sys.argv[1]
+          with zipfile.ZipFile(wheel) as archive:
+              metadata = next(
+                  archive.read(n).decode()
+                  for n in archive.namelist()
+                  if n.endswith("METADATA")
+              )
+          extras = {
+              line.split(":", 1)[1].strip().lower()
+              for line in metadata.splitlines()
+              if line.startswith("Provides-Extra:")
+          }
+          print("advertised extras:", sorted(extras))
+          assert "extraction" not in extras, "the broken extraction extra is back"
+          assert "sbom" not in extras, "the sbom extra has no implementation"
+          assert {"nvd", "yaml-support"} <= extras
+          PY
+
+      - name: Acceptance harness against the installed console script
+        env:
+          IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
+        run: pytest tests/test_installed_cli.py -v
+
+      - name: Blank-image contract
+        run: |
+          set +e
+          cd /tmp && mkdir -p blank-run && cd blank-run
+          head -c 4096 /dev/zero > blank.bin
+          /tmp/ihs-venv/bin/iot-hardware-scanner scan blank.bin --offline \
+            --format json --out requested.json
+          status=$?
+          set -e
+          test -f requested.json || { echo "requested report was not written"; exit 1; }
+          test "$status" -ne 0 || { echo "an unanalysed image exited 0"; exit 1; }
+          python -c "
+          import json
+          d = json.load(open('requested.json'))
+          assert d['schema_version'] == 2
+          assert d['assessment']['completion'] == 'INCOMPLETE'
+          assert d['risk_score'] is None
+          print('blank image: exit', $status, '->', d['outcome']['exit_reason'])
+          "
+
+  # ---------------------------------------------------------------------------
+  # Report-contract job: schema, replay and renderer equivalence.
+  # ---------------------------------------------------------------------------
+  report-contract:
+    name: Report schema and replay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Exit precedence and document contract
+        run: |
+          pytest tests/test_exit_contract.py tests/test_report_document.py \
+                 tests/test_cli.py -v
+
+  # ---------------------------------------------------------------------------
+  # Reference-image job. Runs only when a checksum-verified OpenWrt image has
+  # been staged as a workflow artefact or cache; the suite never downloads it.
+  # ---------------------------------------------------------------------------
+  reference-image:
+    name: OpenWrt reference image (backend absent)
+    runs-on: ubuntu-latest
+    if: vars.IHS_REFERENCE_IMAGE_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Stage the pinned image
+        run: |
+          curl -fsSLO https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
+          echo "8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02  openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz" | sha256sum -c -
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Qualify the reference image
+        env:
+          IHS_REFERENCE_IMAGE: ${{ github.workspace }}/openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
+        run: pytest tests/test_installed_cli.py -k openwrt -v

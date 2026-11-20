@@ -18,10 +18,11 @@ from iot_hardware_scanner.models import YaraMatch
 
 logger = logging.getLogger(__name__)
 
-# Directories to search for YARA rules (in order of priority)
+# Rules ship inside the package. Ambient rule directories (the working
+# directory or the user's home) are deliberately NOT loaded: a scan must not
+# change verdict because of a file that happens to sit next to it. Additional
+# rules are opt-in through configuration or the CLI.
 _BUILTIN_RULES_DIR = Path(__file__).parent / "rules"
-_USER_RULES_DIR = Path.home() / ".iot_hardware_scanner" / "yara_rules"
-_PROJECT_RULES_DIR = Path.cwd() / "yara_rules"
 
 
 class YaraEngine:
@@ -55,11 +56,7 @@ class YaraEngine:
         import yara
 
         # Gather all rule directories
-        dirs: list[Path] = [
-            _BUILTIN_RULES_DIR,
-            _USER_RULES_DIR,
-            _PROJECT_RULES_DIR,
-        ]
+        dirs: list[Path] = [_BUILTIN_RULES_DIR]
         # Add config-specified dirs
         dirs.extend(self.config.yara_rules_dirs)
         # Add caller-specified dirs
@@ -82,7 +79,7 @@ class YaraEngine:
                     # Skip meta-rule files containing YARA include directives
                     # Use regex to only match actual 'include' statements, not
                     # comments/strings containing the word "include"
-                    _include_stmt = re.compile(r'^\s*include\s+')
+                    _include_stmt = re.compile(r"^\s*include\s+")
                     if any(_include_stmt.match(line) for line in content.splitlines()):
                         logger.debug("Skipping include-based meta-rule: %s", yar_file)
                         continue

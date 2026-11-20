@@ -329,4 +329,6 @@ class TestExitCodes:
         assert FirmwareUnreadableError.exit_code == 3
 
     def test_path_traversal_exit_code(self) -> None:
-        assert FirmwarePathTraversalError.exit_code == 2
+        # Invalid input is validation: exit 3 (framework usage errors are
+        # reported separately by Click).
+        assert FirmwarePathTraversalError.exit_code == 3

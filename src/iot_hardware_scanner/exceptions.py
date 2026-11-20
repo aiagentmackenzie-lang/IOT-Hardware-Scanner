@@ -38,11 +38,11 @@ class FirmwareUnreadableError(ScannerError):
 class FirmwarePathTraversalError(ScannerError):
     """Firmware path contains traversal sequences (..) or null bytes."""
 
-    exit_code = 2
+    exit_code = 3
 
 
 class ExtractionFailedError(ScannerError):
-    """Binwalk extraction failed."""
+    """Extraction failed: the root filesystem was never reached."""
 
     exit_code = 4
 
@@ -68,7 +68,7 @@ class NVDApiError(ScannerError):
 class ConfigError(ScannerError):
     """Configuration validation error."""
 
-    exit_code = 2
+    exit_code = 3
 
 
 class DiskSpaceError(ScannerError):

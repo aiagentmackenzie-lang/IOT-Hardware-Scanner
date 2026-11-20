@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "iot-hardware-scanner"
-version = "1.0.0"
+version = "2.0.0"
 description = "Defensive firmware security analysis platform for IoT/embedded/OT devices"
 readme = "README.md"
 license = "MIT"
@@ -36,9 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-extraction = ["pybinwalk>=3.0"]
+# NOTE: no `extraction` extra. No installable release of the Python binwalk
+# binding provides the API this scanner needs, so advertising one produced a
+# resolver failure. Firmware image extraction is unavailable in this release
+# and the CLI says so explicitly.
 nvd = ["nvdlib>=0.7"]
-sbom = ["cyclonedx-python-lib>=6.0"]
 yaml_support = ["pyyaml>=6.0"]
 dev = [
     "pytest>=8.0",
@@ -54,6 +56,12 @@ iot-hardware-scanner = "iot_hardware_scanner.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/iot_hardware_scanner"]
+# Rules and bundled data must travel with the wheel: an installed scanner
+# outside a source checkout loads them from the package itself.
+artifacts = [
+    "src/iot_hardware_scanner/yara/rules/**/*.yar",
+    "src/iot_hardware_scanner/data/**/*",
+]
 
 [tool.ruff]
 target-version = "py310"

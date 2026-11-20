@@ -15,15 +15,12 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 
+from iot_hardware_scanner import resources
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.intelligence.threat_intel import ThreatIntelManager
 
 logger = logging.getLogger(__name__)
-
-# ── Data file paths ──
-_DATA_DIR = Path(__file__).parent.parent.parent.parent / "data"
 
 # ── Scoring signals (SDR §12.1) ──
 _SCORE_THREAT_INTEL = 50.0
@@ -85,7 +82,7 @@ class DomainScorer:
             return self._benign_domains
 
         self._benign_domains = set()
-        path = _DATA_DIR / "benign_domains.txt"
+        path = resources.data_file("benign_domains.txt")
         if path.exists():
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -103,7 +100,7 @@ class DomainScorer:
             return self._suspicious_tlds
 
         self._suspicious_tlds = set()
-        path = _DATA_DIR / "suspicious_tlds.txt"
+        path = resources.data_file("suspicious_tlds.txt")
         if path.exists():
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():

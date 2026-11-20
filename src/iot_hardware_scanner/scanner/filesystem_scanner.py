@@ -22,6 +22,7 @@ from pathlib import Path
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import (
+    BootEvidence,
     FileCategory,
     FilesystemFinding,
     FilesystemInventory,
@@ -220,6 +221,109 @@ class FilesystemScanner:
     ) -> list[FilesystemFinding]:
         """Return all files matching a security category."""
         return inventory.categories.get(category, [])
+
+    def collect_boot_evidence(self, rootfs_path: Path) -> list[BootEvidence]:
+        """Read configured startup directives from one root filesystem.
+
+        Only genuinely configured directives are returned as ``configured``.
+        A commented-out example is recorded with ``configured=False`` so the
+        report can show it was seen and deliberately not counted.
+
+        Directives currently understood: SysV-style ``inittab`` actions
+        (``sysinit``, ``respawn``, ``wait``, ``once``, ``boot``) and
+        ``start``/``restart`` invocations in init scripts and ``rc.local``.
+        """
+        rootfs_path = Path(rootfs_path)
+        root_id = str(rootfs_path.name)
+        evidence: list[BootEvidence] = []
+
+        inittab = rootfs_path / "etc" / "inittab"
+        if inittab.is_file() and not inittab.is_symlink():
+            evidence.extend(self._inittab_evidence(inittab, rootfs_path, root_id))
+
+        script_paths: list[Path] = []
+        init_d = rootfs_path / "etc" / "init.d"
+        if init_d.is_dir():
+            script_paths.extend(sorted(p for p in init_d.iterdir() if p.is_file()))
+        for extra in (rootfs_path / "etc" / "rc.local", rootfs_path / "etc" / "rcS.local"):
+            if extra.is_file() and not extra.is_symlink():
+                script_paths.append(extra)
+
+        for script in script_paths:
+            evidence.extend(self._script_evidence(script, rootfs_path, root_id))
+
+        return evidence
+
+    def _inittab_evidence(self, path: Path, rootfs: Path, root_id: str) -> list[BootEvidence]:
+        actions = {"sysinit", "respawn", "wait", "once", "boot", "bootwait"}
+        out: list[BootEvidence] = []
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError as exc:
+            logger.warning("Could not read inittab %s: %s", path, exc)
+            return out
+
+        for line_no, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            configured = not stripped.startswith("#")
+            body = stripped.lstrip("#").strip()
+            fields = body.split(":", 3)
+            if len(fields) < 4:
+                continue
+            _ident, _runlevels, action, program = fields
+            if action.strip() not in actions:
+                continue
+            out.append(
+                BootEvidence(
+                    root_id=root_id,
+                    source=str(path.relative_to(rootfs)),
+                    line_number=line_no,
+                    directive=stripped,
+                    action=action.strip(),
+                    program=program.strip(),
+                    configured=configured,
+                )
+            )
+        return out
+
+    def _script_evidence(self, path: Path, rootfs: Path, root_id: str) -> list[BootEvidence]:
+        max_size = self.config.max_scan_file_size_mb * 1024 * 1024
+        out: list[BootEvidence] = []
+        try:
+            if path.stat().st_size > max_size:
+                return out
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            return out
+
+        for line_no, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            configured = not stripped.startswith("#")
+            body = stripped.lstrip("#").strip()
+            tokens = body.split()
+            for index, token in enumerate(tokens):
+                if token not in ("start", "restart") or index == 0:
+                    continue
+                target = tokens[index - 1]
+                if target in {"if", "then", "&&", ";", "do"}:
+                    continue
+                out.append(
+                    BootEvidence(
+                        root_id=root_id,
+                        source=str(path.relative_to(rootfs)),
+                        line_number=line_no,
+                        directive=stripped,
+                        action=token,
+                        program=target,
+                        configured=configured,
+                    )
+                )
+                break
+        return out
 
     def analyze_boot_process(self, inventory: FilesystemInventory) -> dict[str, list[str]]:
         """Analyze boot process for security-relevant findings.

@@ -1,229 +1,379 @@
-"""Tests for CLI — Phase 1.
+"""CLI contract tests: exit precedence, report delivery and replay.
 
-Covers:
-- CLI entry point loads
-- Version output
-- Scan command argument parsing
-- Exit code behavior
+Every assertion here is about what a caller can observe: the process status,
+the files that exist afterwards, and the content of the saved document.
 """
 
+from __future__ import annotations
+
+import json
 import os
-import tempfile
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from iot_hardware_scanner.cli import main
 
 
-class TestCLIBasic:
-    """Test CLI entry point and basic commands."""
+def _run(args: list[str]) -> tuple[int, str]:
+    result = CliRunner().invoke(main, args)
+    return result.exit_code, result.output
 
+
+class TestEntrypointBasics:
     def test_help(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["--help"])
-        assert result.exit_code == 0
-        assert "IoT Hardware Scanner" in result.output
+        code, output = _run(["--help"])
+        assert code == 0
+        assert "IoT Hardware Scanner" in output
 
-    def test_version(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["--version"])
-        assert result.exit_code == 0
-        assert "1.0.0" in result.output
+    def test_version_is_major_2(self) -> None:
+        code, output = _run(["--version"])
+        assert code == 0
+        assert "2.0.0" in output
 
-    def test_scan_help(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["scan", "--help"])
-        assert result.exit_code == 0
-        assert "--output" in result.output
-        assert "--format" in result.output
-        assert "--verbose" in result.output
-        assert "--offline" in result.output
+    def test_scan_help_documents_the_contract(self) -> None:
+        code, output = _run(["scan", "--help"])
+        assert code == 0
+        for flag in ("--output", "--format", "--out", "--offline", "--profile", "--config"):
+            assert flag in output
 
 
-class TestCLIScanCommand:
-    """Test the scan subcommand."""
+class TestScanValidation:
+    def test_missing_input_is_exit_3(self) -> None:
+        code, output = _run(["scan", "/nonexistent/firmware.bin"])
+        assert code == 3
+        assert "Error" in output
 
-    def test_scan_nonexistent_file(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["scan", "/nonexistent/firmware.bin"])
-        assert result.exit_code == 3  # FirmwareNotFoundError
+    def test_empty_input_is_exit_3(self, tmp_path: Path) -> None:
+        target = tmp_path / "empty.bin"
+        target.write_bytes(b"")
+        code, _ = _run(["scan", str(target)])
+        assert code == 3
 
-    def test_scan_empty_file(self) -> None:
-        runner = CliRunner()
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(b"")  # empty
-            path = f.name
+    def test_traversal_path_is_exit_3(self) -> None:
+        code, _ = _run(["scan", "../etc/passwd"])
+        assert code == 3
 
-        try:
-            result = runner.invoke(main, ["scan", path])
-            assert result.exit_code == 3  # FirmwareEmptyError
-        finally:
-            os.unlink(path)
 
-    def test_scan_valid_file(self) -> None:
-        """Scan a small firmware file — should complete Phase 1 at minimum."""
-        runner = CliRunner()
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(os.urandom(1024))
-            path = f.name
+class TestOpaqueInput:
+    """1A/1B — an opaque artifact must not receive a clean verdict."""
 
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                result = runner.invoke(
-                    main,
-                    [
-                        "scan",
-                        path,
-                        "--output",
-                        tmpdir,
-                    ],
-                )
-                # Phase 1 should succeed; later phases may fail gracefully
-                assert "Ingest" in result.output or result.exit_code in (0, 2)
-        finally:
-            os.unlink(path)
-
-    def test_scan_exit_code_likely_c2(self) -> None:
-        """LIKELY_C2 findings trigger exit code 1."""
-        from unittest.mock import patch
-
-        from iot_hardware_scanner.models import C2Finding
-        from iot_hardware_scanner.orchestrator import Orchestrator
-
-        runner = CliRunner()
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(os.urandom(1024))
-            path = f.name
-
-        def fake_run(_self, firmware_path):
-            from datetime import datetime, timezone
-
-            from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
-            ctx = ScanContext(
-                scan_id="test",
-                firmware_path=firmware_path,
-                output_dir=firmware_path.parent,
-                file_hash_sha256="a" * 64,
-                file_hash_md5="b" * 32,
-                file_size=1024,
-                file_type="binary",
-                firmware_name="test",
-                size_category=FirmwareSizeCategory.SMALL,
-                started_at=datetime.now(timezone.utc),
-            )
-            ctx.c2_findings = [
-                C2Finding(
-                    severity="LIKELY_C2",
-                    indicator_type="domain",
-                    value="evil.example.com",
-                    file_path=firmware_path,
-                )
+    def test_blank_image_is_incomplete_and_not_graded(
+        self, blank_image: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "requested.json"
+        code, output = _run(
+            [
+                "scan",
+                str(blank_image),
+                "--offline",
+                "--format",
+                "json",
+                "--out",
+                str(destination),
             ]
-            return ctx
-
-        try:
-            with patch.object(Orchestrator, "run", fake_run):
-                result = runner.invoke(main, ["scan", path])
-                assert result.exit_code == 1
-        finally:
-            os.unlink(path)
-
-
-class TestCLIExtractCommand:
-    """Test the extract subcommand."""
-
-    def test_extract_nonexistent(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["extract", "/nonexistent.bin"])
-        assert result.exit_code == 3
-
-
-class TestCLIEntropyCommand:
-    """Test the entropy subcommand."""
-
-    def test_entropy_nonexistent(self) -> None:
-        runner = CliRunner()
-        result = runner.invoke(main, ["entropy", "/nonexistent.bin"])
-        assert result.exit_code == 3
-
-    def test_entropy_valid_file(self) -> None:
-        runner = CliRunner()
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            f.write(os.urandom(4096))
-            path = f.name
-
-        try:
-            result = runner.invoke(main, ["entropy", path])
-            # Should at least complete ingestion + entropy
-            assert result.exit_code == 0 or "Error" in result.output
-        finally:
-            os.unlink(path)
-
-
-class TestCLIReportCommand:
-    """Test the report subcommand."""
-
-    def test_report_requires_existing_file(self) -> None:
-        """Report command requires an existing scan file."""
-        runner = CliRunner()
-        result = runner.invoke(main, ["report", "/nonexistent/report.json"])
-        # Click's exists=True should cause exit code 2
-        assert result.exit_code != 0
-
-    def test_report_invalid_json(self, tmp_path: Path) -> None:
-        """Report command handles invalid JSON gracefully."""
-        bad_json = tmp_path / "bad.json"
-        bad_json.write_text("not valid json at all")
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["report", str(bad_json), "--format", "json"])
-        # Should fail gracefully (exit code 6) or show an error
-        assert result.exit_code != 0 or "Error" in result.output
-
-    def test_report_valid_json_scan(self, tmp_path: Path) -> None:
-        """Report command can load a valid JSON scan file and generate report."""
-        import json
-
-        scan_data = {
-            "scan_id": "test-report-001",
-            "scan_date": "2025-01-01T00:00:00+00:00",
-            "firmware": {
-                "name": "test_fw",
-                "path": str(tmp_path / "test.bin"),
-                "sha256": "a" * 64,
-                "md5": "b" * 32,
-                "size": 1024,
-                "file_type": "ELF",
-            },
-            "risk_score": {
-                "total_score": 75,
-                "risk_level": "MEDIUM",
-                "control_scores": [
-                    {
-                        "control_id": 1,
-                        "control_name": "No default/hardcoded credentials",
-                        "result": "PASS",
-                        "points": 10.0,
-                        "max_points": 10.0,
-                        "evidence": [],
-                        "remediation": "",
-                    }
-                ],
-                "weighted_breakdown": {"credentials": 10.0},
-                "executive_summary": "Test summary",
-                "owasp_iot_mapping": {"I1 - Weak/Default Passwords": 0},
-            },
-            "credentials": {"total": 0, "findings": []},
-            "cve": {"total": 0, "findings": []},
-            "c2_malware": {"total": 0, "findings": []},
-        }
-        scan_file = tmp_path / "scan_report.json"
-        scan_file.write_text(json.dumps(scan_data))
-
-        runner = CliRunner()
-        result = runner.invoke(
-            main, ["report", str(scan_file), "--format", "json"]
         )
-        # Should not show "not yet implemented"
-        assert "not yet implemented" not in result.output
+
+        # A required dependency (an extraction backend) is missing: exit 5.
+        assert code == 5
+        assert destination.is_file()
+
+        document = json.loads(destination.read_text())
+        assert document["schema_version"] == 2
+        assert document["assessment"]["completion"] == "INCOMPLETE"
+        assert document["assessment"]["missing_required_dependencies"]
+        assert document["findings"] == []
+        # The retired grade must not appear for a new scan.
+        assert document["risk_score"] is None
+        assert "risk_level" not in document
+        assert "/100" not in output
+        assert "LOW" not in output
+
+    def test_requested_destination_is_the_only_report_written(
+        self, blank_image: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "exact.json"
+        _run(
+            [
+                "scan",
+                str(blank_image),
+                "--offline",
+                "--format",
+                "json",
+                "--out",
+                str(destination),
+                "--output",
+                str(tmp_path / "scans"),
+            ]
+        )
+        assert destination.is_file()
+        reports = list((tmp_path / "scans").rglob("report.json"))
+        assert reports == [], "no second copy may be written behind the caller's back"
+
+    def test_unwritable_destination_is_exit_6_and_never_success(
+        self, blank_image: Path, tmp_path: Path
+    ) -> None:
+        blocked = tmp_path / "blocked"
+        blocked.mkdir()
+        destination = blocked / "report.json"
+        destination.mkdir()  # a directory where a file was requested
+
+        code, output = _run(
+            ["scan", str(blank_image), "--offline", "--format", "json", "--out", str(destination)]
+        )
+
+        assert code == 6
+        assert "not written" in output.lower()
+        assert "Report written" not in output
+
+
+class TestFindingsSurviveIncompleteStages:
+    """A qualified critical finding outranks an unrelated incomplete stage."""
+
+    def test_critical_finding_with_incomplete_assessment_is_exit_1(
+        self, opaque_image: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "opaque.json"
+        code, _output = _run(
+            [
+                "scan",
+                str(opaque_image),
+                "--offline",
+                "--format",
+                "json",
+                "--out",
+                str(destination),
+            ]
+        )
+
+        assert code == 1
+        document = json.loads(destination.read_text())
+        assert document["assessment"]["completion"] == "INCOMPLETE"
+        assert document["outcome"]["exit_code"] == 1
+        assert document["outcome"]["exit_reason"] == "CRITICAL_FINDING"
+        critical = [f for f in document["findings"] if f["critical_qualified"]]
+        assert len(critical) == 1
+        assert critical[0]["rule_id"] == "credential.regex.password"
+        # The secret itself must never reach the report.
+        assert "Xk9#mQ2vLp7" not in destination.read_text()
+
+
+class TestCredentialsProfile:
+    def test_clean_tree_completes_with_exit_0(self, fixture_tree: Path, tmp_path: Path) -> None:
+        destination = tmp_path / "clean.json"
+        code, output = _run(
+            [
+                "scan",
+                str(fixture_tree),
+                "--creds",
+                "--format",
+                "json",
+                "--out",
+                str(destination),
+            ]
+        )
+
+        assert code == 0
+        document = json.loads(destination.read_text())
+        assert document["assessment"]["completion"] == "COMPLETE"
+        assert document["outcome"]["exit_reason"] == "COMPLETE_NO_FINDINGS"
+        assert document["findings"] == []
+        assert "Risk Score" not in output
+
+    def test_locked_root_is_not_a_critical_password_finding(
+        self, fixture_tree: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "locked.json"
+        code, _ = _run(
+            ["scan", str(fixture_tree), "--creds", "--format", "json", "--out", str(destination)]
+        )
+        document = json.loads(destination.read_text())
+        assert code == 0
+        rules = {f["rule_id"] for f in document["findings"]}
+        assert "credential.unix.empty_password" not in rules
+        assert not any(f["category"] == "password" for f in document["findings"])
+
+    def test_empty_password_is_exit_1(self, tmp_path: Path) -> None:
+        root = tmp_path / "empty_pw"
+        (root / "etc").mkdir(parents=True)
+        (root / "etc" / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/ash\nadmin::0:0::/root:/bin/sh\n"
+        )
+        (root / "etc" / "shadow").write_text("root:!$6$salt$hash:19000:0:99999:7:::\n")
+        destination = tmp_path / "empty.json"
+
+        code, _ = _run(
+            ["scan", str(root), "--creds", "--format", "json", "--out", str(destination)]
+        )
+
+        assert code == 1
+        document = json.loads(destination.read_text())
+        critical = [f for f in document["findings"] if f["critical_qualified"]]
+        assert [f["rule_id"] for f in critical] == ["credential.unix.empty_password"]
+        # The extra UID 0 account is separately visible for review.
+        assert any(f["rule_id"] == "credential.unix.uid0_account" for f in document["findings"])
+
+
+class TestExtractAndEntropyCommands:
+    def test_extract_missing_input_is_exit_3(self) -> None:
+        code, _ = _run(["extract", "/nonexistent.bin"])
+        assert code == 3
+
+    def test_entropy_invalid_block_size_is_exit_3(self, blank_image: Path) -> None:
+        code, output = _run(["entropy", str(blank_image), "--block-size", "0"])
+        assert code == 3
+        assert "Configuration error" in output
+
+    def test_entropy_reports_bits_per_byte(self, blank_image: Path) -> None:
+        code, output = _run(["entropy", str(blank_image), "--block-size", "128"])
+        assert code == 0
+        assert "bits/byte" in output
+        assert "0.0000" in output
+
+    def test_entropy_json_carries_units(self, blank_image: Path) -> None:
+        code, output = _run(["entropy", str(blank_image), "--format", "json"])
+        assert code == 0
+        payload = json.loads(output)
+        assert payload["units"] == "bits/byte"
+        assert payload["overall_entropy"] == 0.0
+
+
+class TestReplay:
+    def test_v1_finding_and_grade_survive_replay(
+        self, legacy_v1_report: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "replayed.json"
+        before = legacy_v1_report.read_bytes()
+
+        code, _ = _run(
+            ["report", str(legacy_v1_report), "--format", "json", "--out", str(destination)]
+        )
+
+        assert code == 0
+        # The input document is never modified.
+        assert legacy_v1_report.read_bytes() == before
+
+        document = json.loads(destination.read_text())
+        assert len(document["findings"]) == 1
+        assert document["findings"][0]["severity"] == "HIGH"
+        assert document["legacy_grade"]["total_score"] == 88.0
+        assert document["legacy_grade"]["method"] == "v1-12-control-weighted"
+        assert document["assessment"]["coverage"] == "UNKNOWN"
+
+    def test_replay_to_markdown_keeps_the_finding(
+        self, legacy_v1_report: Path, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "replayed.md"
+        code, _ = _run(
+            ["report", str(legacy_v1_report), "--format", "markdown", "--out", str(destination)]
+        )
+        assert code == 0
+        text = destination.read_text()
+        assert "etc/config/system" in text
+        assert "Legacy grade" in text
+        assert "Coverage unknown" in text
+
+    def test_replay_exit_reports_rendering_only(
+        self, legacy_v1_report: Path, tmp_path: Path
+    ) -> None:
+        code, _ = _run(
+            [
+                "report",
+                str(legacy_v1_report),
+                "--format",
+                "html",
+                "--out",
+                str(tmp_path / "out.html"),
+            ]
+        )
+        assert code == 0  # a rendered legacy document with a finding is still a success
+
+    def test_replay_unreadable_input_is_exit_3(self, tmp_path: Path) -> None:
+        broken = tmp_path / "broken.json"
+        broken.write_text("not json")
+        code, _ = _run(["report", str(broken)])
+        assert code == 3
+
+    def test_replay_unwritable_destination_is_exit_6(
+        self, legacy_v1_report: Path, tmp_path: Path
+    ) -> None:
+        blocked = tmp_path / "blocked.json"
+        blocked.mkdir()
+        code, output = _run(["report", str(legacy_v1_report), "--out", str(blocked)])
+        assert code == 6
+        assert "not written" in output.lower()
+
+
+class TestConfigFilePrecedence:
+    def test_toml_config_is_honoured(self, blank_image: Path, tmp_path: Path) -> None:
+        config = tmp_path / "scanner.toml"
+        config.write_text("max_file_size_mb = 1\n")
+        code, _ = _run(["scan", str(blank_image), "--config", str(config), "--offline"])
+        assert code in (4, 5)  # accepted: the scan ran and is incomplete
+
+    def test_cli_beats_config_file(self, blank_image: Path, tmp_path: Path) -> None:
+        config = tmp_path / "scanner.toml"
+        config.write_text("max_file_size_mb = 1\n")
+        # The CLI value must win, so a 4 KiB file is accepted.
+        code, output = _run(
+            ["scan", str(blank_image), "--config", str(config), "--max-size", "2", "--offline"]
+        )
+        assert code in (4, 5)
+        assert "File validated" in output
+
+    def test_missing_config_file_is_exit_3(self, blank_image: Path, tmp_path: Path) -> None:
+        code, output = _run(["scan", str(blank_image), "--config", str(tmp_path / "absent.toml")])
+        assert code == 3
+        assert "Configuration error" in output
+
+    def test_environment_is_overridden_by_cli(
+        self, blank_image: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("IOT_HARDWARE_SCANNER_MAX_FILE_SIZE_MB", "1")
+        code, output = _run(["scan", str(blank_image), "--max-size", "2", "--offline"])
+        assert code in (4, 5)
+        assert "File validated" in output
+
+    def test_environment_is_used_when_cli_silent(
+        self,
+        blank_image: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_out = tmp_path / "from_env"
+        monkeypatch.setenv("IOT_HARDWARE_SCANNER_OUTPUT_DIR", str(env_out))
+        code, _ = _run(["scan", str(blank_image), "--offline", "--format", "json"])
+        assert code in (4, 5)
+        assert list(env_out.rglob("report.json")), "output_dir from the environment was ignored"
+
+    def test_cli_output_directory_beats_environment(
+        self,
+        blank_image: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("IOT_HARDWARE_SCANNER_OUTPUT_DIR", str(tmp_path / "from_env"))
+        cli_out = tmp_path / "from_cli"
+        code, _ = _run(
+            ["scan", str(blank_image), "--offline", "--format", "json", "--output", str(cli_out)]
+        )
+        assert code in (4, 5)
+        assert list(cli_out.rglob("report.json"))
+        assert not list((tmp_path / "from_env").rglob("report.json"))
+
+
+class TestAmbientRulesDoNotChangeVerdicts:
+    def test_cwd_rules_are_ignored(self, blank_image: Path, tmp_path: Path) -> None:
+        """A rule file next to the caller must not change the scan."""
+        workdir = tmp_path / "work"
+        (workdir / "yara_rules").mkdir(parents=True)
+        (workdir / "yara_rules" / "ambient.yar").write_text("rule ambient { condition: true }\n")
+        previous = os.getcwd()
+        os.chdir(workdir)
+        try:
+            code, output = _run(["scan", str(blank_image), "--offline"])
+        finally:
+            os.chdir(previous)
+        assert code in (4, 5)
+        assert "ambient" not in output

@@ -29,7 +29,7 @@ class TestConfigDefaults:
         assert config.credential_entropy_threshold == 1.5
         assert config.nvd_api_key is None
         assert config.nvd_cache_days == 7
-        assert config.offline_mode is False
+        assert config.offline_mode is True  # scans are offline by default
         assert config.c2_suspicion_threshold == 40.0
         assert config.c2_likely_threshold == 60.0
         assert "json" in config.report_formats
@@ -124,3 +124,100 @@ class TestConfigUnsupportedFormat:
             f.flush()
             with pytest.raises(ValueError, match="Unsupported config format"):
                 ScannerConfig.from_file(Path(f.name))
+
+
+class TestPrecedence:
+    """Explicit CLI > environment > config file > defaults."""
+
+    def test_defaults_are_offline(self) -> None:
+        assert ScannerConfig().offline_mode is True
+
+    def test_environment_overrides_defaults(self) -> None:
+        config = ScannerConfig.resolve(environ={"IOT_HARDWARE_SCANNER_MAX_SCAN_FILE_SIZE_MB": "12"})
+        assert config.max_scan_file_size_mb == 12
+
+    def test_file_overrides_environment(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "scanner.toml"
+        config_file.write_text("max_scan_file_size_mb = 33\n")
+        config = ScannerConfig.resolve(
+            config_file=config_file,
+            environ={"IOT_HARDWARE_SCANNER_MAX_SCAN_FILE_SIZE_MB": "12"},
+        )
+        assert config.max_scan_file_size_mb == 33
+
+    def test_cli_overrides_file(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "scanner.toml"
+        config_file.write_text("max_scan_file_size_mb = 33\n")
+        config = ScannerConfig.resolve(
+            config_file=config_file,
+            cli_overrides={"max_scan_file_size_mb": 44},
+        )
+        assert config.max_scan_file_size_mb == 44
+
+    def test_config_path_from_environment(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "scanner.toml"
+        config_file.write_text("max_scan_file_size_mb = 21\n")
+        config = ScannerConfig.resolve(environ={"IOT_HARDWARE_SCANNER_CONFIG": str(config_file)})
+        assert config.max_scan_file_size_mb == 21
+
+    def test_unknown_environment_keys_are_ignored(self) -> None:
+        config = ScannerConfig.resolve(environ={"IOT_HARDWARE_SCANNER_NOPE": "1"})
+        assert config.max_file_size_mb == 2048
+
+    def test_missing_config_file_fails_loudly(self, tmp_path: Path) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="not found"):
+            ScannerConfig.resolve(config_file=tmp_path / "absent.toml")
+
+    def test_unknown_config_key_fails_loudly(self, tmp_path: Path) -> None:
+        import pytest
+
+        config_file = tmp_path / "scanner.toml"
+        config_file.write_text("max_file_size_megabytes = 10\n")
+        with pytest.raises(ValueError, match="unknown setting"):
+            ScannerConfig.from_file(config_file)
+
+    def test_unsupported_suffix_is_rejected(self, tmp_path: Path) -> None:
+        import pytest
+
+        config_file = tmp_path / "scanner.json"
+        config_file.write_text("{}")
+        with pytest.raises(ValueError, match="Unsupported config format"):
+            ScannerConfig.from_file(config_file)
+
+
+class TestYamlOptionality:
+    def test_yaml_config_loads_when_pyyaml_is_present(self, tmp_path: Path) -> None:
+        import pytest
+
+        pytest.importorskip("yaml")
+        config_file = tmp_path / "scanner.yaml"
+        config_file.write_text("max_scan_file_size_mb: 9\n")
+        assert ScannerConfig.from_file(config_file).max_scan_file_size_mb == 9
+
+    def test_missing_pyyaml_gives_a_clear_message(
+        self, tmp_path: Path, monkeypatch: "object"
+    ) -> None:
+        import builtins
+        import sys
+
+        config_file = tmp_path / "scanner.yaml"
+        config_file.write_text("max_scan_file_size_mb: 9\n")
+
+        real_import = builtins.__import__
+
+        def blocked(name, *args, **kwargs):
+            if name == "yaml":
+                raise ModuleNotFoundError("No module named 'yaml'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", blocked)  # type: ignore[attr-defined]
+        sys.modules.pop("yaml", None)
+        try:
+            import pytest
+
+            with pytest.raises(ValueError, match="yaml_support"):
+                ScannerConfig.from_file(config_file)
+        finally:
+            sys.modules.pop("yaml", None)

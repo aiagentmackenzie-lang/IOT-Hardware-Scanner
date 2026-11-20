@@ -67,9 +67,10 @@ class TestExitCodes:
         exc = FirmwareUnreadableError("test")
         assert exc.exit_code == 3
 
-    def test_path_traversal_code_2(self) -> None:
+    def test_path_traversal_code_3(self) -> None:
+        # Invalid input is a validation failure: exit 3.
         exc = FirmwarePathTraversalError("test")
-        assert exc.exit_code == 2
+        assert exc.exit_code == 3
 
     def test_extraction_failed_code_4(self) -> None:
         exc = ExtractionFailedError("test")
@@ -87,9 +88,10 @@ class TestExitCodes:
         exc = NVDApiError("test")
         assert exc.exit_code == 6
 
-    def test_config_error_code_2(self) -> None:
+    def test_config_error_code_3(self) -> None:
+        # Invalid configuration is a validation failure: exit 3.
         exc = ConfigError("test")
-        assert exc.exit_code == 2
+        assert exc.exit_code == 3
 
     def test_default_code_6(self) -> None:
         exc = ScannerError("test")

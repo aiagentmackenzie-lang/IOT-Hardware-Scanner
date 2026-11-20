@@ -27,6 +27,7 @@ from iot_hardware_scanner.exceptions import (
 from iot_hardware_scanner.models import (
     FirmwareMetadata,
     FirmwareSizeCategory,
+    InputKind,
     ScanContext,
 )
 
@@ -179,6 +180,71 @@ class FirmwareIngest:
             firmware_name,
             file_type,
             size_category.value,
+        )
+        return context
+
+    def ingest_tree(self, tree_path: Path) -> ScanContext:
+        """Catalog an already-staged directory as the inspected artifact.
+
+        The artifact identity is a canonical tree-manifest digest: SHA-256 over
+        sorted ``<relative path>\\0<file sha256>\\n`` lines, so the same tree
+        yields the same digest on any host regardless of enumeration order.
+
+        Metadata is host-derived. Ownership and permission bits are recorded as
+        they appear on this host, not as the build declared them; callers must
+        treat them as host observations.
+        """
+        original_path = Path(tree_path)
+        if "\x00" in str(original_path):
+            raise FirmwarePathTraversalError("Path contains null byte")
+        if not original_path.exists():
+            raise FirmwareNotFoundError(f"Input path not found: {original_path}")
+        if not original_path.is_dir():
+            raise FirmwareNotFoundError(f"Not a directory: {original_path}")
+
+        resolved = original_path.resolve()
+        entries: list[tuple[str, str]] = []
+        total_size = 0
+        for entry in sorted(resolved.rglob("*")):
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            try:
+                digest, _md5 = self._compute_hashes(entry)
+            except (OSError, PermissionError) as exc:
+                logger.warning("Cannot read %s: %s", entry, exc)
+                continue
+            entries.append((str(entry.relative_to(resolved)), digest))
+            total_size += entry.stat().st_size
+
+        if not entries:
+            raise FirmwareEmptyError(f"Tree contains no regular files: {resolved}")
+
+        manifest = "".join(f"{rel}\0{digest}\n" for rel, digest in entries)
+        tree_digest = hashlib.sha256(manifest.encode("utf-8", "surrogateescape")).hexdigest()
+        md5 = hashlib.md5(
+            manifest.encode("utf-8", "surrogateescape"), usedforsecurity=False
+        ).hexdigest()
+
+        scan_id = str(uuid.uuid4())
+        context = ScanContext(
+            scan_id=scan_id,
+            firmware_path=resolved,
+            output_dir=self._create_output_dir(resolved.name, scan_id),
+            file_hash_sha256=tree_digest,
+            file_hash_md5=md5,
+            file_size=total_size,
+            file_type=f"Staged root tree ({len(entries)} files)",
+            firmware_name=resolved.name,
+            size_category=self._classify_size(total_size),
+            started_at=datetime.now(timezone.utc),
+            input_kind=InputKind.TREE,
+            input_manifest_entries=len(entries),
+        )
+        logger.info(
+            "Tree ingestion complete: %s (%d files, digest %s)",
+            resolved.name,
+            len(entries),
+            tree_digest,
         )
         return context
 

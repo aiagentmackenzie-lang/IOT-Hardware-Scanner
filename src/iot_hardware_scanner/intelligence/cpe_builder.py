@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+
+from iot_hardware_scanner import resources
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,8 @@ def _load_data_map() -> dict[str, tuple[str, str]]:
     if _DATA_MAP_LOADED:
         return PRODUCT_CPE_MAP
 
-    data_path = Path(__file__).parent.parent.parent.parent / "data" / "component_cpe_map.json"
     try:
+        data_path = resources.data_file("component_cpe_map.json")
         if data_path.exists():
             raw = json.loads(data_path.read_text(encoding="utf-8"))
             for product, mapping in raw.items():
