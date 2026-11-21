@@ -99,7 +99,10 @@ jobs:
           # export path (`iot-hardware-scanner sbom --validate`).
           WHEEL=$(ls dist/*.whl)
           /tmp/ihs-venv/bin/pip install "${WHEEL}[nvd]" "${WHEEL}[yaml-support]" "${WHEEL}[sbom]"
-          python - "$WHEEL" <<'PY'
+          # Run the audited import under the environment that has the wheel
+          # installed: the job's own interpreter never has the package, and
+          # that is the whole point of installing outside the checkout.
+          /tmp/ihs-venv/bin/python - "$WHEEL" <<'PY'
           import sys, zipfile
           wheel = sys.argv[1]
           with zipfile.ZipFile(wheel) as archive:
