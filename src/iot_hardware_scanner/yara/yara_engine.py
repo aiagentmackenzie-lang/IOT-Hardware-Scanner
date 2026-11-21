@@ -29,6 +29,7 @@ from typing import Any
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import RuleFileRecord, RuleSetInfo, YaraMatch
+from iot_hardware_scanner.scanner.analysis_cache import AnalysisCache, sha256_file
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,13 @@ _INDICATOR_CATEGORIES = frozenset({"malware_signature", "c2_indicator"})
 
 _INCLUDE_STATEMENT = re.compile(r"^\s*include\s+")
 _RULE_DECLARATION = re.compile(r"^\s*(?:private\s+|global\s+)*rule\s+[A-Za-z_]")
+
+
+def _scalar(value: Any) -> Any:
+    """A JSON-safe scalar for a cached match's meta block."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def destination_for(category: str) -> str:
@@ -84,7 +92,13 @@ def _digest_of(files: list[tuple[str, str, bytes]]) -> str:
 class YaraEngine:
     """Load, compile once, and execute YARA rules against files and data."""
 
-    def __init__(self, config: ScannerConfig, rule_dirs: list[Path] | None = None) -> None:
+    def __init__(
+        self,
+        config: ScannerConfig,
+        rule_dirs: list[Path] | None = None,
+        *,
+        cache: AnalysisCache | None = None,
+    ) -> None:
         self.config = config
         self._extra_dirs = list(rule_dirs or [])
         self._rules: Any = None
@@ -92,6 +106,10 @@ class YaraEngine:
         self._yara_available: bool = False
         self._info = RuleSetInfo()
         self._checked = False
+        #: Optional content-addressed cache of per-file match sets (slice 5C).
+        #: Entries are keyed by content digest + rule-set digest + engine
+        #: version and never contain a path.
+        self._cache = cache
         # Import and version-probe once, so `is_available` and the wheel's
         # dependency check answer without compiling anything.
         self._check_yara()
@@ -253,16 +271,100 @@ class YaraEngine:
     # ──────────────────────────────────────────
 
     def scan_file(self, file_path: Path) -> list[YaraMatch]:
-        """Scan a file against the compiled rules."""
+        """Scan a file against the compiled rules, through the cache if enabled."""
         if self._rules is None or not file_path.exists():
             return []
-        return self._scan(self._rules, file_path=file_path)
+        if self._cache is None:
+            return self._scan(self._rules, file_path=file_path)
+
+        digest = sha256_file(file_path)
+        if digest is None:  # unreadable: let YARA report the failure itself
+            return self._scan(self._rules, file_path=file_path)
+        cached = self._cache.get("yara-file", digest, self._cache_dependencies())
+        if isinstance(cached, list):
+            return [self._match_from_entry(item, file_path) for item in cached]
+
+        matches = self._scan(self._rules, file_path=file_path)
+        self._cache.put(
+            "yara-file",
+            digest,
+            self._cache_dependencies(),
+            [self._match_to_entry(match) for match in matches],
+        )
+        return matches
 
     def scan_data(self, data: bytes, module_name: str = "") -> list[YaraMatch]:
         """Scan raw bytes against the compiled rules."""
         if self._rules is None or not data:
             return []
-        return self._scan(self._rules, data=data, module_name=module_name)
+        if self._cache is None:
+            return self._scan(self._rules, data=data, module_name=module_name)
+
+        digest = hashlib.sha256(data).hexdigest()
+        cached = self._cache.get("yara-data", digest, self._cache_dependencies())
+        if isinstance(cached, list):
+            return [self._match_from_entry(item, None) for item in cached]
+        matches = self._scan(self._rules, data=data, module_name=module_name)
+        self._cache.put(
+            "yara-data",
+            digest,
+            self._cache_dependencies(),
+            [self._match_to_entry(match) for match in matches],
+        )
+        return matches
+
+    def _cache_dependencies(self) -> dict[str, Any]:
+        """Everything a match set depends on besides the content itself."""
+        return {
+            "ruleset_digest": self._info.digest,
+            "engine_version": self._info.engine_version or "unknown",
+        }
+
+    @staticmethod
+    def _match_to_entry(match: YaraMatch) -> dict[str, Any]:
+        """A path-free serialisable form. Locations are rebound on read."""
+        return {
+            "rule_name": match.rule_name,
+            "namespace": match.namespace,
+            "meta": {str(k): _scalar(v) for k, v in match.meta.items()},
+            "strings": [
+                [offset, identifier, blob.hex()] for offset, identifier, blob in match.strings
+            ],
+            "destination": match.destination,
+            "category": match.category,
+            "severity": match.severity,
+            "rule_file": match.rule_file,
+        }
+
+    def _match_from_entry(self, entry: Any, file_path: Path | None) -> YaraMatch:
+        if not isinstance(entry, dict):
+            return YaraMatch(
+                rule_name="invalid-cache-entry",
+                namespace="",
+                meta={},
+                strings=[],
+                file_path=file_path,
+            )
+        strings: list[tuple[int, str, bytes]] = []
+        for item in entry.get("strings", []):
+            try:
+                offset, identifier, blob = item
+                strings.append((int(offset), str(identifier), bytes.fromhex(str(blob))))
+            except (TypeError, ValueError):
+                continue
+        meta = entry.get("meta", {})
+        return YaraMatch(
+            rule_name=str(entry.get("rule_name", "unknown")),
+            namespace=str(entry.get("namespace", "")),
+            meta=dict(meta) if isinstance(meta, dict) else {},
+            strings=strings,
+            file_path=file_path,
+            destination=str(entry.get("destination", "indicator")),
+            category=str(entry.get("category", "")),
+            severity=str(entry.get("severity", "INFO")).upper(),
+            rule_file=str(entry.get("rule_file", "")),
+            ruleset_digest=self._info.digest,
+        )
 
     def _scan(
         self,

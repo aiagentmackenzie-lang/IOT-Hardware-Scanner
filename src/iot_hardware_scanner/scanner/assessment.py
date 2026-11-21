@@ -53,7 +53,11 @@ logger = logging.getLogger(__name__)
 PROFILE_FIRMWARE = "firmware-static"
 PROFILE_FIRMWARE_TREE = "firmware-tree"
 PROFILE_CREDENTIALS = "credentials-only"
-PROFILE_VERSION = "4.0"
+PROFILE_BOOT = "firmware-boot"
+#: Profile semantics. 5.0 adds ``firmware-boot`` and the ``boot_analysis``
+#: stage. **No existing profile's required set changed**; the bump records that
+#: a new profile and a new stage id exist.
+PROFILE_VERSION = "5.0"
 
 #: Stages a profile must finish before it may report a complete assessment.
 #:
@@ -107,6 +111,16 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
         StageId.UNIX_ACCOUNTS,
         StageId.RISK_CONTROLS,
     ),
+    #: A boot manifest is not a root filesystem. Only the artifact itself is
+    #: read: there is no extraction, enumeration, package database or account
+    #: file to inspect, and those stages are recorded NOT_APPLICABLE rather
+    #: than skipped. ``rule_compilation`` is required in every profile.
+    PROFILE_BOOT: (
+        StageId.INGEST,
+        StageId.RULE_COMPILATION,
+        StageId.BOOT_ANALYSIS,
+        StageId.RISK_CONTROLS,
+    ),
 }
 
 #: Stages that never block completion, with the reason they are not requested.
@@ -120,6 +134,20 @@ OPTIONAL_STAGES: dict[str, tuple[StageId, ...]] = {
     ),
     PROFILE_CREDENTIALS: (
         StageId.CREDENTIAL_SCAN,
+        StageId.ADVISORY,
+    ),
+    PROFILE_BOOT: (
+        StageId.EXTRACTION,
+        StageId.ROOT_DISCOVERY,
+        StageId.ENUMERATION,
+        StageId.ENTROPY,
+        StageId.BINARY_INVENTORY,
+        StageId.ELF_METADATA,
+        StageId.OPKG_INVENTORY,
+        StageId.CREDENTIAL_SCAN,
+        StageId.UNIX_ACCOUNTS,
+        StageId.SERVICE_ANALYSIS,
+        StageId.C2_INDICATORS,
         StageId.ADVISORY,
     ),
 }
@@ -269,6 +297,48 @@ def _advisory_to_finding(finding: CVEFinding) -> ReportFinding:
     )
 
 
+def _boot_to_findings(context: ScanContext) -> list[ReportFinding]:
+    """A payload whose bytes do not match its declared digest is reportable.
+
+    Decision recorded for slice 3D: this is an **observation with evidence**, a
+    HIGH review finding (exit 2 when the rest is complete), and it is *not* a
+    critical-capable rule. A static parser can see that a declaration and the
+    bytes disagree; it cannot see which of them the bootloader would use.
+    """
+    if context.boot is None:
+        return []
+    findings: list[ReportFinding] = []
+    for artifact in context.boot.artifacts:
+        for payload in artifact.referenced_payloads:
+            if payload.integrity not in ("mismatch", "out-of-bounds"):
+                continue
+            findings.append(
+                ReportFinding(
+                    rule_id="boot.payload_integrity",
+                    severity=Severity.HIGH,
+                    title="Boot payload does not match its declared digest",
+                    description=(
+                        f"The boot manifest declares a digest for {payload.node} that "
+                        f"the referenced bytes do not satisfy ({payload.integrity})."
+                    ),
+                    category="boot_integrity",
+                    locations=[f"{artifact.locator}!{payload.node}"],
+                    evidence=[
+                        f"declared={payload.digest_declared or 'none'}",
+                        f"observed={payload.digest_observed or 'unreadable'}",
+                        f"integrity={payload.integrity}",
+                    ],
+                    remediation=(
+                        "Rebuild the boot manifest so the declared digest matches the "
+                        "payload, or correct the declaration."
+                    ),
+                    destination="integrity",
+                    critical_qualified=False,
+                )
+            )
+    return findings
+
+
 def collect_findings(context: ScanContext) -> list[ReportFinding]:
     """Normalize every detector result into one list of findings.
 
@@ -280,6 +350,7 @@ def collect_findings(context: ScanContext) -> list[ReportFinding]:
     findings.extend(_c2_to_finding(f) for f in context.c2_findings)
     findings.extend(_crypto_to_finding(f) for f in context.crypto_findings)
     findings.extend(_advisory_to_finding(f) for f in context.cve_findings)
+    findings.extend(_boot_to_findings(context))
 
     findings.sort(key=lambda f: (f.category, f.rule_id, tuple(f.locations), f.severity.value))
     return findings

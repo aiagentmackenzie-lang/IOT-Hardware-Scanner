@@ -293,4 +293,5 @@ fetched by the suite; `/tmp/ihs-corpus` is the operator's own staging area.
 | The worker image id | The package set, the Dockerfile and `unsquashfs` are reproducible; the image id is not, and is published as observed. |
 | The supplier SBOM's package names | The supplier document uses upstream names (`jansson`, `libblkid`), the opkg database uses distribution names (`jansson4`, `libblkid1`). The comparison reports that honestly as declared-only/observed-only rather than guessing a mapping between them. |
 | Broader comparison accuracy | Measured on one generated pair and one frozen OpenWrt release. There is no held-out set of release pairs, so no accuracy claim beyond those fixtures is made. |
-| MCU, FIT/DTB, RAUC, partitioned images, raw NAND, caching (5C) | Separate gates with their own fixtures; not started. |
+| MCU, RAUC, partitioned images, raw NAND | Separate gates with their own fixtures; not started. |
+| FIT/DTB (3D) and 5C caching | **Delivered after D in 2.4.0**, as scheduled post-D slices, not as a new milestone. See [docs/MILESTONE-E.md](MILESTONE-E.md) and [docs/5C-DECISION.md](5C-DECISION.md). |

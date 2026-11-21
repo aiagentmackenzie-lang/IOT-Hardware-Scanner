@@ -11,10 +11,10 @@
 # -----------------------------------
 # The package set is pinned twice over: to a Debian snapshot date, so the
 # repository that served the archive still exists, and to exact versions in
-# `packages.txt`, so nothing resolves at build time. `binutils` — used only by
-# release verification to cross-check the scanner's ELF facts with `readelf`,
-# never by a scan — moved out of the runtime image into the `verification`
-# stage.
+# `packages.txt`, so nothing resolves at build time. `binutils` (readelf),
+# `device-tree-compiler` (fdtdump/fdtget) and `u-boot-tools` (mkimage -l) are
+# used only by release verification to cross-check the scanner's ELF and
+# FDT/FIT facts, never by a scan, so they live in the `verification` stage.
 #
 # The Docker image *id* is deliberately not claimed reproducible: the image
 # configuration records a build timestamp, so two builds of identical content
@@ -24,8 +24,9 @@
 #
 # Stages:
 #   base          snapshot-pinned, package-pinned Debian with squashfs-tools
-#   verification  base + binutils (readelf). Built as
-#                 `ihs-squashfs-worker:4.5.1-verify`; never the default target.
+#   verification  base + binutils, device-tree-compiler and u-boot-tools.
+#                 Built as `ihs-squashfs-worker:4.5.1-verify`; never the
+#                 default target.
 #   runtime       the default (last) stage; no binutils.
 
 ARG DEBIAN_BASE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
@@ -51,8 +52,9 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update \
  && apt-get install -y --no-install-recommends $(grep -v '^#' /tmp/packages.txt) \
  && rm -rf /var/lib/apt/lists/* /tmp/packages.txt
 
-# Verification stage: readelf for the independent ELF cross-check in the
-# release gate. The scanner never invokes anything from this stage.
+# Verification stage: readelf for the ELF cross-check, fdtdump/fdtget and
+# mkimage for the FDT/FIT cross-check. The scanner never invokes anything from
+# this stage, and the runtime image below does not contain these tools.
 FROM base AS verification
 COPY packages-verify.txt /tmp/packages-verify.txt
 RUN apt-get -o Acquire::Check-Valid-Until=false update \

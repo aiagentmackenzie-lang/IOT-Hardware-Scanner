@@ -319,6 +319,8 @@ jobs:
           docker run --rm --entrypoint /usr/bin/unsquashfs "$IHS_WORKER_IMAGE" -version \
             2>&1 | head -1
           docker run --rm --entrypoint /usr/bin/readelf "${IHS_WORKER_IMAGE}-verify" -v 2>&1 | head -1
+          docker run --rm --entrypoint /usr/bin/fdtdump "${IHS_WORKER_IMAGE}-verify" --version 2>&1 | head -1
+          docker run --rm --entrypoint /usr/bin/mkimage "${IHS_WORKER_IMAGE}-verify" -V 2>&1 | head -1
 
       - name: Stage the pinned image
         run: |
@@ -365,6 +367,8 @@ jobs:
           # capability unqualified, and the next step fails on it.
           /tmp/ihs-venv/bin/python -m pytest \
             tests/test_installed_image_cli.py \
+            tests/test_fit_dtb.py \
+            tests/test_analysis_cache.py \
             tests/test_comparison.py \
             tests/test_sbom.py \
             tests/test_elf_parser.py \

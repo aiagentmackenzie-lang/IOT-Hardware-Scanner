@@ -23,6 +23,7 @@ from iot_hardware_scanner.models import (
     FileCategory,
     FilesystemInventory,
 )
+from iot_hardware_scanner.scanner.analysis_cache import AnalysisCache, sha256_file
 from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 from iot_hardware_scanner.yara.yara_engine import YaraEngine, YaraMatch
 
@@ -39,6 +40,12 @@ _DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+#: Identity of the text-fact extractor. Bump when the regexes or the
+#: derivation change: a cache entry made by an older extractor is then ignored.
+TEXT_FACTS_VERSION = "1"
+#: The bounded text budget the extractor uses; part of the cache key.
+TEXT_FACTS_MAX_BYTES = 8 * 1024 * 1024
 
 # ── Known-benign file path prefixes ──
 _BENIGN_PATH_PREFIXES = ("docs/", "tests/", "test/", "documentation/")
@@ -74,8 +81,16 @@ class C2Detector:
     3. detect_malware_signatures — YARA-based malware family detection
     """
 
-    def __init__(self, config: ScannerConfig, rule_engine: YaraEngine | None = None) -> None:
+    def __init__(
+        self,
+        config: ScannerConfig,
+        rule_engine: YaraEngine | None = None,
+        *,
+        cache: AnalysisCache | None = None,
+    ) -> None:
         self.config = config
+        #: Optional content-addressed cache of per-file text facts (slice 5C).
+        self._cache = cache
         self._threat_intel = ThreatIntelManager(config)
         self._domain_scorer = DomainScorer(config, self._threat_intel)
         #: The run's single compiled rule set. One compile per run: the caller
@@ -128,6 +143,10 @@ class C2Detector:
         for ff in sorted(inventory.findings, key=lambda f: str(f.path)):
             if self._is_benign_path(ff.path):
                 continue
+            facts = self._file_text_facts(ff.absolute_path)
+            if facts is None:
+                continue
+            email_only = set(facts.get("email_only_domains", []))
             if self._is_binary_file(ff.absolute_path):
                 context: dict = {"in_binary": True, "in_hosts": False}
             else:
@@ -135,8 +154,8 @@ class C2Detector:
                     "in_binary": False,
                     "in_hosts": self._is_hosts_or_config(ff.path),
                 }
-            for domain in sorted(self._extract_domains_from_file(ff.absolute_path)):
-                if self._is_email_domain(domain, ff.absolute_path):
+            for domain in sorted(facts.get("domains", [])):
+                if domain in email_only:
                     continue
                 plausible, reason = self._domain_scorer.plausible_domain(domain, names)
                 if not plausible:
@@ -235,7 +254,10 @@ class C2Detector:
         for ff in sorted(inventory.findings, key=lambda f: str(f.path)):
             if self._is_benign_path(ff.path):
                 continue
-            for ip_str in sorted(self._extract_ips_from_file(ff.absolute_path)):
+            facts = self._file_text_facts(ff.absolute_path)
+            if facts is None:
+                continue
+            for ip_str in sorted(facts.get("ips", [])):
                 if self._is_private_or_reserved(ip_str):
                     continue
                 occurrences.setdefault(ip_str, []).append(ff.path)
@@ -574,18 +596,49 @@ class C2Detector:
 
     def _extract_domains_from_file(self, path: Path) -> set[str]:
         """Extract domain names from a file, with OOM protection."""
+        facts = self._file_text_facts(path)
+        if facts is None:
+            return set()
+        return set(facts.get("domains", []))
+
+    def _file_text_facts(self, path: Path) -> dict[str, list[str]] | None:
+        """The extractor's facts for one file, through the cache when enabled.
+
+        A fact set is a pure function of the file's bytes and the extractor
+        version: the domains, the public-looking IPv4 strings, and the subset of
+        domains that occur only inside an email address. Scoring, feeds and
+        suffix lists are applied afterwards by the detector, so a feed update
+        is never hidden behind a cached verdict.
+        """
         max_size = self.config.max_scan_file_size_mb * 1024 * 1024
         try:
             if path.stat().st_size > max_size:
                 logger.debug(
-                    "Skipping large file for domain extraction: %s (%s)",
+                    "Skipping large file for text extraction: %s (%s)",
                     path,
                     _fmt_size(path.stat().st_size),
                 )
-                return set()
+                return None
         except OSError:
-            return set()
-        return _extract_domains_text(path)
+            return None
+
+        cache = getattr(self, "_cache", None)
+        if cache is None:
+            return _text_facts_from_content(_read_text_bounded(path))
+
+        digest = sha256_file(path)
+        if digest is None:
+            return None
+        dependencies = {
+            "extractor_version": TEXT_FACTS_VERSION,
+            "max_bytes": TEXT_FACTS_MAX_BYTES,
+        }
+        cached = cache.get("text-facts", digest, dependencies)
+        if isinstance(cached, dict):
+            return cached
+        facts = _text_facts_from_content(_read_text_bounded(path))
+        cache.put("text-facts", digest, dependencies, facts)
+        return facts
 
     def _is_email_domain(self, domain: str, path: Path) -> bool:
         """Check if a domain appears only as part of an email address."""
@@ -593,18 +646,10 @@ class C2Detector:
 
     def _extract_ips_from_file(self, path: Path) -> set[str]:
         """Extract IPv4 addresses from a file, with OOM protection."""
-        max_size = self.config.max_scan_file_size_mb * 1024 * 1024
-        try:
-            if path.stat().st_size > max_size:
-                logger.debug(
-                    "Skipping large file for IP extraction: %s (%s)",
-                    path,
-                    _fmt_size(path.stat().st_size),
-                )
-                return set()
-        except OSError:
+        facts = self._file_text_facts(path)
+        if facts is None:
             return set()
-        return _extract_ips_text(path)
+        return set(facts.get("ips", []))
 
     @staticmethod
     def _is_private_or_reserved(ip_str: str) -> bool:
@@ -722,12 +767,13 @@ def _read_text_bounded(path: Path, budget: int = 8 * 1024 * 1024) -> str:
         return ""
 
 
-def _extract_domains_text(path: Path) -> set[str]:
-    """Extract domain names from file text, bounded."""
+def _text_facts_from_content(content: str) -> dict[str, list[str]]:
+    """Derive the deterministic per-file text facts from its decoded content."""
     domains: set[str] = set()
-    content = _read_text_bounded(path)
+    ips: set[str] = set()
+    email_only: set[str] = set()
     if not content:
-        return domains
+        return {"domains": [], "ips": [], "email_only_domains": []}
 
     urls = _URL_RE.findall(content)
     url_domains: set[str] = set()
@@ -740,29 +786,43 @@ def _extract_domains_text(path: Path) -> set[str]:
             continue
 
     bare_domains = set(m.lower() for m in _DOMAIN_RE.findall(content))
-    all_domains = url_domains | bare_domains
-    for d in all_domains:
-        parts = d.split(".")
+    for domain in url_domains | bare_domains:
+        parts = domain.split(".")
         if all(p.isdigit() for p in parts):
             continue
         if len(parts) >= 2 and len(parts[-1]) < 2:
             continue
-        domains.add(d)
-    return domains
+        domains.add(domain)
+
+    for match in _IP_RE.findall(content):
+        parts = match.split(".")
+        if all(0 <= int(octet) <= 255 for octet in parts):
+            ips.add(match)
+
+    emails = _EMAIL_RE.findall(content)
+    if emails:
+        lowered = content.lower()
+        for domain in domains:
+            standalone = lowered.count(domain)
+            in_email = sum(1 for email in emails if domain in email.lower())
+            if standalone == in_email and standalone > 0:
+                email_only.add(domain)
+
+    return {
+        "domains": sorted(domains),
+        "ips": sorted(ips),
+        "email_only_domains": sorted(email_only),
+    }
+
+
+def _extract_domains_text(path: Path) -> set[str]:
+    """Extract domain names from file text, bounded."""
+    return set(_text_facts_from_content(_read_text_bounded(path))["domains"])
 
 
 def _extract_ips_text(path: Path) -> set[str]:
     """Extract IPv4 addresses from file text, bounded."""
-    ips: set[str] = set()
-    content = _read_text_bounded(path)
-    if not content:
-        return ips
-
-    for match in _IP_RE.findall(content):
-        parts = match.split(".")
-        if all(0 <= int(o) <= 255 for o in parts):
-            ips.add(match)
-    return ips
+    return set(_text_facts_from_content(_read_text_bounded(path))["ips"])
 
 
 def _is_email_domain_text(domain: str, path: Path) -> bool:

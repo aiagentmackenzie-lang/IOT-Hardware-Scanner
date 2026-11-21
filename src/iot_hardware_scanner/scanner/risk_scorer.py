@@ -34,6 +34,7 @@ from iot_hardware_scanner.models import (
     StageId,
     StageStatus,
 )
+from iot_hardware_scanner.scanner.fit_dtb import selected_configuration
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,9 @@ class ControlEvaluator:
         "firmware-static": frozenset(range(1, 13)),
         "firmware-tree": frozenset(range(1, 13)),
         "credentials-only": frozenset({1}),
+        # A boot manifest is asked exactly two questions: does the shipped
+        # content carry a verification step, and does the board enforce it?
+        "firmware-boot": frozenset({5, 6}),
     }
 
     def evaluate(
@@ -490,6 +494,9 @@ class ControlEvaluator:
         digest comparison, a verification program). That is a statement about
         content, not about a running updater.
         """
+        if context.boot is not None:
+            return self._eval_boot_update(context)
+
         inventory = context.filesystem_inventory
         if inventory is None:
             return _omitted(
@@ -566,6 +573,130 @@ class ControlEvaluator:
             source_stage=StageId.ENUMERATION,
         )
 
+    def _eval_boot_update(self, context: ScanContext) -> ControlResult:
+        """Check 5 for a boot manifest: a positive source, kept in its place.
+
+        An FIT can carry a real verification step: declared payload digests and
+        a signature over the selected configuration. That is positive content
+        evidence, so this is the one place check 5 can be PERFORMED without a
+        filesystem. It still does not claim the board runs the check.
+        """
+        artifacts = context.boot.artifacts if context.boot else []
+        selected = [(artifact, selected_configuration(artifact)) for artifact in artifacts]
+        payloads = [p for artifact in artifacts for p in artifact.referenced_payloads]
+        matches = [p for p in payloads if p.integrity == "match"]
+        mismatches = [p for p in payloads if p.integrity == "mismatch"]
+        out_of_bounds = [p for p in payloads if p.integrity == "out-of-bounds"]
+        undeclared = [p for p in payloads if p.integrity == "undeclared"]
+        signed_selected = [
+            config
+            for _artifact, config in selected
+            if config is not None and config.signature.present
+        ]
+        verified_selected = [
+            config for config in signed_selected if config.signature.verified is True
+        ]
+
+        evidence = [
+            f"{len(payloads)} referenced payload(s): {len(matches)} digest match, "
+            f"{len(mismatches)} mismatch, {len(out_of_bounds)} out of bounds, "
+            f"{len(undeclared)} undeclared",
+            f"{len(signed_selected)} signature(s) on the selected configuration, "
+            f"{len(verified_selected)} verified with an operator-supplied key",
+        ]
+
+        if mismatches or out_of_bounds:
+            for payload in mismatches + out_of_bounds:
+                evidence.append(
+                    f"{payload.node}: declared {payload.digest_declared or 'nothing'}, "
+                    f"observed {payload.digest_observed or 'unreadable'} "
+                    f"({payload.integrity})"
+                )
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="FAIL",
+                evidence=[
+                    *evidence,
+                    "A declared digest does not match the bytes it covers, so the "
+                    "verification step the manifest declares would reject this payload.",
+                ],
+                remediation=(
+                    "Rebuild the FIT so each payload digest matches its declared hash, "
+                    "or correct the declaration; then confirm on the device that the "
+                    "bootloader enforces it."
+                ),
+                source_stage=StageId.BOOT_ANALYSIS,
+            )
+
+        if verified_selected:
+            config = verified_selected[0]
+            evidence.append(
+                f"configuration {config.name!r} is signed over "
+                f"{', '.join(config.signature.signed_nodes)} and verifies with the "
+                f"supplied key (algo {config.signature.algo})"
+            )
+        elif signed_selected:
+            config = signed_selected[0]
+            evidence.append(
+                f"configuration {config.name!r} carries a signature that was not "
+                f"verified: {config.signature.reason}"
+            )
+        elif matches:
+            evidence.append(
+                "Declared payload digests match, but no signature covers the selected "
+                "configuration; this is integrity, not authenticity."
+            )
+
+        if verified_selected or signed_selected or matches:
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=[
+                    *evidence,
+                    "The manifest declares a verification step and the content evidence "
+                    "supports it. Whether the device runs it, and whether the key is "
+                    "pinned in hardware, is check 6 and is unknown.",
+                ],
+                remediation=(
+                    "Confirm on the device that the bootloader verifies this "
+                    "configuration against a pinned key and refuses unverified content."
+                ),
+                source_stage=StageId.BOOT_ANALYSIS,
+            )
+
+        if not payloads and not signed_selected:
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    *evidence,
+                    "The artifact declares no payload digest and no signature over a "
+                    "selected configuration, so no verification step was observed.",
+                ],
+                remediation="Ship a manifest that declares payload digests or a signature.",
+                source_stage=StageId.BOOT_ANALYSIS,
+            )
+
+        return ControlResult(
+            control_id=5,
+            control_name="",
+            status=CheckStatus.PERFORMED,
+            result="FAIL",
+            evidence=[
+                *evidence,
+                "Referenced payloads declare no digest and no selected configuration "
+                "carries a signature.",
+            ],
+            remediation="Add payload digests and a signature over the selected configuration.",
+            source_stage=StageId.BOOT_ANALYSIS,
+        )
+
     # ── Control 6: secure boot / board enforcement ──
     def _eval_secure_boot(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
         """Enforcement, not content: the question a static image cannot answer.
@@ -574,6 +705,51 @@ class ControlEvaluator:
         asks whether the board refuses unverified content at boot, which needs
         boot logs, fuse/OTP state or secure-boot configuration from the device.
         """
+        if context.boot is not None:
+            evidence = []
+            for artifact in context.boot.artifacts:
+                config = selected_configuration(artifact)
+                if config is None:
+                    evidence.append(
+                        f"{artifact.locator}: no default configuration is declared, so "
+                        "even the intended boot target is unknown"
+                    )
+                    continue
+                signature = config.signature
+                verification = (
+                    "true"
+                    if signature.verified is True
+                    else "false"
+                    if signature.verified is False
+                    else "unverified"
+                )
+                evidence.append(
+                    f"{artifact.locator}: declares default configuration {config.name!r} "
+                    f"(kernel {config.kernel!r}, fdt {config.fdt!r}); signature "
+                    f"{'present' if signature.present else 'absent'}, verification "
+                    f"{verification}"
+                )
+            evidence.extend(
+                [
+                    "A declared configuration is intent, not enforcement. No boot log, "
+                    "fuse/OTP state or secure-boot configuration was supplied, so this "
+                    "check cannot pass or fail.",
+                    "The artifact's own signature verification is reported separately as "
+                    "check 5; it says nothing about the board refusing unverified content.",
+                ]
+            )
+            return ControlResult(
+                control_id=6,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=evidence,
+                remediation=(
+                    "Provide a boot log and the fuse/OTP state from the device, or an "
+                    "authorised report of the secure-boot configuration."
+                ),
+                source_stage=StageId.BOOT_ANALYSIS,
+            )
         return ControlResult(
             control_id=6,
             control_name="",

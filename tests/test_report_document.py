@@ -224,3 +224,27 @@ class TestControlRendering:
         markdown = render(document, "markdown")
         assert "INCONCLUSIVE" in markdown
         assert "etc/inittab:2" in markdown
+
+
+class TestSchemaFiveReader:
+    """A v5 document upgrades to v6 without inventing boot facts."""
+
+    def test_a_v5_document_gains_absent_not_empty_sections(self) -> None:
+        v5 = {
+            "schema_version": 5,
+            "artifact": {"kind": "file", "name": "x", "sha256": "a" * 64},
+            "assessment": {"profile": "firmware-static", "profile_version": "4.0"},
+            "stages": [],
+            "findings": [],
+            "controls": [],
+            "components": [],
+            "component_bases": {"total": 0},
+        }
+
+        document = load_document(v5)
+
+        assert document["schema_version"] == SCHEMA_VERSION
+        assert document["boot"] is None
+        assert document["cache"] is None
+        assert document["migration"]["from"] == 5
+        assert document["component_bases"] == {"total": 0}

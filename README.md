@@ -12,24 +12,26 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.3.0
+## Status — version 2.4.0
 
-Version 2.3 delivers the differentiating feature: **compare two released images
-and reconcile the build declaration**, export the inventory as a **CycloneDX 1.6
-BOM**, and carry **every** installed-package record as a component with a
-recorded naming basis. Everything a comparison claims comes from the two saved
-scan documents — it issues no request, runs no extractor and re-reads no
-firmware. Report schema 5. The aggregate 0–100 grade stays retired.
-Qualified in CI: run `44897056652`, 8/8 jobs green, 166 acceptance tests with
-zero skips in the job that runs the real extraction path.
+Version 2.4 adds two post-D slices. **Boot manifests** (`firmware-boot`): bounded
+parsers for flattened device trees and U-Boot FIT, with board compatibility,
+memory, partitions, configurations and referenced payloads; digest integrity,
+signature presence and verification against an **operator-supplied** key are
+separate fields, and physical boot enforcement is always `unknown`.
+**Repeated work** (5C): an opt-in content-addressed cache of deterministic
+parser outputs, measured at 7.73 s → 1.81 s and 205.8 MB → 110.0 MB on the
+pinned corpus, with identical reports. Report schema 6, profile version 5.0.
+The aggregate 0–100 grade stays retired.
 
-Version 2.2 was the first qualified release: it names the rule set that produced
-each finding, gives every match a typed destination, calibrates all 12 named
-checks, and applies a local advisory snapshot **offline**. See
-[docs/MILESTONE-D.md](docs/MILESTONE-D.md) for the 2.3 record,
-[what changed](#what-changed-in-20), [docs/MIGRATION-v5.md](docs/MIGRATION-v5.md)
-for report schema 5, and [docs/MIGRATION-v4.md](docs/MIGRATION-v4.md) for
-schema 4.
+Version 2.3 delivered the release comparison, declaration reconciliation and
+CycloneDX export; 2.2 was the first qualified release. See
+[docs/MILESTONE-E.md](docs/MILESTONE-E.md) for the 2.4 slice record,
+[docs/5C-DECISION.md](docs/5C-DECISION.md) for the measured cache decision,
+[docs/MILESTONE-D.md](docs/MILESTONE-D.md) for 2.3,
+[what changed](#what-changed-in-20), [docs/MIGRATION-v6.md](docs/MIGRATION-v6.md)
+for report schema 6, and [docs/MIGRATION-v5.md](docs/MIGRATION-v5.md) for
+schema 5.
 
 The qualification record — formats, tested level, host requirements, corpus
 descriptions and the measured detector numbers — is
@@ -57,7 +59,9 @@ to a passing case.
 | Release-to-release comparison (`compare`) | ✅ implemented, offline, on two saved scans |
 | Build-declaration reconciliation (OpenWrt manifest, CycloneDX 1.4) | ✅ implemented, with each declaration's digest, binding and four outcomes |
 | CycloneDX 1.6 BOM export (`sbom --validate`) | ✅ implemented, validated against a vendored schema |
-| MCU / FIT / RAUC / partitioned images | ❌ later gates, not in this release |
+| Flattened device trees and U-Boot FIT (`firmware-boot`) | ✅ bounded parse; configuration, payload integrity, signature presence/verification |
+| Repeated-work cache (`--cache-dir`) | ✅ opt-in, bounded, atomic; measured cold/warm equivalence |
+| MCU / RAUC / partitioned images / raw NAND | ❌ later gates, not in this release |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -114,6 +118,15 @@ iot-hardware-scanner scan firmware.img.gz --offline --format json --out report.j
 iot-hardware-scanner scan firmware.img.gz --offline \
   --advisory-snapshot advisory-2026-11.json --format json --out report.json
 
+# Read a boot manifest: an FIT or a DTB. A key is only a trust anchor when the
+# operator supplies it; an embedded key is never trusted.
+iot-hardware-scanner scan board.itb --profile firmware-boot --format json --out board.json
+iot-hardware-scanner scan board.itb --trust-anchor operator-key.pem --format json --out board.json
+
+# Reuse deterministic parser output across runs (opt-in, bounded, offline)
+iot-hardware-scanner scan firmware.img.gz --cache-dir ~/.cache/ihs-analysis \
+  --format json --out report.json
+
 # Decode an image without analysing it
 iot-hardware-scanner extract firmware.img.gz --output ./extracted
 
@@ -159,6 +172,7 @@ and never prints a success line. `--offline` remains valid; it is also the defau
 | `firmware-static` | default for a file | ingest, rule compilation, extraction, root discovery, enumeration, entropy, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks |
 | `firmware-tree` | `--input-tree`, or a directory positional | ingest, rule compilation, enumeration, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks — **no extraction, no entropy** |
 | `credentials-only` | `--creds` / `--profile credentials-only` | ingest, rule compilation, enumeration, credentials, Unix accounts, checks |
+| `firmware-boot` | `--profile firmware-boot`, or an FDT/FIT magic | ingest, rule compilation, boot analysis, checks (5 and 6); every filesystem stage is `NOT_APPLICABLE` |
 
 A profile completes only when every stage it requires either ran or is genuinely inapplicable. A
 staged tree has no container to decode, so it never carries an extraction prerequisite; the
@@ -214,8 +228,9 @@ finding and exits 2.
 
 ## Report document
 
-One schema-5 JSON document is the single source for every format. Full details in
-[docs/MIGRATION-v5.md](docs/MIGRATION-v5.md); the schema-4 change is in
+One schema-6 JSON document is the single source for every format. Full details in
+[docs/MIGRATION-v6.md](docs/MIGRATION-v6.md) for `boot` and `cache`;
+[docs/MIGRATION-v5.md](docs/MIGRATION-v5.md) is the schema-5 change, the schema-4 change in
 [docs/MIGRATION-v4.md](docs/MIGRATION-v4.md), the schema-3 change in
 [docs/MIGRATION-v3.md](docs/MIGRATION-v3.md) and the schema-2 change in
 [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md).
@@ -226,12 +241,12 @@ document, and neither is a substitute for one.
 
 ```json
 {
-  "schema_version": 5,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.3.0"},
+  "schema_version": 6,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.4.0"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",
-    "profile_version": "4.0",
+    "profile_version": "5.0",
     "completion": "COMPLETE",
     "incomplete_reasons": [],
     "check_counts": {"PERFORMED": 3, "INCONCLUSIVE": 3, "NOT_APPLICABLE": 0, "OMITTED": 6}
@@ -458,8 +473,13 @@ and corpus digests, with the platform each was built on. The reference image is
 ## Known limitations
 
 * **One container path.** gzip-wrapped SquashFS v4 only. Partitioned images, CPIO, JFFS2/UBIFS,
-  MCU address spaces, FIT/DTB and RAUC bundles are later gates with their own fixtures; each is
-  reported as unsupported rather than guessed at.
+  MCU address spaces and RAUC bundles are later gates with their own fixtures; each is reported as
+  unsupported rather than guessed at.
+* **Boot manifests declare intent.** The `firmware-boot` profile reads what an FIT or DTB declares.
+  Physical boot enforcement is always `unknown`; only an operator-supplied PEM key can set
+  `signature.verified` to true, and no in-artifact key is trusted.
+* **The cache is opt-in and measured on one corpus.** It stores per-file rule matches and text
+  facts, never paths or verdicts, and does not make extraction cheaper.
 * **A worker is required for image extraction.** Without a container runtime the product still
   identifies the image and reports honestly, but it cannot enumerate the filesystem (exit 5).
 * **The rule set is now a hard requirement.** If the packaged rules cannot compile, the assessment

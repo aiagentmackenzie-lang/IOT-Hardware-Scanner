@@ -33,6 +33,7 @@ from iot_hardware_scanner.scanner.comparison import (
     read_json_document,
     render_comparison,
 )
+from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
 
 FIRMWARE_A = "a" * 64
 FIRMWARE_B = "b" * 64
@@ -755,6 +756,6 @@ class TestDocumentAndExit:
         path = tmp_path / "v4.json"
         path.write_text(json.dumps(payload))
         document = load_scan(path)
-        assert document["schema_version"] == 5
+        assert document["schema_version"] == SCHEMA_VERSION
         assert document["component_bases"] is None
         assert "cpe_basis" not in document["components"][0]

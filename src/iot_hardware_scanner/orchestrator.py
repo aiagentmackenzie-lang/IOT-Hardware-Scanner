@@ -35,15 +35,19 @@ from iot_hardware_scanner.exceptions import InputKindError, ScannerError
 from iot_hardware_scanner.models import (
     EXTRACTION_UNAVAILABLE,
     ArtifactNode,
+    BootAnalysis,
     ControlResult,
     FileCategory,
     FilesystemInventory,
+    ImageMap,
     InputKind,
     ScanContext,
     StageId,
     StageStatus,
 )
+from iot_hardware_scanner.scanner.analysis_cache import AnalysisCache
 from iot_hardware_scanner.scanner.assessment import (
+    PROFILE_BOOT,
     PROFILE_CREDENTIALS,
     PROFILE_FIRMWARE,
     PROFILE_FIRMWARE_TREE,
@@ -51,7 +55,16 @@ from iot_hardware_scanner.scanner.assessment import (
     build_assessment,
     record_stage,
 )
+from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 from iot_hardware_scanner.scanner.firmware_ingest import FirmwareIngest
+from iot_hardware_scanner.scanner.fit_dtb import (
+    FitDtbError,
+    TrustAnchor,
+    TrustAnchorError,
+    analyse_boot,
+    load_trust_anchor,
+    looks_like_fdt,
+)
 from iot_hardware_scanner.scanner.input_snapshot import (
     InputBindingError,
     bind_input,
@@ -81,6 +94,7 @@ class Orchestrator:
         input_tree: bool = False,
         build_manifest: Path | None = None,
         advisory_snapshot: Path | None = None,
+        trust_anchors: list[Path] | None = None,
     ) -> None:
         self.config = config or ScannerConfig()
         self.input_tree = input_tree
@@ -94,6 +108,9 @@ class Orchestrator:
         self.advisory_snapshot = advisory_snapshot or (
             self.config.advisory_snapshot if config is not None else None
         )
+        #: Operator-supplied trust anchors (slice 3D). Never read from inside
+        #: the artifact: an embedded key is not a trust decision.
+        self.trust_anchor_paths = list(trust_anchors or [])
         if profile is None:
             if creds_only:
                 profile = PROFILE_CREDENTIALS
@@ -102,6 +119,18 @@ class Orchestrator:
             else:
                 profile = PROFILE_FIRMWARE
         self.profile = profile
+        #: Slice 5C: an optional content-addressed cache of deterministic
+        #: parser outputs. One instance is shared by every consumer so the
+        #: report carries one set of hit/miss counts.
+        self._analysis_cache: AnalysisCache | None = (
+            AnalysisCache(
+                self.config.analysis_cache_dir,
+                max_entries=self.config.analysis_cache_max_entries,
+                max_bytes=self.config.analysis_cache_max_mb * 1024 * 1024,
+            )
+            if self.config.analysis_cache_dir is not None
+            else None
+        )
 
     # ──────────────────────────────────────────
     # Entry point
@@ -123,6 +152,25 @@ class Orchestrator:
         else:
             context = self._phase_ingest(input_path)
 
+        # Slice 3D: an FDT/FIT is not a root filesystem. Recognise it by its
+        # own magic and select the profile that means what it says, rather than
+        # running the firmware profile and failing at extraction.
+        if self.profile == PROFILE_BOOT and context.input_kind is InputKind.FILE:
+            context.input_kind = InputKind.BOOT
+        elif (
+            self.profile == PROFILE_FIRMWARE
+            and context.input_kind is InputKind.FILE
+            and context.input_binding_error is None
+        ):
+            head = open_bounded(self._read_path(context)).read_head(4)
+            if looks_like_fdt(head):
+                self.profile = PROFILE_BOOT
+                context.input_kind = InputKind.BOOT
+                console.print(
+                    "  [green]✓[/green] Recognised a flattened device tree or FIT; "
+                    "selected the firmware-boot profile"
+                )
+
         context.profile = self.profile
         context.profile_version = PROFILE_VERSION
 
@@ -130,11 +178,16 @@ class Orchestrator:
 
         if self.profile == PROFILE_CREDENTIALS:
             context = self._run_credentials_profile(context)
+        elif self.profile == PROFILE_BOOT:
+            context = self._run_boot_profile(context)
         else:
             context = self._run_firmware_profile(context)
 
         if context.input_snapshot is not None:
             context.input_snapshot = reverify_source(context.input_snapshot)
+
+        if self._analysis_cache is not None:
+            context.cache_summary = self._analysis_cache.summary()
 
         context.completed_at = datetime.now(timezone.utc)
         build_assessment(
@@ -202,7 +255,7 @@ class Orchestrator:
     def rule_engine(self) -> YaraEngine:
         """The shared, compiled rule set for this run."""
         if self._rule_engine is None:
-            engine = YaraEngine(self.config)
+            engine = YaraEngine(self.config, cache=self._analysis_cache)
             engine.load_rules()
             self._rule_engine = engine
         return self._rule_engine
@@ -273,6 +326,196 @@ class Orchestrator:
         context = self._phase_advisory(context)
         context = self._phase_c2(context)
         return self._phase_controls(context, advisory_assessed=self._advisory_assessed(context))
+
+    def _run_boot_profile(self, context: ScanContext) -> ScanContext:
+        """The boot-manifest profile: nothing here is a root filesystem."""
+        for stage_id, reason in (
+            (
+                StageId.EXTRACTION,
+                "a boot manifest is a file, not a container; nothing was extracted",
+            ),
+            (
+                StageId.ROOT_DISCOVERY,
+                "a boot manifest declares no filesystem root",
+            ),
+            (
+                StageId.ENUMERATION,
+                "a boot manifest is parsed structurally; there is no filesystem to enumerate",
+            ),
+            (
+                StageId.ENTROPY,
+                "byte distribution is not a control for a boot manifest and is not measured",
+            ),
+            (
+                StageId.BINARY_INVENTORY,
+                "no Linux binaries are inspected by the firmware-boot profile",
+            ),
+            (
+                StageId.ELF_METADATA,
+                "no ELF file is inspected by the firmware-boot profile",
+            ),
+            (
+                StageId.OPKG_INVENTORY,
+                "a boot manifest carries no package database",
+            ),
+            (
+                StageId.CREDENTIAL_SCAN,
+                "a boot manifest carries no credential-bearing files to scan",
+            ),
+            (
+                StageId.UNIX_ACCOUNTS,
+                "a boot manifest carries no /etc/passwd or /etc/shadow",
+            ),
+            (
+                StageId.SERVICE_ANALYSIS,
+                "a boot manifest declares no configured service",
+            ),
+            (
+                StageId.C2_INDICATORS,
+                "the firmware-boot profile does not sweep a filesystem for indicators",
+            ),
+            (
+                StageId.ADVISORY,
+                "a boot manifest names no installed component to look up",
+            ),
+        ):
+            record_stage(
+                context,
+                stage_id,
+                StageStatus.NOT_APPLICABLE,
+                reason=reason,
+            )
+        context = self._phase_boot(context)
+        return self._phase_controls(context, advisory_assessed=False)
+
+    # ──────────────────────────────────────────
+    # Phase 3e: boot manifests and board descriptions (slice 3D)
+    # ──────────────────────────────────────────
+
+    def _phase_boot(self, context: ScanContext) -> ScanContext:
+        """Parse one FDT/FIT, verifying only against operator-supplied keys."""
+        console.print("[bold]═══ Phase 3e: Boot manifest ═══[/bold]")
+        anchors: list[TrustAnchor] = []
+        for path in self.trust_anchor_paths:
+            try:
+                anchors.append(load_trust_anchor(path))
+            except (TrustAnchorError, OSError) as exc:
+                record_stage(
+                    context,
+                    StageId.BOOT_ANALYSIS,
+                    StageStatus.FAILED,
+                    reason=f"trust anchor {path} could not be used: {exc}",
+                    inspected=0,
+                    eligible=1,
+                    omissions=["no signature was verified against an unusable key"],
+                )
+                console.print(f"  [red]✗[/red] Trust anchor unusable: {exc}")
+                return context
+        if anchors:
+            console.print(
+                f"  [green]✓[/green] {len(anchors)} operator-supplied trust anchor(s), "
+                f"sha256 {anchors[0].sha256[:16]}…"
+            )
+        else:
+            console.print(
+                "  [yellow]![/yellow] No trust anchor supplied; signature presence is "
+                "recorded, authenticity stays unverified"
+            )
+
+        reader = open_bounded(self._read_path(context))
+        try:
+            artifact, omissions = analyse_boot(
+                reader,
+                locator=context.firmware_name or reader.path.name,
+                digest=context.file_hash_sha256,
+                artifact_id="a0",
+                anchors=anchors,
+            )
+        except FitDtbError as exc:
+            record_stage(
+                context,
+                StageId.BOOT_ANALYSIS,
+                StageStatus.FAILED,
+                reason=f"malformed or truncated boot artifact: {exc}",
+                inspected=0,
+                eligible=1,
+                omissions=["no boot fact was recorded from an invalid structure"],
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+        except Exception as exc:  # a parser bug must be incomplete, not empty
+            record_stage(
+                context,
+                StageId.BOOT_ANALYSIS,
+                StageStatus.FAILED,
+                reason=f"boot manifest could not be parsed: {exc}",
+                inspected=0,
+                eligible=1,
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+
+        context.boot = BootAnalysis(
+            artifacts=[artifact],
+            notes=[
+                "Boot integrity, signature presence, signature verification and board "
+                "enforcement are four separate facts; only the first three can be read "
+                "from a static artifact.",
+                "Physical boot enforcement remains unknown: a declared configuration "
+                "is not evidence that the board enforces it.",
+            ],
+        )
+        context.image_map = ImageMap(
+            root_artifact_id=artifact.artifact_id,
+            nodes=[
+                ArtifactNode(
+                    artifact_id=artifact.artifact_id,
+                    parent_id=None,
+                    digest_sha256=artifact.digest,
+                    format=artifact.kind,
+                    coordinate_system="container-bytes",
+                    offset=0,
+                    length=artifact.size,
+                    decoder="ihs-fit-dtb",
+                    decoder_version="1",
+                    depth=0,
+                    locator=artifact.locator,
+                    details={
+                        "fdt_version": artifact.fdt_version,
+                        "configurations": len(artifact.configurations),
+                        "referenced_payloads": len(artifact.referenced_payloads),
+                    },
+                )
+            ],
+        )
+
+        status = StageStatus.PARTIAL if omissions else StageStatus.COMPLETE
+        record_stage(
+            context,
+            StageId.BOOT_ANALYSIS,
+            status,
+            reason=(
+                f"{artifact.kind} parsed: {len(artifact.configurations)} configuration(s), "
+                f"{len(artifact.referenced_payloads)} referenced payload(s), "
+                f"default {artifact.default_config or 'unknown'}"
+            ),
+            inspected=1,
+            eligible=1,
+            omissions=list(omissions),
+        )
+        signed = sum(1 for config in artifact.configurations if config.signature.present)
+        verified = sum(1 for config in artifact.configurations if config.signature.verified is True)
+        integrity = [p.integrity for p in artifact.referenced_payloads]
+        console.print(
+            f"  [green]✓[/green] {artifact.kind}: "
+            f"{len(artifact.configurations)} config(s), "
+            f"{integrity.count('match')}/{len(integrity)} payload digest(s) match, "
+            f"{signed} signature(s) present, {verified} verified with a supplied key"
+        )
+        console.print("  [yellow]![/yellow] Physical boot enforcement remains unknown")
+        for omission in omissions:
+            console.print(f"  [yellow]![/yellow] {omission}")
+        return context
 
     # ──────────────────────────────────────────
     # Phase 1: ingest and input binding
@@ -1087,7 +1330,9 @@ class Orchestrator:
         console.print("[bold]═══ Phase 6: C2 & Malware ═══[/bold]")
         from iot_hardware_scanner.scanner.c2_detector import C2Detector
 
-        detector = C2Detector(self.config, rule_engine=self.rule_engine())
+        detector = C2Detector(
+            self.config, rule_engine=self.rule_engine(), cache=self._analysis_cache
+        )
         inventory = context.filesystem_inventory
         crypto: list = []
 
@@ -1174,6 +1419,13 @@ class Orchestrator:
                     f"({entry.get('sample_note')}); conclusions that depend on it "
                     "are indicative, not current."
                 )
+        if context.profile == PROFILE_BOOT:
+            limitations.append(
+                "A boot manifest declares what a build intends to boot; it does not "
+                "show that the running device enforces it. Physical boot enforcement "
+                "is unknown by construction, and no signature is trusted without an "
+                "operator-supplied key."
+            )
         if context.input_kind is InputKind.TREE:
             metadata_source = (
                 context.filesystem_inventory.metadata_source

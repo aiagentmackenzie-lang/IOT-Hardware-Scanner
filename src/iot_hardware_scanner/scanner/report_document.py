@@ -66,11 +66,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
 
 #: Component bases, in report order. Every count is present even when zero.
 COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
@@ -158,10 +158,22 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "advisory": _advisory_section(context),
         "components": _components_section(context),
         "component_bases": _component_bases_section(context),
+        "boot": _boot_section(context),
+        "cache": _cache_section(context),
         "data_sources": _data_sources_section(),
         "risk_score": None,
     }
     return document
+
+
+def _cache_section(context: ScanContext) -> dict[str, Any] | None:
+    """What the repeated-work cache did, when the operator enabled one (5C)."""
+    return context.cache_summary
+
+
+def _boot_section(context: ScanContext) -> dict[str, Any] | None:
+    """The boot artifacts, or ``None`` when this profile read no boot manifest."""
+    return context.boot.as_dict() if context.boot is not None else None
 
 
 def _data_sources_section() -> list[dict[str, Any]]:
@@ -635,22 +647,60 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("component_bases", None)
         document.setdefault("assessment", {})
         document.setdefault("risk_score", None)
+        document.setdefault("boot", None)
+        document.setdefault("cache", None)
         return document
 
-    if raw_version == 4:
-        return _upgrade_v4(data)
+    if raw_version == 5:
+        document = _upgrade_v5(data)
+    elif raw_version == 4:
+        document = _upgrade_v4(data)
+    elif raw_version == 3:
+        document = _upgrade_v3(data)
+    elif raw_version == 2:
+        document = _upgrade_v2(data)
+    else:
+        document = _upgrade_v1(data)
 
-    if raw_version == 3:
-        return _upgrade_v3(data)
-
-    if raw_version == 2:
-        return _upgrade_v2(data)
-
-    return _upgrade_v1(data)
+    # Every readable version gains the sections it never had, as explicit
+    # "not recorded" values. An absent section is never read as a negative.
+    document.setdefault("boot", None)
+    document.setdefault("cache", None)
+    return document
 
 
 #: Sections a schema-4 document never recorded.
 _V5_SECTIONS = ("component_bases",)
+
+
+def _upgrade_v5(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-5 document to schema 6 without inventing a boot section.
+
+    A v5 document was produced before boot manifests were parsed. Its facts are
+    preserved; ``boot`` is ``None`` and ``cache`` is ``None`` because neither
+    existed in that version. No unknown is turned into a negative.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 5; boot-manifest analysis and the repeated-work cache "
+        "were not recorded in that version, so those sections are absent rather than empty"
+    )
+    for section in ("boot", "cache"):
+        document.setdefault(section, None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 5,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before flattened device trees and U-Boot "
+                "FIT images were parsed. Boot integrity, signature presence and "
+                "verification are not recorded, not 'not found'."
+            ),
+        },
+    )
+    return document
 
 
 def _upgrade_v4(data: dict[str, Any]) -> dict[str, Any]:
@@ -989,6 +1039,38 @@ def render_terminal(document: dict[str, Any]) -> str:
                 + ")"
             )
 
+    boot = document.get("boot") or {}
+    for artifact in boot.get("artifacts") or []:
+        configurations = artifact.get("configurations") or []
+        payloads = artifact.get("referenced_payloads") or []
+        lines.append(
+            f"Boot: {artifact.get('kind')} {artifact.get('locator')} — "
+            f"{len(configurations)} configuration(s), default "
+            f"{artifact.get('default_config') or 'unknown'}, "
+            f"{len(payloads)} payload(s)"
+        )
+        for payload in payloads:
+            signature = payload.get("signature") or {}
+            lines.append(
+                f"  payload {payload.get('node')} ({payload.get('kind')}): integrity "
+                f"{payload.get('integrity')}, signature "
+                f"{'present' if signature.get('present') else 'absent'}"
+            )
+        for configuration in configurations:
+            signature = configuration.get("signature") or {}
+            if signature.get("present"):
+                lines.append(
+                    f"  configuration {configuration.get('name')}: signature "
+                    f"{signature.get('algo')}, verified "
+                    f"{signature.get('verified')} ({signature.get('key_source')})"
+                )
+        lines.append(
+            f"  boot enforcement: {artifact.get('boot_enforcement', 'unknown')} "
+            "(a static parser cannot establish it)"
+        )
+        for note in artifact.get("notes") or []:
+            lines.append(f"  note: {note}")
+
     extraction = document.get("extraction")
     if extraction:
         lines.append(
@@ -1198,6 +1280,45 @@ def render_markdown(document: dict[str, Any]) -> str:
                 f"{node.get('offset')} | {node.get('length')} | "
                 f"{_count(node.get('extent_bytes'))} | {_md_cell(decoder)} |"
             )
+        lines.append("")
+
+    boot = document.get("boot") or {}
+    for artifact in boot.get("artifacts") or []:
+        lines += [
+            f"## Boot manifest — {artifact.get('kind')}",
+            "",
+            f"- Locator: `{artifact.get('locator')}`",
+            f"- FDT version: {artifact.get('fdt_version')}",
+            f"- Compatible: {', '.join(artifact.get('compatible') or []) or '—'}",
+            f"- Model: {artifact.get('model') or '—'}",
+            f"- Default configuration: {artifact.get('default_config') or 'unknown'}",
+            f"- Boot enforcement: **{artifact.get('boot_enforcement', 'unknown')}** "
+            "(a declared configuration is not enforcement)",
+            "",
+            "| Payload | Kind | Integrity | Declared | Observed | Signature |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for payload in artifact.get("referenced_payloads") or []:
+            signature = payload.get("signature") or {}
+            lines.append(
+                f"| {_md_cell(str(payload.get('node')))} | {payload.get('kind')} | "
+                f"{payload.get('integrity')} | "
+                f"{_md_cell(str(payload.get('digest_declared') or '—'))} | "
+                f"{_md_cell(str(payload.get('digest_observed') or '—'))} | "
+                f"{'present' if signature.get('present') else 'absent'} |"
+            )
+        lines.append("")
+        for configuration in artifact.get("configurations") or []:
+            signature = configuration.get("signature") or {}
+            lines.append(
+                f"- Configuration `{configuration.get('name')}`: kernel "
+                f"`{configuration.get('kernel')}`, fdt `{configuration.get('fdt')}`, "
+                f"signature {'present' if signature.get('present') else 'absent'}, "
+                f"verified {signature.get('verified')} "
+                f"({signature.get('key_source')})"
+            )
+        for note in artifact.get("notes") or []:
+            lines.append(f"- {note}")
         lines.append("")
 
     extraction = document.get("extraction")
@@ -1654,6 +1775,40 @@ def render_html(document: dict[str, Any]) -> str:
                 "</tr>"
             )
         parts.append("</table>")
+
+    boot = document.get("boot") or {}
+    for artifact in boot.get("artifacts") or []:
+        parts.append("<h2>Boot manifest</h2>")
+        parts.append(
+            f"<p>{html.escape(str(artifact.get('kind')))}: "
+            f"{html.escape(str(artifact.get('locator')))}; default configuration "
+            f"{html.escape(str(artifact.get('default_config') or 'unknown'))}; boot "
+            f"enforcement <strong>{html.escape(str(artifact.get('boot_enforcement')))}</strong>"
+            "</p>"
+        )
+        parts.append("<table>")
+        parts.append(
+            "<tr><th>Payload</th><th>Kind</th><th>Integrity</th><th>Declared</th>"
+            "<th>Observed</th><th>Signature</th><th>Verified</th></tr>"
+        )
+        for payload in artifact.get("referenced_payloads") or []:
+            signature = payload.get("signature") or {}
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(str(payload.get('node')))}</td>"
+                f"<td>{html.escape(str(payload.get('kind')))}</td>"
+                f"<td>{html.escape(str(payload.get('integrity')))}</td>"
+                f"<td>{html.escape(str(payload.get('digest_declared') or '—'))}</td>"
+                f"<td>{html.escape(str(payload.get('digest_observed') or '—'))}</td>"
+                f"<td>{'present' if signature.get('present') else 'absent'}</td>"
+                f"<td>{html.escape(str(signature.get('verified')))}</td>"
+                "</tr>"
+            )
+        parts.append("</table>")
+        parts.append("<ul>")
+        for note in artifact.get("notes") or []:
+            parts.append(f"<li>{html.escape(str(note))}</li>")
+        parts.append("</ul>")
 
     extraction = document.get("extraction")
     if extraction:

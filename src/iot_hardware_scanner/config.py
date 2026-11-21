@@ -235,6 +235,29 @@ class ScannerConfig:
         le=365,
     )
 
+    # ── Repeated-work cache (slice 5C) ──
+    analysis_cache_dir: Path | None = Field(
+        default=None,
+        description=(
+            "Directory for the content-addressed cache of deterministic parser "
+            "outputs (per-file rule matches and text facts). Unset means no cache. "
+            "Entries are keyed by content digest plus the rule-set/extractor identity; "
+            "artifact paths are never stored."
+        ),
+    )
+    analysis_cache_max_mb: int = Field(
+        default=256,
+        description="Size ceiling for the analysis cache in MB",
+        ge=1,
+        le=10240,
+    )
+    analysis_cache_max_entries: int = Field(
+        default=20000,
+        description="Entry-count ceiling for the analysis cache",
+        ge=1,
+        le=1000000,
+    )
+
     # ── C2 Detector ──
     threat_intel_dirs: list[Path] = Field(
         default_factory=list,

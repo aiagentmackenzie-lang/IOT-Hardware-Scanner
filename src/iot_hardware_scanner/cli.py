@@ -37,6 +37,7 @@ from iot_hardware_scanner.models import (
     Severity,
 )
 from iot_hardware_scanner.scanner.assessment import (
+    PROFILE_BOOT,
     PROFILE_CREDENTIALS,
     PROFILE_FIRMWARE,
     PROFILE_FIRMWARE_TREE,
@@ -137,12 +138,18 @@ def main(verbose: bool) -> None:
 @click.option(
     "--profile",
     type=click.Choice(
-        [PROFILE_FIRMWARE, PROFILE_FIRMWARE_TREE, PROFILE_CREDENTIALS], case_sensitive=False
+        [
+            PROFILE_FIRMWARE,
+            PROFILE_FIRMWARE_TREE,
+            PROFILE_CREDENTIALS,
+            PROFILE_BOOT,
+        ],
+        case_sensitive=False,
     ),
     default=None,
     help=(
         "Assessment profile (default: firmware-static for an image, firmware-tree for "
-        "--input-tree; --creds selects credentials-only)"
+        "--input-tree, firmware-boot for an FDT/FIT; --creds selects credentials-only)"
     ),
 )
 @click.option("--creds", is_flag=True, help="Credential-only profile (narrower required set)")
@@ -167,6 +174,26 @@ def main(verbose: bool) -> None:
     help=(
         "Apply a local advisory snapshot offline (ihs-advisory-snapshot/1). Supplying one "
         "makes advisory assessment a required stage for this run."
+    ),
+)
+@click.option(
+    "--trust-anchor",
+    "trust_anchors",
+    type=click.Path(),
+    multiple=True,
+    help=(
+        "Operator-supplied PEM RSA public key used to verify FIT signatures. Repeatable. "
+        "A key embedded in the artifact is never treated as a trust anchor."
+    ),
+)
+@click.option(
+    "--cache-dir",
+    "analysis_cache_dir",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Enable the content-addressed cache of deterministic parser outputs in this "
+        "directory (keyed by content digest and rule-set/extractor identity)."
     ),
 )
 @click.option(
@@ -201,6 +228,8 @@ def scan(
     input_tree: bool,
     build_manifest: str | None,
     advisory_snapshot: str | None,
+    trust_anchors: tuple[str, ...],
+    analysis_cache_dir: str | None,
     extraction_worker: str | None,
     config_file: str | None,
     offline: bool | None,
@@ -223,6 +252,7 @@ def scan(
             "max_size": "max_file_size_mb",
             "extraction_worker": "extraction_worker",
             "advisory_snapshot": "advisory_snapshot",
+            "analysis_cache_dir": "analysis_cache_dir",
         },
     )
     # Normalise CLI-shaped values after the precedence merge.
@@ -238,6 +268,8 @@ def scan(
         config.extraction_worker = extraction_worker
     if advisory_snapshot:
         config.advisory_snapshot = Path(advisory_snapshot)
+    if analysis_cache_dir:
+        config.analysis_cache_dir = Path(analysis_cache_dir)
 
     input_path = Path(firmware)
     selected_profile = profile or (
@@ -251,6 +283,7 @@ def scan(
             input_tree=input_tree,
             build_manifest=Path(build_manifest) if build_manifest else None,
             advisory_snapshot=Path(advisory_snapshot) if advisory_snapshot else None,
+            trust_anchors=[Path(item) for item in trust_anchors],
         )
         context = orchestrator.run(input_path)
     except ScannerError as exc:

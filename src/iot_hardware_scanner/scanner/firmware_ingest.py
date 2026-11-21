@@ -33,6 +33,8 @@ from iot_hardware_scanner.models import (
     ScanContext,
     TreeManifestEntry,
 )
+from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+from iot_hardware_scanner.scanner.fit_dtb import looks_like_fdt
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,8 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".vmdk",
     ".srec",
     ".s19",
+    ".dtb",
+    ".itb",
 }
 
 
@@ -469,12 +473,19 @@ class FirmwareIngest:
         return sha256_hasher.hexdigest(), md5_hasher.hexdigest()
 
     def _identify_file_type(self, path: Path) -> str:
-        """Identify file type using python-magic or fallback to extension.
+        """Identify file type from magic bytes, then python-magic, then extension.
 
-        python-magic reads magic bytes from the file header,
-        which is far more reliable than extension-based detection.
-        Falls back to extension matching if magic is unavailable.
+        A flattened device tree is recognised by its own magic before any
+        library is consulted, so a DTB with no extension is still identified on
+        a host without python-magic.
         """
+        try:
+            head = open_bounded(path).read_head(4)
+        except OSError:
+            head = b""
+        if looks_like_fdt(head):
+            return "Flattened device tree or U-Boot FIT (FDT magic 0xd00dfeed)"
+
         try:
             import magic
 

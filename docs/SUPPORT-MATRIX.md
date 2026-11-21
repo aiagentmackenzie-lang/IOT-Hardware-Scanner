@@ -1,14 +1,16 @@
-# Support matrix and qualification record — release 2.3.0
+# Support matrix and qualification record — release 2.4.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.3.0`, report schema 5, profile version 4.0.
-Every number below comes from a run recorded in
-[docs/MILESTONE-C.md](MILESTONE-C.md) (the 2.2 qualification) or
-[docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison, SBOM and inventory
-work). Where a row is only measured locally it says so.
+Measured with `iot-hardware-scanner 2.4.0`, report schema 6, profile version 5.0.
+Numbers come from runs recorded in [docs/MILESTONE-C.md](MILESTONE-C.md) (the
+2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
+SBOM and inventory work) and [docs/MILESTONE-E.md](MILESTONE-E.md) (the 5C and
+3D slices). The repeated-work cache is recorded separately in
+[docs/5C-DECISION.md](5C-DECISION.md). Where a row is only measured locally it
+says so.
 
 ---
 
@@ -25,9 +27,12 @@ work). Where a row is only measured locally it says so.
 | CycloneDX 1.6 BOM export (`sbom`) | **analyzed** — exported and validated offline against the vendored schema | `jsonschema` (the `sbom` extra) | any host | `tests/test_sbom.py`, `tests/test_installed_image_cli.py::TestCycloneDXExport` |
 | Build output with a declared manifest (`--build-manifest`) | **analyzed** — declared modes/ownership used instead of host bits | local | any host | `tests/test_staged_tree.py` |
 | Single ELF file | **analyzed** — header, segments, `PT_DYNAMIC`, hardening, rules | pyelftools 0.32 | any host | `tests/test_elf_parser.py`, `tests/test_binary_intelligence.py`, `tests/test_rule_semantics.py` |
+| Flattened device tree (`.dtb`, FDT magic) | **analyzed** — bounded structural parse; compatible/model, memory, reserved memory, partitions; no signature expectation | in-process parser (no helper) | any host | `tests/test_fit_dtb.py`, `tests/test_installed_cli.py::TestBootManifestProfile` |
+| U-Boot FIT (`.itb`, FDT magic) | **analyzed** — configurations, selected default, referenced payloads, digest integrity, signature presence and (with an operator key) verification; board facts from the referenced DTB | in-process parser + RSA/PKCS#1 verification | any host | same, plus `::test_a_supplied_key_verifies_only_the_selected_configuration` |
+| Repeated-work cache (`--cache-dir`) | **measured** — per-file rule matches and text facts; cold/warm reports equal | `ihs-analysis-cache/1` | any host | `tests/test_analysis_cache.py`, `tests/test_installed_cli.py::TestRepeatedWorkCache` |
 | Opaque / unrecognised blob | **recognized** — identified, then reported as unsupported (exit 4) | none | any host | `tests/test_installed_cli.py::TestObservedFailuresStayFixed` |
 | Advisory snapshot `ihs-advisory-snapshot/1` | **decoded and applied** offline | none (no network) | any host | `tests/test_advisory.py` |
-| Partitioned images, CPIO, JFFS2/UBIFS, MCU address spaces, FIT/DTB, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
+| Partitioned images, CPIO, JFFS2/UBIFS, MCU address spaces, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
 
 A level means exactly this: **recognized** — the bytes were identified;
 **decoded** — a container was opened; **extracted** — files were materialised;
@@ -46,7 +51,8 @@ reaches. These are separate claims from “the format can be read”:
 | Single ELF file | **file-level** — its own ELF record and findings | build ID else digest | anything outside that file |
 | Opaque / unsupported input | **none** — nothing to compare; the scan is incomplete and the comparison says so | — | everything |
 | Build declaration (manifest, CycloneDX) | **declaration-level** — name and version against the image's records, with an explicit binding state | declared name; complete version string | whether the declared package's *files* are present |
-| MCU / FIT / RAUC / partitioned images | **not supported** — no comparison claim | — | — |
+| FIT / DTB boot manifests | **manifest-level** — the selected configuration is resolved against the artifact's own payloads, and declared vs observed digests are compared | configuration name; payload node; declared digest | anything across releases; runtime boot behaviour |
+| MCU / RAUC / partitioned images | **not supported** — no comparison claim | — | — |
 
 ### Hosts
 
@@ -57,7 +63,8 @@ reaches. These are separate claims from “the format can be read”:
 | Linux with `host-process` extraction | any | direct `unsquashfs`, no isolation | **never** — recorded as `isolation: host-process` |
 
 Image extraction needs a Linux container runtime with the pinned worker image.
-Scanning a staged tree, a single file, or applying an advisory snapshot does not.
+Scanning a staged tree, a single file, a boot manifest, or applying an advisory
+snapshot does not.
 
 ---
 
@@ -143,7 +150,8 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
-| Wheel | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — `iot_hardware_scanner-2.3.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and both Linux CI builds |
+| Wheel (2.4.0, local macOS arm64 build) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; the CI build is appended after the qualification run |
+| Wheel (2.3.0, superseded) | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — byte-identical from the macOS arm64 build and both Linux CI builds |
 | Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44897056652` |
 | Worker image, runtime (Linux amd64, CI, qualified) | `sha256:8f9818aa4b33aa9c045308fa51d8e5d79dba135d9f7a43b43b7544d37f7e5262` — **observed, not reproducible** |
 | Worker image, verification stage (Linux amd64, CI) | `sha256:a7c206d57ef05a403b7b102edc0cc089daca6495bfc521d0010249231605d11d` — observed |
@@ -152,6 +160,9 @@ comparison runs. It is not extended to the other detectors.
 | Worker content reproducibility | two `--no-cache` builds: `dpkg-query -W` digest `2e938beb…` and `/usr/bin/unsquashfs` sha256 `cb10af7f…` identical; image ids differ (`7970b906…`, `ae64e345…`) |
 | Worker image (2.2, superseded) | runtime `sha256:9ec4ca96…` (CI amd64) / `sha256:3ec87f2d…` (local arm64); carried binutils, which the 2.3 runtime image does not |
 | `unsquashfs` | `unsquashfs version 4.5.1 (2022/03/17)` |
+| FDT/FIT oracle | DTC **1.6.1** (`fdtdump`, `fdtget`) and `mkimage` **2023.01**, verification stage only |
+| Boot fixtures | `board.dtb` `77f45773…def70`; `fit.itb` `81a0e1ae…d2574`; `fit-signed.itb` `c37eecb6…c758d` |
+| 5C measurement (2.4, local) | cold no-cache **7.73 s** / 205.8 MB; cache cold **5.18 s**; cache warm **1.81 s** / 110.0 MB on the pinned corpus — see `docs/5C-DECISION.md` |
 | Rule set | `2ca7a94b511400528f49ea9290359d716e5a3e7ecb408ab0b62cbee6a946258d` (12 rule files, yara-python 4.5.4) — unchanged in 2.3 |
 | Corpus | `8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02` |
 | Target manifest | `e5951c2355950b187ed154dd6f46547e3cac240937094502dd8b66afcc65fbff` (124 rows, all matching) |

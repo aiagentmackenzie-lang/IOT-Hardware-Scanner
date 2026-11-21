@@ -233,3 +233,389 @@ class TestWheelContents:
         assert "sbom" in extras
         assert "nvd" in extras
         assert "yaml-support" in extras
+
+
+# ──────────────────────────────────────────────
+# Slice 3D — the boot-manifest profile, through the installed wheel
+# ──────────────────────────────────────────────
+
+
+class TestBootManifestProfile:
+    """A DTB or FIT is accepted, parsed and reported without a container."""
+
+    @staticmethod
+    def _scan(runner: Runner, work: Path, name: str, data: bytes, *extra: str):
+        (work / name).write_bytes(data)
+        report = work / f"{name}.json"
+        result = runner(
+            [
+                "scan",
+                name,
+                "--offline",
+                "--format",
+                "json",
+                "--out",
+                report.name,
+                *extra,
+            ],
+            cwd=work,
+        )
+        assert report.is_file(), result.stderr
+        return result, json.loads(report.read_text())
+
+    def test_a_fit_dtb_pair_resolves_kernel_and_device_tree(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        from iot_hardware_scanner.models import StageId
+
+        fixture = build_fit()
+        result, document = self._scan(
+            runner, tmp_path, "board.itb", fixture.data, "--profile", "firmware-boot"
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert document["assessment"]["profile"] == "firmware-boot"
+        assert document["assessment"]["completion"] == "COMPLETE"
+        assert document["artifact"]["kind"] == "boot"
+        artifact = document["boot"]["artifacts"][0]
+        assert artifact["kind"] == "fit"
+        assert artifact["default_config"] == "config-1"
+        configuration = artifact["configurations"][0]
+        assert (configuration["kernel"], configuration["fdt"]) == ("kernel-1", "fdt-1")
+        payloads = {item["kind"]: item for item in artifact["referenced_payloads"]}
+        assert payloads["kernel"]["integrity"] == "match"
+        assert payloads["fdt"]["integrity"] == "match"
+        assert payloads["fdt"]["board"]["compatible"] == ["test,board", "test,soc"]
+        assert payloads["fdt"]["board"]["partitions"][0]["label"] == "firmware"
+        assert artifact["boot_enforcement"] == "unknown"
+        stages = {stage["stage"]: stage for stage in document["stages"]}
+        assert stages[StageId.OPKG_INVENTORY.value]["status"] == "NOT_APPLICABLE"
+        assert stages[StageId.EXTRACTION.value]["status"] == "NOT_APPLICABLE"
+        assert document["schema_version"] == 6
+
+    def test_a_mismatched_payload_is_a_reportable_observation(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        fixture = build_fit(declare_wrong_hash=True)
+        result, document = self._scan(
+            runner, tmp_path, "bad-hash.itb", fixture.data, "--profile", "firmware-boot"
+        )
+
+        assert result.returncode == 2, result.stdout + result.stderr
+        finding = next(
+            item for item in document["findings"] if item["rule_id"] == "boot.payload_integrity"
+        )
+        assert finding["severity"] == "HIGH"
+        assert finding["critical_qualified"] is False
+        payload = next(
+            item
+            for item in document["boot"]["artifacts"][0]["referenced_payloads"]
+            if item["kind"] == "fdt"
+        )
+        assert payload["integrity"] == "mismatch"
+        control = next(c for c in document["controls"] if c["control_id"] == 5)
+        assert control["result"] == "FAIL"
+
+    def test_an_absent_key_leaves_signature_presence_but_not_verification(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        fixture = build_fit(sign_config="config-1")
+        result, document = self._scan(
+            runner, tmp_path, "signed.itb", fixture.data, "--profile", "firmware-boot"
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        signature = document["boot"]["artifacts"][0]["configurations"][0]["signature"]
+        assert signature["present"] is True
+        assert signature["verified"] is None
+        assert signature["key_source"] == "none"
+        control = next(c for c in document["controls"] if c["control_id"] == 5)
+        assert control["status"] == "PERFORMED"
+        assert control["result"] == "REVIEW"
+        assert any("not verified" in item for item in control["evidence"])
+
+    def test_a_supplied_key_verifies_only_the_selected_configuration(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit, public_key_pem
+
+        (tmp_path / "operator-key.pem").write_bytes(public_key_pem())
+        fixture = build_fit(sign_config="config-1")
+        result, document = self._scan(
+            runner,
+            tmp_path,
+            "signed-key.itb",
+            fixture.data,
+            "--profile",
+            "firmware-boot",
+            "--trust-anchor",
+            "operator-key.pem",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        signature = document["boot"]["artifacts"][0]["configurations"][0]["signature"]
+        assert signature["verified"] is True
+        assert signature["key_source"] == "operator-supplied"
+        control = next(c for c in document["controls"] if c["control_id"] == 5)
+        assert control["status"] == "PERFORMED"
+        assert any("verifies with the supplied key" in item for item in control["evidence"])
+        secure_boot = next(c for c in document["controls"] if c["control_id"] == 6)
+        assert secure_boot["status"] == "INCONCLUSIVE"
+        assert secure_boot["result"] == "UNKNOWN"
+
+    def test_a_signature_over_another_configuration_is_not_promoted(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit, public_key_pem
+
+        (tmp_path / "operator-key.pem").write_bytes(public_key_pem())
+        fixture = build_fit(sign_config="config-2", extra_configurations=["config-2"])
+        _result, document = self._scan(
+            runner,
+            tmp_path,
+            "other-config.itb",
+            fixture.data,
+            "--profile",
+            "firmware-boot",
+            "--trust-anchor",
+            "operator-key.pem",
+        )
+
+        configurations = {
+            item["name"]: item for item in document["boot"]["artifacts"][0]["configurations"]
+        }
+        assert configurations["config-1"]["signature"]["present"] is False
+        assert configurations["config-1"]["signature"]["verified"] is None
+        assert configurations["config-2"]["signature"]["verified"] is True
+        control = next(c for c in document["controls"] if c["control_id"] == 5)
+        assert not any("verifies with the supplied key" in item for item in control["evidence"])
+
+    def test_a_truncated_artifact_is_incomplete_not_a_finding(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        fixture = build_fit(truncated=200)
+        result, document = self._scan(
+            runner, tmp_path, "truncated.itb", fixture.data, "--profile", "firmware-boot"
+        )
+
+        assert result.returncode == 4, result.stdout + result.stderr
+        assert document["assessment"]["completion"] == "INCOMPLETE"
+        stage = next(item for item in document["stages"] if item["stage"] == "boot_analysis")
+        assert stage["status"] == "FAILED"
+        assert document["boot"] is None
+        assert document["findings"] == []
+
+    def test_an_out_of_bounds_payload_range_is_incomplete(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        fixture = build_fit(out_of_bounds=True)
+        result, document = self._scan(
+            runner, tmp_path, "oob.itb", fixture.data, "--profile", "firmware-boot"
+        )
+
+        assert result.returncode == 4, result.stdout + result.stderr
+        stage = next(item for item in document["stages"] if item["stage"] == "boot_analysis")
+        assert stage["status"] == "PARTIAL"
+        payload = next(
+            item
+            for item in document["boot"]["artifacts"][0]["referenced_payloads"]
+            if item["kind"] == "fdt"
+        )
+        assert payload["integrity"] == "out-of-bounds"
+
+    def test_deep_nesting_is_rejected(self, runner: Runner, tmp_path: Path) -> None:
+        from fdt_fixtures import Node, build_fdt
+
+        root = Node("")
+        current = root
+        for index in range(40):
+            child = Node(f"level{index}")
+            current.child(child)
+            current = child
+        result, document = self._scan(
+            runner,
+            tmp_path,
+            "deep.dtb",
+            build_fdt(root),
+            "--profile",
+            "firmware-boot",
+        )
+
+        assert result.returncode == 4, result.stdout + result.stderr
+        stage = next(item for item in document["stages"] if item["stage"] == "boot_analysis")
+        assert stage["status"] == "FAILED"
+        assert "nesting deeper" in stage["reason"]
+
+    def test_a_plain_device_tree_is_recognised_and_unknown_default_is_not_guessed(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import board_dtb
+
+        result, document = self._scan(runner, tmp_path, "board.dtb", board_dtb())
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert document["assessment"]["profile"] == "firmware-boot"
+        artifact = document["boot"]["artifacts"][0]
+        assert artifact["kind"] == "dtb"
+        assert artifact["default_config"] is None
+        assert artifact["compatible"] == ["test,board", "test,soc"]
+        assert artifact["boot_enforcement"] == "unknown"
+        assert document["findings"] == []
+
+    def test_the_magic_selects_the_profile_without_a_flag(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        from fdt_fixtures import build_fit
+
+        fixture = build_fit()
+        result, document = self._scan(runner, tmp_path, "auto.itb", fixture.data)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert document["assessment"]["profile"] == "firmware-boot"
+        assert document["artifact"]["kind"] == "boot"
+
+
+# ──────────────────────────────────────────────
+# Slice 5C — repeated work, measured and cached
+# ──────────────────────────────────────────────
+
+
+def _stable(document: dict) -> dict:
+    """Drop run-specific values, keeping every semantic fact."""
+    volatile = {
+        "scan_id",
+        "scan_date",
+        "report_generated",
+        "cache",
+        "started_at",
+        "completed_at",
+    }
+
+    def scrub(value):
+        if isinstance(value, dict):
+            return {
+                key: scrub(item)
+                for key, item in value.items()
+                if key not in volatile and not key.endswith("_path")
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return scrub(document)
+
+
+class TestRepeatedWorkCache:
+    """Cold and warm runs must produce the same report, from a bounded cache."""
+
+    @staticmethod
+    def _tree(root: Path) -> Path:
+        from harness import make_tree
+
+        make_tree(root, SHADOW_LOCKED)
+        config = root / "etc" / "config"
+        config.mkdir(parents=True)
+        (config / "app.conf").write_text(
+            'password = "Sup3rS3cretV4lue123!"\nserver = evil.example.com\n'
+        )
+        return root
+
+    def test_a_warm_run_reproduces_the_cold_report(self, runner: Runner, tmp_path: Path) -> None:
+        tree = self._tree(tmp_path / "rootfs")
+        cache = tmp_path / "cache"
+
+        def scan(name: str) -> tuple[int, dict]:
+            report = tmp_path / name
+            result = runner(
+                [
+                    "scan",
+                    str(tree),
+                    "--input-tree",
+                    "--offline",
+                    "--cache-dir",
+                    str(cache),
+                    "--format",
+                    "json",
+                    "--out",
+                    str(report),
+                ],
+                cwd=tmp_path,
+            )
+            return result.returncode, json.loads(report.read_text())
+
+        cold_code, cold = scan("cold.json")
+        warm_code, warm = scan("warm.json")
+
+        assert cold_code == warm_code
+        assert _stable(cold) == _stable(warm)
+        assert cold["cache"]["misses"] > 0
+        assert warm["cache"]["misses"] == 0
+        assert warm["cache"]["hits"] > 0
+        assert warm["cache"]["writes"] == 0
+        assert warm["cache"]["entries"] == cold["cache"]["entries"]
+
+    def test_a_ruleset_change_invalidates_its_dependents(
+        self, runner: Runner, tmp_path: Path
+    ) -> None:
+        tree = self._tree(tmp_path / "rootfs")
+        (tree / "etc" / "config" / "app.conf").write_text("marker uniquemarker12345\n")
+        cache = tmp_path / "cache"
+        rules = tmp_path / "rules"
+        rules.mkdir()
+        (rules / "added.yar").write_text(
+            "rule added_indicator {\n"
+            "  meta:\n"
+            '    category = "c2_indicator"\n'
+            '    severity = "MEDIUM"\n'
+            "  strings:\n"
+            '    $a = "uniquemarker12345" ascii\n'
+            "  condition:\n"
+            "    $a\n"
+            "}\n"
+        )
+
+        def scan(name: str) -> dict:
+            report = tmp_path / name
+            result = runner(
+                [
+                    "scan",
+                    str(tree),
+                    "--input-tree",
+                    "--offline",
+                    "--cache-dir",
+                    str(cache),
+                    "--yara-rules",
+                    str(rules),
+                    "--format",
+                    "json",
+                    "--out",
+                    str(report),
+                ],
+                cwd=tmp_path,
+            )
+            assert report.is_file(), result.stderr
+            return json.loads(report.read_text())
+
+        first = scan("first.json")
+        assert any(finding["rule_id"] == "c2.yara.added_indicator" for finding in first["findings"])
+        # The rule set changed, so rule-match entries are re-derived; the
+        # extractor identity did not change, so text-fact entries still hit.
+        assert first["cache"]["misses"] > 0
+
+        second = scan("second.json")
+        assert second["cache"]["misses"] == 0
+        assert second["cache"]["hits"] > 0
+        assert any(
+            finding["rule_id"] == "c2.yara.added_indicator" for finding in second["findings"]
+        )
+        assert _stable(first) == _stable(second)

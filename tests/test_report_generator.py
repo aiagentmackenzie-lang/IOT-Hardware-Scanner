@@ -19,7 +19,7 @@ import pytest
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import ScanContext
-from iot_hardware_scanner.scanner.report_document import ReportWriteError
+from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION, ReportWriteError
 from iot_hardware_scanner.scanner.report_generator import ReportGenerator
 
 
@@ -45,7 +45,7 @@ class TestGenerate:
         document = generator.document(sample_scan_context)
         assert '"schema_version"' in paths["json"].read_text()
         assert "IoT Hardware Scanner" in paths["markdown"].read_text()
-        assert document["schema_version"] == 5
+        assert document["schema_version"] == SCHEMA_VERSION
 
     def test_terminal_is_not_written_to_a_file(
         self, sample_scan_context: ScanContext, tmp_path: Path

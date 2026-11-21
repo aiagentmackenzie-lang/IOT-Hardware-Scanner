@@ -66,6 +66,7 @@ class InputKind(str, Enum):
 
     FILE = "file"  # a single image/blob, addressed by its byte digest
     TREE = "tree"  # a directory, addressed by a canonical tree-manifest digest
+    BOOT = "boot"  # a flattened device tree or U-Boot FIT boot manifest
 
 
 class StageId(str, Enum):
@@ -86,6 +87,7 @@ class StageId(str, Enum):
     C2_INDICATORS = "c2_indicators"
     RULE_COMPILATION = "rule_compilation"
     RISK_CONTROLS = "risk_controls"
+    BOOT_ANALYSIS = "boot_analysis"
 
 
 class StageStatus(str, Enum):
@@ -337,6 +339,14 @@ class ScanContext:
     # New scans never populate this (the grade is retired).
     risk_score: RiskScore | None = None
 
+    #: Slice 5C: what the repeated-work cache did for this run, when one was
+    #: enabled. ``None`` means the scan ran without a cache.
+    cache_summary: dict[str, Any] | None = None
+
+    #: Slice 3D: the parsed boot manifests, or ``None`` when the selected
+    #: profile does not read a boot artifact.
+    boot: BootAnalysis | None = None
+
 
 # ──────────────────────────────────────────────
 # Phase 1: Ingest Models
@@ -515,6 +525,149 @@ class ExtractionResult:
     provenance: ExtractionProvenance | None = None
     #: Entries the extractor saw but deliberately did not materialise.
     omissions: list[str] = field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+# Slice 3D: boot manifests and board descriptions
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class BootSignature:
+    """One signature, with presence, key provenance and verification kept apart.
+
+    ``verified`` is a tri-state. It is ``None`` unless an **operator-supplied**
+    key was parsed and a signature was checked against it. An embedded key can
+    show that a signature matches the key the artifact carries; that is not a
+    trust decision, so ``key_source`` says so and ``verified`` stays ``None``.
+    """
+
+    present: bool = False
+    algo: str | None = None
+    key_source: str = "none"  # none | operator-supplied | embedded-not-trusted
+    verified: bool | None = None
+    key_sha256: str | None = None
+    signed_nodes: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "present": self.present,
+            "algo": self.algo,
+            "key_source": self.key_source,
+            "verified": self.verified,
+            "key_sha256": self.key_sha256,
+            "signed_nodes": list(self.signed_nodes),
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class BootPayload:
+    """A payload a boot configuration references, with its integrity separate."""
+
+    node: str
+    kind: str  # kernel | fdt | ramdisk | loadable
+    offset: int | None = None
+    length: int | None = None
+    digest_declared: str | None = None
+    digest_observed: str | None = None
+    integrity: str = "undeclared"  # match | mismatch | undeclared | out-of-bounds
+    signature: BootSignature = field(default_factory=BootSignature)
+    board: dict[str, Any] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "node": self.node,
+            "kind": self.kind,
+            "offset": self.offset,
+            "length": self.length,
+            "digest_declared": self.digest_declared,
+            "digest_observed": self.digest_observed,
+            "integrity": self.integrity,
+            "signature": self.signature.as_dict(),
+            "board": self.board,
+        }
+
+
+@dataclass
+class BootConfiguration:
+    """One FIT configuration: the payloads it selects and its own signature."""
+
+    name: str
+    default: bool = False
+    kernel: str | None = None
+    fdt: str | None = None
+    ramdisk: str | None = None
+    loadables: list[str] = field(default_factory=list)
+    signature: BootSignature = field(default_factory=BootSignature)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "default": self.default,
+            "kernel": self.kernel,
+            "fdt": self.fdt,
+            "ramdisk": self.ramdisk,
+            "loadables": list(self.loadables),
+            "signature": self.signature.as_dict(),
+        }
+
+
+@dataclass
+class BootArtifact:
+    """One flattened device tree or FIT, attributed to the declaring artifact."""
+
+    locator: str
+    artifact_id: str
+    kind: str  # fit | dtb
+    size: int
+    digest: str
+    fdt_version: int = 0
+    compatible: list[str] = field(default_factory=list)
+    model: str | None = None
+    configurations: list[BootConfiguration] = field(default_factory=list)
+    default_config: str | None = None
+    memory: list[dict[str, Any]] = field(default_factory=list)
+    reserved_memory: list[dict[str, Any]] = field(default_factory=list)
+    partitions: list[dict[str, Any]] = field(default_factory=list)
+    referenced_payloads: list[BootPayload] = field(default_factory=list)
+    boot_enforcement: str = "unknown"
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "locator": self.locator,
+            "artifact_id": self.artifact_id,
+            "kind": self.kind,
+            "size": self.size,
+            "digest": self.digest,
+            "fdt_version": self.fdt_version,
+            "compatible": list(self.compatible),
+            "model": self.model,
+            "configurations": [c.as_dict() for c in self.configurations],
+            "default_config": self.default_config,
+            "memory": list(self.memory),
+            "reserved_memory": list(self.reserved_memory),
+            "partitions": list(self.partitions),
+            "referenced_payloads": [p.as_dict() for p in self.referenced_payloads],
+            "boot_enforcement": self.boot_enforcement,
+            "notes": list(self.notes),
+        }
+
+
+@dataclass
+class BootAnalysis:
+    """The boot section: what the artifacts declare, and what stays unknown."""
+
+    artifacts: list[BootArtifact] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "artifacts": [a.as_dict() for a in self.artifacts],
+            "notes": list(self.notes),
+        }
 
 
 # ──────────────────────────────────────────────
