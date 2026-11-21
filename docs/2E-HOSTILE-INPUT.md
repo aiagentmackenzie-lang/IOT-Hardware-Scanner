@@ -134,13 +134,13 @@ device would accept the artifact the parser rejected.
 | --- | --- |
 | Interpreter / platform | CPython 3.12.14, macOS 27.2.1 arm64 (colima vz, 2 CPU / 4 GB) |
 | Version / schema / profile | **2.5.0** / 6 / 5.0 (only the package version moved) |
-| Wheel | `iot_hardware_scanner-2.5.0-py3-none-any.whl`, sha256 `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` |
+| Wheel | `iot_hardware_scanner-2.5.0-py3-none-any.whl`, sha256 `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — **byte-identical** from the macOS arm64 build and the Linux CI build; two consecutive local builds are also byte-identical |
 | Installed-wheel acceptance (corpus + both worker images) | **91 passed, 0 skipped** (`test_installed_cli.py`, `test_installed_image_cli.py`, plus the 45 new rows) |
 | Qualified local suite | **955 passed, 0 skipped, 87.04 %** (2.4 baseline: 910 passed, 0 skipped, 86.88 %) |
 | Unqualified local suite (no corpus env, worker absent) | 929 passed, 26 skipped, 86.75 % (2.4 local baseline measured the same way: 881 passed, 29 skipped, 86.59 %) |
 | Lint / types / format | `ruff check` clean, `mypy src/` no issues in 40 files, `ruff format --check` clean (run last) |
 | Worker images (local arm64) | runtime `ihs-squashfs-worker:4.5.1` id `91b0ebd48c76`, verification `4.5.1-verify` id `0abefb6fc75d` — **observed, not reproducible** |
-| CI | not run for this slice yet; the wheel and counts above are local |
+| CI | run **`44911766646`** on `main` (`9d4f3dc`): **8/8 jobs green**. `python-gate` **926 passed, 29 skipped** on 3.10, 3.12 and 3.14 (the reference-image and container rows the qualified job runs); `installed-wheel-no-backend` **45 hostile/property/isolation rows, 0 skipped** plus its 22 acceptance rows; `linux-extractor` **200 passed, 0 skipped**; `bounded-resources` 61 passed, 0 skipped; `report-contract` 88 passed, 1 skipped. The CI wheel digest equals the local one, so 2.5.0 is byte-identical macOS↔Linux |
 | Corpus | `8b5aa826…ff02`, unchanged |
 
 ---

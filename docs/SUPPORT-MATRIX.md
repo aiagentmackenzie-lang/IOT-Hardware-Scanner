@@ -155,7 +155,7 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
-| Wheel (2.5.0, hardening release, locally qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`, macOS arm64 build; **no schema or profile change**, so 2.4 reports stay readable. Linux CI build and byte-identity check pending the first 2.5 CI run |
+| Wheel (2.5.0, qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44911766646`. **No schema or profile change**, so 2.4 reports stay readable |
 | Wheel (2.4.0, qualified) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44904681133` |
 | Wheel (2.3.0, superseded) | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — byte-identical from the macOS arm64 build and both Linux CI builds |
 | Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44897056652` |
@@ -198,10 +198,11 @@ the local build's. `python-gate` ran 881 passed / 29 skipped on 3.10, 3.12 and
 3.14 (the reference-image and container rows the qualified job runs).
 
 Release 2.5.0 is a **hardening release**: no format, schema or profile changed.
-Locally qualified with the reference corpus and both worker images at
-**955 passed, 0 skipped, 87.04 %**, and the installed wheel at **91 passed,
-0 skipped**; the first 2.5 CI run is still pending, and the workflow now runs the
-hostile-input rows against the installed wheel with a skip-fails gate. The
+Qualified in GitHub Actions **`44911766646`** on `main` (`9d4f3dc`), **8/8 jobs
+green**: `python-gate` **926 passed / 29 skipped** on 3.10, 3.12 and 3.14,
+`installed-wheel-no-backend` **45 hostile-input rows with zero skips**,
+`linux-extractor` **200 passed with zero skips**, `bounded-resources` 61/0, and the
+CI wheel digest equal to the local macOS build's (byte-identical). The
 adversarial-input rows above are new; the slice record is
 [docs/2E-HOSTILE-INPUT.md](2E-HOSTILE-INPUT.md).
 

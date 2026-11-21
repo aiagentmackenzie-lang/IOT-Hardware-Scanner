@@ -21,7 +21,9 @@ loaders — now has a committed adversarial corpus and property tests, and a
 malformed artifact becomes a named `FAILED` stage with exit 4 instead of a
 traceback. A saved document that is not a readable report is exit 3; a scanner
 defect outside every stage is exit 6 with one line. Report schema stays 6 and the
-profile version stays 5.0. Record: [docs/2E-HOSTILE-INPUT.md](docs/2E-HOSTILE-INPUT.md).
+profile version stays 5.0. Qualified in CI: run `44911766646`, 8/8 jobs green,
+45 hostile-input rows with zero skips, wheel byte-identical macOS↔Linux.
+Record: [docs/2E-HOSTILE-INPUT.md](docs/2E-HOSTILE-INPUT.md).
 
 Version 2.4 added two post-D slices. **Boot manifests** (`firmware-boot`): bounded
 parsers for flattened device trees and U-Boot FIT, with board compatibility,
