@@ -130,3 +130,75 @@ class TestLookup:
     def test_names_are_sorted_and_unique(self) -> None:
         index = PackageIndex(parse_opkg_status(STATUS))
         assert index.names() == ["base-files", "busybox", "libc"]
+
+
+class TestComponentsFromRecords:
+    """Every installed record becomes a component, with a recorded basis (D §2.2).
+
+    The failure this replaces: only records whose name happened to be in the CPE
+    mapping produced a component, so the reference image reported 3 of its 196
+    installed packages.
+    """
+
+    def test_every_installed_record_becomes_a_component(self) -> None:
+        from pathlib import Path
+
+        from iot_hardware_scanner.orchestrator import _package_components
+
+        inventory = parse_opkg_status(STATUS, locator="rootfs/usr/lib/opkg/status")
+        components = _package_components(inventory, type("F", (), {"path": Path("x")})())
+
+        assert [component.product for component in components] == [
+            "base-files",
+            "busybox",
+            "libc",
+        ]
+        assert {component.confidence for component in components} == {"recorded"}
+
+    def test_an_unmapped_package_is_named_from_its_own_package_name(self) -> None:
+        from iot_hardware_scanner.orchestrator import _package_components
+
+        inventory = parse_opkg_status(STATUS, locator="rootfs/usr/lib/opkg/status")
+        components = _package_components(inventory, type("F", (), {"path": "x"})())
+        base_files = components[0]
+
+        assert base_files.vendor == "openwrt"
+        assert base_files.product == "base-files"
+        assert base_files.cpe_basis == "opkg-package-name"
+        # A complete CPE 2.3 name: thirteen attributes, not a short form.
+        assert base_files.cpe_string.count(":") == 12
+        assert base_files.cpe_string.startswith("cpe:2.3:a:openwrt:base-files:")
+
+    def test_a_mapped_package_keeps_its_authoritative_vendor(self) -> None:
+        from iot_hardware_scanner.orchestrator import _package_components
+
+        inventory = parse_opkg_status(STATUS, locator="rootfs/usr/lib/opkg/status")
+        components = _package_components(inventory, type("F", (), {"path": "x"})())
+        busybox = components[1]
+        assert busybox.vendor == "busybox"
+        assert busybox.cpe_basis == "nist-mapped"
+
+    def test_the_version_is_verbatim_and_the_evidence_range_is_the_stanza(self) -> None:
+        from iot_hardware_scanner.orchestrator import _package_components
+
+        inventory = parse_opkg_status(STATUS, locator="rootfs/usr/lib/opkg/status")
+        components = _package_components(inventory, type("F", (), {"path": "x"})())
+        busybox = components[1]
+        record = inventory.records[1]
+
+        assert busybox.version == "1.36.1-r2"
+        assert busybox.digest_sha256 == inventory.database_sha256
+        assert busybox.evidence == (
+            f"rootfs/usr/lib/opkg/status:{record.evidence_start}-{record.evidence_end} "
+            f"(line {record.evidence_line})"
+        )
+        assert busybox.occurrences == [
+            f"rootfs/usr/lib/opkg/status:{record.evidence_start}-{record.evidence_end}"
+        ]
+
+    def test_a_record_that_is_not_installed_produces_no_component(self) -> None:
+        from iot_hardware_scanner.orchestrator import _package_components
+
+        inventory = parse_opkg_status(STATUS, locator="rootfs/usr/lib/opkg/status")
+        components = _package_components(inventory, type("F", (), {"path": "x"})())
+        assert "rpcd" not in {component.product for component in components}

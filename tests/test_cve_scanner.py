@@ -462,3 +462,60 @@ class TestSoftwareComponentModel:
         assert finding.severity == Severity.HIGH
         assert finding.cvss_v3_score == 7.5
         assert finding.is_in_kev is False
+
+
+# ──────────────────────────────────────────────
+# CPE resolution bases (D §2.2)
+# ──────────────────────────────────────────────
+
+
+class TestCPEResolutionBases:
+    """One mapping, three bases, and no invented vendor."""
+
+    def test_a_mapped_product_is_nist_mapped(self) -> None:
+        from iot_hardware_scanner.intelligence.cpe_builder import (
+            BASIS_NIST_MAPPED,
+            resolve_product,
+        )
+
+        resolved = resolve_product("busybox", "1.36.1-r2")
+        assert resolved is not None
+        assert resolved.basis == BASIS_NIST_MAPPED
+        assert (resolved.vendor, resolved.product) == ("busybox", "busybox")
+        assert resolved.cpe_string == ("cpe:2.3:a:busybox:busybox:1.36.1-r2:*:*:*:*:*:*:*")
+        assert resolved.cpe_string.count(":") == 12
+
+    def test_an_unmapped_product_resolves_to_nothing_unless_a_fallback_is_allowed(self) -> None:
+        from iot_hardware_scanner.intelligence.cpe_builder import resolve_product
+
+        assert resolve_product("libustream-mbedtls20201210", "2024.01.01-r1") is None
+
+    def test_an_unmapped_package_name_falls_back_to_the_openwrt_vendor(self) -> None:
+        from iot_hardware_scanner.intelligence.cpe_builder import (
+            BASIS_OPKG_PACKAGE_NAME,
+            resolve_product,
+        )
+
+        resolved = resolve_product(
+            "libustream-mbedtls20201210", "2024.01.01-r1", fallback_to_package_name=True
+        )
+        assert resolved is not None
+        assert resolved.basis == BASIS_OPKG_PACKAGE_NAME
+        assert resolved.vendor == "openwrt"
+        assert resolved.product == "libustream-mbedtls20201210"
+        # The revision is part of the version, verbatim.
+        assert resolved.cpe_string == (
+            "cpe:2.3:a:openwrt:libustream-mbedtls20201210:2024.01.01-r1:*:*:*:*:*:*:*"
+        )
+
+    def test_a_banner_never_takes_the_package_name_fallback(self) -> None:
+        from iot_hardware_scanner.intelligence.cpe_builder import CPEBuilder
+
+        assert CPEBuilder().build("some_version_string_product", "1.0") is None
+
+    def test_the_single_mapping_is_the_only_table(self) -> None:
+        """There is one mapping module; a second table is how the routes drifted."""
+        from iot_hardware_scanner.intelligence import cpe_builder
+
+        assert cpe_builder.lookup("busybox") == ("busybox", "busybox")
+        assert cpe_builder.lookup("dropbear") == ("matt_johnston", "dropbear_ssh")

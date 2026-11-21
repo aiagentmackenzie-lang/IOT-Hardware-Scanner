@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import REPO_ROOT, Runner, make_tree
 
+from iot_hardware_scanner import __version__
+
 PASSWD = "root:x:0:0:root:/root:/bin/ash\nuser:x:1000:1000:user:/home/user:/bin/ash\n"
 SHADOW_LOCKED = "root:!$6$salt$hash:19000:0:99999:7:::\nuser:$6$salt$hash:19000:0:99999:7:::\n"
 
@@ -111,7 +113,7 @@ class TestBothEntrypoints:
     def test_module_entrypoint_prints_version(self, runner: Runner, tmp_path: Path) -> None:
         result = runner(["--version"], cwd=tmp_path)
         assert result.returncode == 0
-        assert "2.2.0" in result.stdout
+        assert __version__ in result.stdout
 
     def test_credentials_profile_runs_end_to_end(self, runner: Runner, tmp_path: Path) -> None:
         tree = make_tree(tmp_path / "rootfs", SHADOW_LOCKED)
@@ -213,9 +215,10 @@ class TestWheelContents:
     def test_no_unresolvable_extra_is_advertised(self, wheel: Path) -> None:
         """An extra that cannot be installed must not be advertised.
 
-        ``pybinwalk`` has no release satisfying ``>=3.0``; the ``sbom`` extra
-        had no export path in this release. Both are removed from the
-        metadata and re-added only when a callable feature exists.
+        ``pybinwalk`` has no release satisfying ``>=3.0``, so there is no
+        ``extraction`` extra. ``sbom`` is advertised again — deliberately — now
+        that ``iot-hardware-scanner sbom --validate`` exists and needs
+        ``jsonschema``; it is re-added only with a working export path.
         """
         with zipfile.ZipFile(wheel) as archive:
             metadata = next(
@@ -227,6 +230,6 @@ class TestWheelContents:
             if line.startswith("Provides-Extra:")
         ]
         assert "extraction" not in extras
-        assert "sbom" not in extras
+        assert "sbom" in extras
         assert "nvd" in extras
         assert "yaml-support" in extras

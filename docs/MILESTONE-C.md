@@ -80,7 +80,7 @@ proves it, not the command that happened to run.
 | 2 | YARA compiled per detector | **closed.** One engine per run, built once by the orchestrator, shared by the credential, C2 and crypto paths; one digest in `ruleset.digest`. |
 | 3 | Check 8 `OMITTED` with no evidence source | **closed.** Check 8 now has three named sources: account hash algorithms, algorithm identifiers next to structural constants in shipped binaries, and the TLS package record. On the reference image: `PERFORMED`/`REVIEW`, naming DES in `libmbedcrypto`. It is never turned into a pass. |
 | 4 | Advisory applicability unassessed | **closed as a capability, opt-in.** A local snapshot is applied offline with per-component lookup states, preserved applicability bounds, provider scores, KEV as a separate fact, and zero requests. Without a snapshot it stays `OMITTED`, and the release notes say so rather than implying coverage. |
-| 5 | Coverage holes (`nvd_client` 44%, `report_generator` 61%) | **partly closed.** `nvd_client` moved from 44% to 79% with the pagination/state work, and `advisory.py` arrives at 81%; `report_generator` unchanged at 61% (it is a thin wrapper whose lines are only reached on renderer failure). `cli.py`/`orchestrator.py` were not chased artificially; the acceptance tests run the CLI as a subprocess by design. |
+| 5 | Coverage holes (`nvd_client` 44%, `report_generator` 61%) | **closed in D (§2.3, §2.4).** `nvd_client` moved from 44% to 79% with the pagination/state work, and `advisory.py` arrives at 81%; `report_generator` is now at 100% with four real cases (every format from one document, an invalid format rejected by configuration, an unwritable destination, and the terminal format not written to a file). `cli.py`/`orchestrator.py` were not chased artificially; the acceptance tests run the CLI as a subprocess by design. |
 | 6 | Reference image exits 1 on a stock image | **decided in writing, see §5.** The observation stays, the rule stays critical, and the finding carries an applicability note as evidence. No exit movement. |
 
 ---
@@ -144,12 +144,16 @@ honest answer, and it is the one a firmware review should give.
 
 ## 6. What is not closed
 
+Rows 2–5 of this table were closed in milestone D; the closing record and the
+evidence are in [MILESTONE-D.md](MILESTONE-D.md) §2. Row 1 remains open by
+design.
+
 | Row | Why |
 | --- | --- |
 | Advisory refresh, end to end over the network | Deliberately out of the scan. `NVDClient` pagination, retry, rate limiting and cache states are unit-tested against recorded responses; no test in this suite opens a socket, by design. |
-| Worker image id is not reproducible | The image pins `debian:bookworm-slim` by digest and `squashfs-tools=1:4.5.1-1` by version, but `binutils` and the rest of the base resolve at build time, so the image id differs between the previous release (`sha256:954d9741…`) and this one (`sha256:9ec4ca96…`). The report records the id it actually used; the `unsquashfs` version is the reproducible fact. |
-| Component inventory → CPE coverage | 3 of the reference image's 196 installed records map to a product in the shipped CPE map, so `components[]` is much smaller than `opkg.records[]`. This is slice 4B's mapping table, not a detector defect, and it is now stated in the release notes and the support matrix instead of being implied. |
-| Broader accuracy claims | A held-out corpus of sufficient size does not exist here. Per-detector misses are recorded as *not measurable* on this corpus rather than as zero. |
+| Worker image id is not reproducible | **Closed in D (§2.1, option 2).** The 2.3 Dockerfile pins every installed package to an exact version from a Debian snapshot date and moves `binutils` out of the runtime image into a verification stage. Two `--no-cache` builds now produce the same package set and the same `unsquashfs`; the image id still differs, because the image configuration records a build timestamp, so the id is published as observed and the package list as reproducible. |
+| Component inventory → CPE coverage | **Closed in D (§2.2).** Every one of the 196 installed records is now a component with its own evidence range, a complete CPE 2.3 name and a recorded `cpe_basis`: 5 `nist-mapped`, 191 `opkg-package-name` (vendor `openwrt`, the package's own name). No vendor was invented to raise the mapped count. |
+| Broader accuracy claims | A held-out corpus of sufficient size does not exist here. Per-detector misses are recorded as *not measurable* on this corpus rather than as zero — except for the release-comparison detector, where the generated two-release pair supplies ground truth (`docs/SUPPORT-MATRIX.md`). |
 
 A skip in CI leaves that capability unqualified. The `linux-extractor` and
 `bounded-resources` jobs fail on any skip for exactly that reason.

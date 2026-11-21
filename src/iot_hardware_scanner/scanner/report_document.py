@@ -11,6 +11,14 @@ Schema history
 named checks and findings as separate top-level sections, and retired the
 aggregate grade for new scans.
 
+**Schema 4** (milestone C) typed every finding's destination, recorded the one
+compiled rule set and its digest, recorded the local advisory snapshot and one
+lookup per component, and made ``rule_compilation`` a required stage. Schema 5
+adds the component basis: every installed-package record now becomes a
+component, and each one records whether its vendor/product pair is
+``nist-mapped``, named from the ``opkg-package-name``, or a ``banner``
+candidate. Counts per basis are recorded beside ``components``.
+
 **Schema 3** (milestone B) adds the evidence a shipped-image inventory needs:
 
 * ``image_map`` — artifact/parent/digest/format/coordinate system/offset/length
@@ -58,11 +66,14 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
+
+#: Component bases, in report order. Every count is present even when zero.
+COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
 TOOL_NAME = "iot-hardware-scanner"
 
 _EXTENSIONS = {"json": ".json", "markdown": ".md", "html": ".html", "terminal": ".txt"}
@@ -146,6 +157,7 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "ruleset": _ruleset_section(context),
         "advisory": _advisory_section(context),
         "components": _components_section(context),
+        "component_bases": _component_bases_section(context),
         "data_sources": _data_sources_section(),
         "risk_score": None,
     }
@@ -350,6 +362,27 @@ def _advisory_section(context: ScanContext) -> dict[str, Any] | None:
     }
 
 
+def _component_bases_section(context: ScanContext) -> dict[str, Any]:
+    """How many components came from each basis, and what each basis means."""
+    counts = dict.fromkeys(COMPONENT_BASES, 0)
+    for component in context.software_components:
+        basis = component.cpe_basis or "banner"
+        counts[basis] = counts.get(basis, 0) + 1
+    return {
+        "counts": counts,
+        "total": len(context.software_components),
+        "notes": [
+            "nist-mapped: vendor and product come from an authoritative NIST CPE "
+            "dictionary row, recorded in the single shipped mapping.",
+            "opkg-package-name: no authoritative NIST row exists; the name is the "
+            "opkg package's own name with vendor openwrt. It is a traceable "
+            "identity, not a claim that NIST knows the product.",
+            "banner: a version string found in a file. Candidate confidence, never "
+            "an installed-package record.",
+        ],
+    }
+
+
 def _components_section(context: ScanContext) -> list[dict[str, Any]]:
     return [
         {
@@ -357,6 +390,7 @@ def _components_section(context: ScanContext) -> list[dict[str, Any]]:
             "product": c.product,
             "version": c.version,
             "cpe": c.cpe_string,
+            "cpe_basis": c.cpe_basis,
             "source_file": str(c.source_file),
             "source_method": c.source_method,
             "architecture": c.architecture,
@@ -598,9 +632,13 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("controls", [])
         document.setdefault("stages", [])
         document.setdefault("components", [])
+        document.setdefault("component_bases", None)
         document.setdefault("assessment", {})
         document.setdefault("risk_score", None)
         return document
+
+    if raw_version == 4:
+        return _upgrade_v4(data)
 
     if raw_version == 3:
         return _upgrade_v3(data)
@@ -609,6 +647,40 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         return _upgrade_v2(data)
 
     return _upgrade_v1(data)
+
+
+#: Sections a schema-4 document never recorded.
+_V5_SECTIONS = ("component_bases",)
+
+
+def _upgrade_v4(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-4 document to schema 5 without inventing a component basis.
+
+    Every v4 fact is preserved. A v4 component never recorded how its
+    vendor/product pair was decided, so ``component_bases`` is ``None`` and each
+    component's ``cpe_basis`` is left absent rather than guessed.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 4; components do not record their naming basis in that "
+        "version, so the per-basis counts are absent rather than zero"
+    )
+    for section in _V5_SECTIONS:
+        document.setdefault(section, None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 4,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before every installed-package record "
+                "became a component and before each component recorded its naming "
+                "basis. Those facts are absent, not empty."
+            ),
+        },
+    )
+    return document
 
 
 #: Sections a schema-3 document never recorded.
@@ -628,7 +700,7 @@ def _upgrade_v3(data: dict[str, Any]) -> dict[str, Any]:
         "upgraded from schema 3; the rule-set identity and advisory assessment were "
         "not recorded by that version"
     )
-    for section in _V4_SECTIONS:
+    for section in _V4_SECTIONS + _V5_SECTIONS:
         document.setdefault(section, None)
     document.setdefault(
         "migration",
@@ -664,7 +736,7 @@ def _upgrade_v2(data: dict[str, Any]) -> dict[str, Any]:
     document["schema_note"] = (
         "upgraded from schema 2; v3 and v4 evidence sections were not recorded"
     )
-    for section in _V3_SECTIONS + _V4_SECTIONS:
+    for section in _V3_SECTIONS + _V4_SECTIONS + _V5_SECTIONS:
         document.setdefault(section, None)
     document.setdefault("elf", {"eligible": 0, "parsed": 0, "records": [], "rejected": []})
     for key in ("findings", "controls", "stages", "components"):
@@ -1284,17 +1356,26 @@ def render_markdown(document: dict[str, Any]) -> str:
 
     components = document.get("components") or []
     if components:
+        lines += ["## Components", ""]
+        bases = document.get("component_bases") or {}
+        counts = bases.get("counts") or {}
+        if counts:
+            lines += [
+                "Basis: "
+                + ", ".join(f"{name} {count}" for name, count in counts.items())
+                + f" ({bases.get('total', len(components))} component(s))",
+                "",
+            ]
         lines += [
-            "## Components",
-            "",
-            "| Vendor | Product | Version | Source | Method | Confidence | Evidence |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Vendor | Product | Version | Basis | Source | Method | Confidence | Evidence |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for component in components:
             lines.append(
                 f"| {_md_cell(component.get('vendor', ''))} | "
                 f"{_md_cell(component.get('product', ''))} | "
                 f"{_md_cell(component.get('version', ''))} | "
+                f"{component.get('cpe_basis') or 'unrecorded'} | "
                 f"{_md_cell(component.get('source_file', ''))} | "
                 f"{component.get('source_method')} | "
                 f"{component.get('confidence')} | "

@@ -12,13 +12,22 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.2.0
+## Status — version 2.3.0
 
-Version 2.2 is the first **qualified** release: it names the rule set that
-produced each finding, gives every match a typed destination, calibrates all 12
-named checks, and can apply a local advisory snapshot **offline**. The aggregate
-0–100 grade stays retired. See [what changed](#what-changed-in-20) and
-[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md).
+Version 2.3 delivers the differentiating feature: **compare two released images
+and reconcile the build declaration**, export the inventory as a **CycloneDX 1.6
+BOM**, and carry **every** installed-package record as a component with a
+recorded naming basis. Everything a comparison claims comes from the two saved
+scan documents — it issues no request, runs no extractor and re-reads no
+firmware. The aggregate 0–100 grade stays retired.
+
+Version 2.2 was the first qualified release: it names the rule set that produced
+each finding, gives every match a typed destination, calibrates all 12 named
+checks, and applies a local advisory snapshot **offline**. See
+[docs/MILESTONE-D.md](docs/MILESTONE-D.md) for the 2.3 record,
+[what changed](#what-changed-in-20), [docs/MIGRATION-v5.md](docs/MIGRATION-v5.md)
+for report schema 5, and [docs/MIGRATION-v4.md](docs/MIGRATION-v4.md) for
+schema 4.
 
 The qualification record — formats, tested level, host requirements, corpus
 descriptions and the measured detector numbers — is
@@ -42,10 +51,11 @@ to a passing case.
 | 12 named checks, each with a named evidence source | ✅ implemented |
 | Advisory applicability from a **local snapshot**, offline | ✅ implemented; needs `--advisory-snapshot` |
 | Online advisory refresh inside a scan | ❌ never — refresh is a separate operation |
-| Component inventory → CPE coverage | ⚠️ 3 of 196 packages on the reference image map to a CPE |
+| Component inventory → CPE coverage | ✅ 196 of 196 records on the reference image carry a component, each with a recorded basis (3 `nist-mapped`, 193 `opkg-package-name`) |
+| Release-to-release comparison (`compare`) | ✅ implemented, offline, on two saved scans |
+| Build-declaration reconciliation (OpenWrt manifest, CycloneDX 1.4) | ✅ implemented, with each declaration's digest, binding and four outcomes |
+| CycloneDX 1.6 BOM export (`sbom --validate`) | ✅ implemented, validated against a vendored schema |
 | MCU / FIT / RAUC / partitioned images | ❌ later gates, not in this release |
-| CycloneDX SBOM export | ❌ not implemented |
-| Release-to-release comparison | ❌ not implemented |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -118,7 +128,24 @@ iot-hardware-scanner entropy firmware.img --block-size 4096 --format json
 
 # Re-render a saved report without re-analysing anything
 iot-hardware-scanner report report.json --format html --out report.html
+
+# Compare two released images, from their saved scans (no extraction, no network)
+iot-hardware-scanner compare release-1.json release-2.json \
+  --format markdown --out comparison.md
+
+# Reconcile the build declaration with the shipped bytes: an OpenWrt target
+# manifest and the supplier's CycloneDX document, both read offline
+iot-hardware-scanner compare release-1.json release-2.json \
+  --declaration openwrt-24.10.0-armsr-armv8.manifest \
+  --declaration openwrt-24.10.0-armsr-armv8.bom.cdx.json \
+  --format json --out declaration-comparison.json
+
+# Export the inventory as a CycloneDX 1.6 BOM and validate it offline
+iot-hardware-scanner sbom release-2.json --out bom.cdx.json --validate
 ```
+
+`sbom --validate` needs the `sbom` extra: `pip install 'iot-hardware-scanner[sbom]'`.
+Without it the export still works and the validation step says what to install.
 
 `--out` is written **exactly** where you ask, atomically. If the write fails the process exits 6
 and never prints a success line. `--offline` remains valid; it is also the default.
@@ -158,6 +185,24 @@ document and the process status cannot disagree.
 `report` (replay) is the exception: it signals only whether rendering succeeded, because the
 saved document already carries the scan's own outcome.
 
+`compare` and `sbom` have their **own** documented contracts; neither reuses the scan table,
+because neither produces a security assessment:
+
+| `compare` | Meaning |
+| --- | --- |
+| 3 | An input could not be read as a scan document |
+| 6 | The requested comparison could not be written |
+| 2 | The comparison was determinate and something differs (image, findings, or declaration) |
+| 4 | Nothing differs, but something could not be concluded (a detector that had findings did not settle, or a declaration row is unresolved/unbound) |
+| 0 | Nothing differs and nothing was left unresolved |
+
+| `sbom` | Meaning |
+| --- | --- |
+| 3 | The input is not a readable scan document, or it carries no exportable identity |
+| 4 | The exported BOM failed validation against the vendored CycloneDX 1.6 schema |
+| 6 | The BOM could not be written |
+| 0 | BOM produced (and validated, when `--validate` was asked for) |
+
 Only rules listed in `scanner/assessment.py::CRITICAL_RULE_EVIDENCE` can produce exit 1. Each has
 a documented observation and both a positive and a lookalike-negative fixture. Everything else —
 including `LIKELY_C2` indicators, unqualified YARA hits and crypto observations — is a review
@@ -167,15 +212,20 @@ finding and exits 2.
 
 ## Report document
 
-One schema-4 JSON document is the single source for every format. Full details in
-[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md); the schema-3 change is in
+One schema-5 JSON document is the single source for every format. Full details in
+[docs/MIGRATION-v5.md](docs/MIGRATION-v5.md); the schema-4 change is in
+[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md), the schema-3 change in
 [docs/MIGRATION-v3.md](docs/MIGRATION-v3.md) and the schema-2 change in
 [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md).
 
+A **comparison** is a different document type with its own version
+(`ihs-comparison/1`), and an **SBOM** is CycloneDX 1.6. Neither is a scan
+document, and neither is a substitute for one.
+
 ```json
 {
-  "schema_version": 4,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.2.0"},
+  "schema_version": 5,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.3.0"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",
@@ -223,6 +273,12 @@ One schema-4 JSON document is the single source for every format. Full details i
            "records": [{"name": "busybox", "version": "1.36.1-r2",
                         "architecture": "aarch64_generic",
                         "evidence": {"start": 2804, "end": 3095, "line": 102}}]},
+  "components": [{"vendor": "busybox", "product": "busybox", "version": "1.36.1-r2",
+                  "cpe": "cpe:2.3:a:busybox:busybox:1.36.1-r2:*:*:*:*:*:*:*",
+                  "cpe_basis": "nist-mapped", "confidence": "recorded",
+                  "evidence": "rootfs/usr/lib/opkg/status:2804-3095 (line 102)"}],
+  "component_bases": {"counts": {"nist-mapped": 3, "opkg-package-name": 193, "banner": 0},
+                      "total": 196},
   "data_sources": [{"name": "kev_catalog.json", "sample": true, "sha256": "…"}],
   "risk_score": null,
   "outcome": {"exit_code": 2, "exit_reason": "REPORTABLE_FINDING"}
@@ -417,9 +473,23 @@ and corpus digests, with the platform each was built on. The reference image is
   file at a named offset; it does not say the device uses it.
 * **Installed-package records are not file evidence.** The database says what the package manager
   recorded; it does not prove every package-owned file is present or intact.
-* **Component-to-CPE coverage is partial.** On the reference image, 3 of 196 installed records map
-  to a product in the shipped CPE map, so `components[]` is much smaller than `opkg.records[]`.
-  The package records are all there; the mapping is the gap.
+* **Component naming has two kinds of authority.** Every one of the reference image's 196
+  installed records is a component with its own evidence range. Three name a product NIST's CPE
+  dictionary lists (`nist-mapped`); the other 193 have no authoritative entry, so the name is
+  built from the opkg package's own name with vendor `openwrt` (`opkg-package-name`). The basis is
+  recorded per component and counted in the report, so a reader can weigh it; the scanner never
+  invents a vendor to make the number look better.
+* **A comparison compares scans, not devices.** It says what changed between two saved documents.
+  If the two scans selected different profiles, scanner versions or rule sets, the affected
+  detector's findings are reported **indeterminate**, never resolved. A detector that was skipped
+  on one side cannot be read as clean.
+* **A build declaration is not proof.** A manifest or supplier SBOM is recorded with its digest
+  and its binding to the image. One that names this image's digest is `bound`; one that names
+  another image is `mismatched` and resolves nothing; one that names no digest is `unclaimed`, and
+  its association is stated as scope-based and unverified rather than assumed.
+* **The worker image id is not reproducible.** The package set and the `unsquashfs` version are
+  pinned and reproducible; the Docker image id records a build timestamp, so it is published as
+  observed, not as a reproducible artifact.
 * **Section-stripped binaries** yield `unknown` for canary and FORTIFY.
 * **Static analysis cannot establish** runtime behaviour, exposed network services, physical boot
   enforcement or which A/B slot is running.

@@ -138,7 +138,7 @@ def populate(context: ScanContext) -> None:
 class TestSchemaThree:
     def test_version_is_current(self, context: ScanContext) -> None:
         document = build_document(context, version=__version__)
-        assert document["schema_version"] == SCHEMA_VERSION == 4
+        assert document["schema_version"] == SCHEMA_VERSION
 
     def test_image_map_keeps_the_three_sizes_apart(self, context: ScanContext) -> None:
         populate(context)

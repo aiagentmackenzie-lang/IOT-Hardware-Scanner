@@ -25,6 +25,9 @@ env:
   IHS_REFERENCE_FILE: openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
   IHS_REFERENCE_SHA256: 8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02
   IHS_REFERENCE_URL: https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/
+  #: Frozen build declarations, verified against the publisher's sha256sums.
+  IHS_MANIFEST_FILE: openwrt-24.10.0-armsr-armv8.manifest
+  IHS_SBOM_FILE: openwrt-24.10.0-armsr-armv8.bom.cdx.json
 
 jobs:
   python-gate:
@@ -90,11 +93,12 @@ jobs:
 
       - name: Audited extras
         run: |
-          # Every advertised extra must resolve from the built wheel, and the
-          # two that could not be honoured (`extraction`: no installable
-          # binding; `sbom`: no export path) must not be advertised.
+          # Every advertised extra must resolve from the built wheel.
+          # `extraction` has no installable binding and must not be advertised.
+          # `sbom` is advertised again on purpose: it now carries a working
+          # export path (`iot-hardware-scanner sbom --validate`).
           WHEEL=$(ls dist/*.whl)
-          /tmp/ihs-venv/bin/pip install "${WHEEL}[nvd]" "${WHEEL}[yaml-support]"
+          /tmp/ihs-venv/bin/pip install "${WHEEL}[nvd]" "${WHEEL}[yaml-support]" "${WHEEL}[sbom]"
           python - "$WHEEL" <<'PY'
           import sys, zipfile
           wheel = sys.argv[1]
@@ -111,8 +115,13 @@ jobs:
           }
           print("advertised extras:", sorted(extras))
           assert "extraction" not in extras, "the broken extraction extra is back"
-          assert "sbom" not in extras, "the sbom extra has no implementation"
-          assert {"nvd", "yaml-support"} <= extras
+          assert "sbom" in extras, "the sbom extra is missing its export path"
+          assert {"nvd", "yaml-support", "sbom"} <= extras
+          # The export must be able to validate: jsonschema is what the extra is
+          # for, and the schema itself ships inside the wheel.
+          import iot_hardware_scanner.scanner.sbom_export as export
+          assert export.schema_directory().is_dir()
+          assert export.VENDORED_SCHEMAS
           # The ELF reader must ship: it is the only path that reads target
           # structure, and a wheel without it silently inventories nothing.
           requires = metadata.lower()
@@ -279,19 +288,53 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build the pinned worker image
+      - name: Build the pinned worker images and print the evidence
         run: |
+          # Two stages, two images: `runtime` is what a scan uses (unsquashfs
+          # only); `verification` adds binutils for the readelf cross-check and
+          # is never the default target.
           docker build -t "$IHS_WORKER_IMAGE" worker/
-          echo "worker image id: $(docker image inspect --format '{{.Id}}' "$IHS_WORKER_IMAGE")"
+          docker build --target verification -t "${IHS_WORKER_IMAGE}-verify" worker/
+          echo "== Dockerfile sha256"
+          sha256sum worker/Dockerfile
+          echo "== pinned package list sha256 (runtime, verification)"
+          sha256sum worker/packages.txt worker/packages-verify.txt
+          echo "== installed packages, from the image itself (runtime)"
+          docker run --rm --entrypoint /usr/bin/dpkg-query "$IHS_WORKER_IMAGE" \
+            -W -f='${Package}=${Version}\n' | sort | tee /tmp/packages-in-image.txt | sha256sum
+          diff <(grep -v '^#' worker/packages.txt) /tmp/packages-in-image.txt
+          echo "== runtime image contents: unsquashfs only, no binutils"
+          docker run --rm --entrypoint /usr/bin/sha256sum "$IHS_WORKER_IMAGE" /usr/bin/unsquashfs
+          if docker run --rm --entrypoint /usr/bin/readelf "$IHS_WORKER_IMAGE" -v; then
+            echo "binutils leaked into the runtime image"; exit 1
+          fi
+          echo "== observed image ids (not reproducible: the image config carries a build timestamp)"
+          docker image inspect --format '{{.Id}}' "$IHS_WORKER_IMAGE"
+          docker image inspect --format '{{.Id}}' "${IHS_WORKER_IMAGE}-verify"
           # `unsquashfs -version` prints its banner and exits 1 by design, so the
           # status is read through a pipe and the line is what is checked.
           docker run --rm --entrypoint /usr/bin/unsquashfs "$IHS_WORKER_IMAGE" -version \
             2>&1 | head -1
+          docker run --rm --entrypoint /usr/bin/readelf "${IHS_WORKER_IMAGE}-verify" -v 2>&1 | head -1
 
       - name: Stage the pinned image
         run: |
           curl -fsSLO "$IHS_REFERENCE_URL$IHS_REFERENCE_FILE"
           echo "$IHS_REFERENCE_SHA256  $IHS_REFERENCE_FILE" | sha256sum -c -
+
+      - name: Stage the frozen declarations, verified against the publisher index
+        run: |
+          # The declarations are fetched outside the scan, each verified against
+          # the publisher's own sha256sums, then handed over by path. Fetching is
+          # never part of a scan, a comparison or an export.
+          curl -fsSLO "$IHS_REFERENCE_URL$IHS_MANIFEST_FILE"
+          curl -fsSLO "$IHS_REFERENCE_URL$IHS_SBOM_FILE"
+          curl -fsSLO "${IHS_REFERENCE_URL}sha256sums"
+          grep -F " *$IHS_MANIFEST_FILE" sha256sums | sha256sum -c -
+          grep -F " *$IHS_SBOM_FILE" sha256sums | sha256sum -c -
+          sha256sum "$IHS_MANIFEST_FILE" "$IHS_SBOM_FILE"
+          echo "IHS_REFERENCE_MANIFEST=$PWD/$IHS_MANIFEST_FILE" >> "$GITHUB_ENV"
+          echo "IHS_REFERENCE_SBOM=$PWD/$IHS_SBOM_FILE" >> "$GITHUB_ENV"
 
       - name: Build the wheel and install it outside the checkout
         run: |
@@ -300,10 +343,13 @@ jobs:
           sha256sum dist/*.whl
           python -m venv /tmp/ihs-venv
           /tmp/ihs-venv/bin/pip install --upgrade pip
-          /tmp/ihs-venv/bin/pip install dist/*.whl
+          # The sbom extra is installed so the export validates offline in this
+          # job, and so a missing dependency would fail here rather than skip.
+          WHEEL=$(ls dist/*.whl)
+          /tmp/ihs-venv/bin/pip install "${WHEEL}[sbom]"
           /tmp/ihs-venv/bin/pip install pytest
 
-      - name: Milestone C acceptance rows (reference image, worker image)
+      - name: Milestone C and D acceptance rows (reference image, worker image)
         env:
           IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
           IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
@@ -316,12 +362,80 @@ jobs:
           # capability unqualified, and the next step fails on it.
           /tmp/ihs-venv/bin/python -m pytest \
             tests/test_installed_image_cli.py \
+            tests/test_comparison.py \
+            tests/test_sbom.py \
             tests/test_elf_parser.py \
             tests/test_rule_semantics.py \
             tests/test_control_matrix.py \
             tests/test_advisory.py \
             tests/test_invariance.py \
             -v -rfs 2>&1 | tee /tmp/gate.log
+
+      - name: Document types, from the installed wheel
+        env:
+          IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
+        run: |
+          # No schema, stage or version literal is written here: each one is
+          # imported from the package under test, because a duplicated constant
+          # is how a gate goes stale (run 44863090126).
+          /tmp/ihs-venv/bin/python - <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+
+          from iot_hardware_scanner import __version__
+          from iot_hardware_scanner.scanner.comparison import COMPARISON_SCHEMA
+          from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
+          from iot_hardware_scanner.scanner.sbom_export import CYCLONEDX_SPEC_VERSION
+
+          work = Path(tempfile.mkdtemp(dir=os.environ.get("RUNNER_TEMP", "/tmp")))
+          image = Path(os.environ["IHS_REFERENCE_IMAGE"])
+          report = work / "scan.json"
+          scan = subprocess.run(
+              [sys.executable, "-m", "iot_hardware_scanner", "scan", str(image),
+               "--offline", "--format", "json", "--out", str(report)],
+              capture_output=True, text=True,
+          )
+          document = json.loads(report.read_text())
+          assert document["schema_version"] == SCHEMA_VERSION, document["schema_version"]
+          assert len(document["components"]) == 196, len(document["components"])
+          assert document["component_bases"]["total"] == 196
+
+          comparison = work / "comparison.json"
+          compared = subprocess.run(
+              [sys.executable, "-m", "iot_hardware_scanner", "compare",
+               str(report), str(report),
+               "--declaration", os.environ["IHS_REFERENCE_MANIFEST"],
+               "--declaration", os.environ["IHS_REFERENCE_SBOM"],
+               "--format", "json", "--out", str(comparison)],
+              capture_output=True, text=True,
+          )
+          compare_document = json.loads(comparison.read_text())
+          assert compare_document["schema_version"] == COMPARISON_SCHEMA
+          assert compare_document["packages"]["base_names"] == 196
+          outcomes = {
+              entry["kind"]: entry
+              for entry in compare_document["declarations"]
+          }
+          manifest_entry = outcomes["openwrt-target-manifest"]
+          assert manifest_entry["scope"]["declared_rows"] == 124
+          assert manifest_entry["outcomes"]["observed-only"] == 72
+
+          bom_path = work / "bom.cdx.json"
+          exported = subprocess.run(
+              [sys.executable, "-m", "iot_hardware_scanner", "sbom", str(report),
+               "--out", str(bom_path), "--validate"],
+              capture_output=True, text=True,
+          )
+          assert exported.returncode == 0, exported.stdout + exported.stderr
+          bom = json.loads(bom_path.read_text())
+          assert bom["specVersion"] == CYCLONEDX_SPEC_VERSION
+          assert len(bom["components"]) == 196
+          print(
+              f"version {__version__}; scan schema {SCHEMA_VERSION}; "
+              f"comparison {COMPARISON_SCHEMA}; bom {bom['specVersion']}; "
+              f"compare exit {compared.returncode}"
+          )
+          PY
 
       - name: No skips in the qualified gate
         if: always()

@@ -1025,6 +1025,11 @@ class SoftwareComponent:
     source_file: Path
     source_method: str  # opkg_status | string_extraction | elf_metadata
     architecture: str | None = None
+    #: How the vendor/product pair was decided: ``nist-mapped`` (an
+    #: authoritative NIST vendor/product row), ``opkg-package-name`` (no
+    #: authoritative row; named from the package with vendor openwrt) or
+    #: ``banner`` (a version string in a file, candidate confidence).
+    cpe_basis: str = "nist-mapped"
     #: Exact locator inside the evidence, e.g. the opkg stanza byte range.
     evidence: str = ""
     digest_sha256: str = ""

@@ -13,7 +13,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from iot_hardware_scanner import __version__
 from iot_hardware_scanner.cli import main
+from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
 
 
 def _run(args: list[str]) -> tuple[int, str]:
@@ -30,7 +32,7 @@ class TestEntrypointBasics:
     def test_version_is_major_2(self) -> None:
         code, output = _run(["--version"])
         assert code == 0
-        assert "2.2.0" in output
+        assert __version__ in output
 
     def test_scan_help_documents_the_contract(self) -> None:
         code, output = _run(["scan", "--help"])
@@ -92,7 +94,7 @@ class TestOpaqueInput:
         assert destination.is_file()
 
         document = json.loads(destination.read_text())
-        assert document["schema_version"] == 4
+        assert document["schema_version"] == SCHEMA_VERSION
         assert document["assessment"]["completion"] == "INCOMPLETE"
         assert not document["assessment"]["missing_required_dependencies"]
         assert any(

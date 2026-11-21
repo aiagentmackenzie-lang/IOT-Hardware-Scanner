@@ -112,11 +112,18 @@ class TestRefusals:
             parse_elf(path)
 
 
+#: binutils lives in the worker's **verification** stage, not in the runtime
+#: image a scan uses (milestone D §2.1). The release gate builds this tag:
+#:   docker build -t ihs-squashfs-worker:4.5.1-verify --target verification worker/
+VERIFY_WORKER_IMAGE = "ihs-squashfs-worker:4.5.1-verify"
+
+
 def _readelf() -> str | None:
     found = shutil.which("readelf")
     if found:
         return found
-    # The pinned worker image carries binutils for exactly this comparison.
+    # The pinned worker's verification stage carries binutils for exactly this
+    # comparison; the runtime stage a scan uses carries only unsquashfs.
     if shutil.which("docker") and shutil.which("podman") is None:
         return "docker"
     return None
@@ -181,7 +188,7 @@ def _readelf_output(tool: str, path: Path, spec_name: str, shared: Path) -> str:
                 f"{shared}:/w:ro",
                 "--entrypoint",
                 "/usr/bin/readelf",
-                "ihs-squashfs-worker:4.5.1",
+                VERIFY_WORKER_IMAGE,
                 "-h",
                 f"/w/{spec_name}",
             ],
@@ -193,5 +200,8 @@ def _readelf_output(tool: str, path: Path, spec_name: str, shared: Path) -> str:
     except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - runtime dependent
         pytest.skip("could not run readelf in the worker image")
     if completed.returncode != 0:
-        pytest.skip(f"readelf unavailable in the worker image: {completed.stderr[:120]}")
+        pytest.skip(
+            f"readelf unavailable in the verification image ({VERIFY_WORKER_IMAGE}): "
+            f"{completed.stderr[:120]}"
+        )
     return completed.stdout

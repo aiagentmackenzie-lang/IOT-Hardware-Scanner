@@ -808,3 +808,506 @@ class TestReleasedDetectionSemantics:
         assert control_3["status"] == "OMITTED"
         assert control_3["result"] == "UNKNOWN"
         assert exit_code == 1, output
+
+
+# ──────────────────────────────────────────────
+# Milestone D — release comparison and declaration reconciliation
+# ──────────────────────────────────────────────
+
+#: Environment variables for the frozen OpenWrt declarations. The suite never
+#: downloads them: the qualified CI job fetches each one, checks it against the
+#: publisher's index, and only then hands it over.
+MANIFEST_ENV = "IHS_REFERENCE_MANIFEST"
+SBOM_ENV = "IHS_REFERENCE_SBOM"
+
+
+def scan_to(
+    runner: Runner,
+    work: Path,
+    target: Path,
+    out_name: str,
+    *extra: str,
+    env: dict[str, str] | None = None,
+) -> tuple[int, dict | None, Path, str]:
+    """Run one scan to a named report, returning the path as well as the document."""
+    out = work / out_name
+    completed = runner(
+        ["scan", str(target), "--offline", "--format", "json", "--out", str(out), *extra],
+        cwd=work,
+        env={**_daemon_env(), **(env or {})},
+    )
+    document = json.loads(out.read_text()) if out.is_file() else None
+    return completed.returncode, document, out, completed.stdout + completed.stderr
+
+
+def compare(
+    runner: Runner,
+    work: Path,
+    base_report: Path,
+    target_report: Path,
+    *declarations: Path,
+    out_name: str = "comparison.json",
+) -> tuple[int, dict | None, str]:
+    """Run the comparison command and return its exit, document and output."""
+    out = work / out_name
+    arguments = [
+        "compare",
+        str(base_report),
+        str(target_report),
+        "--format",
+        "json",
+        "--out",
+        str(out),
+    ]
+    for declaration in declarations:
+        arguments += ["--declaration", str(declaration)]
+    completed = runner(arguments, cwd=work, env=_daemon_env())
+    document = json.loads(out.read_text()) if out.is_file() else None
+    return completed.returncode, document, completed.stdout + completed.stderr
+
+
+def release_tree(
+    root: Path,
+    *,
+    busybox_version: str,
+    locked_root: bool,
+    tool_directory: str,
+) -> Path:
+    """One generated release: accounts, boot, two ELFs and an opkg database."""
+    (root / "etc").mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
+    (root / "usr" / "lib" / "opkg").mkdir(parents=True)
+    (root / tool_directory).mkdir(parents=True, exist_ok=True)
+    (root / "etc" / "passwd").write_text(
+        "root:x:0:0:root:/root:/bin/ash\nuser:x:1000:1000:user:/home/user:/bin/ash\n"
+    )
+    root_shadow = "root:!$6$salt$hash:19000:0:99999:7:::" if locked_root else "root::0:0:99999:7:::"
+    (root / "etc" / "shadow").write_text(f"{root_shadow}\nuser:$6$salt$hash:19000:0:99999:7:::\n")
+    (root / "etc" / "inittab").write_text(
+        "::sysinit:/etc/init.d/rcS\n::respawn:/usr/sbin/sshd -D\n"
+    )
+    status = (
+        "Package: base-files\nVersion: 1589~0123456789\n"
+        "Status: install user installed\nArchitecture: aarch64_generic\n\n"
+        f"Package: busybox\nVersion: {busybox_version}\n"
+        "Status: install user installed\nArchitecture: aarch64_generic\n\n"
+        "Package: libc\nVersion: 1.2.5-r4\n"
+        "Status: install user installed\nArchitecture: aarch64_generic\n"
+    )
+    (root / "usr" / "lib" / "opkg" / "status").write_text(status)
+    write_fixture(root / "bin" / "busybox", ElfSpec())
+    # The same bytes in both releases, in a different directory: a component
+    # that moved is the same component.
+    write_fixture(
+        root / tool_directory / "tool",
+        ElfSpec(build_id=b"\x01\x02\x03\x04\x05\x06\x07\x08"),
+    )
+    return root
+
+
+@pytest.fixture(scope="session")
+def generated_pair(runner: Runner, runtime: str) -> tuple[Path, dict, Path, dict]:
+    """Two generated release images, scanned through the installed CLI.
+
+    Release A: busybox 1.36.1-r2, an empty root password, the helper at
+    ``usr/lib/tool``, scanned with an advisory snapshot.
+    Release B: busybox 1.36.1-r3, root locked, the helper at ``usr/bin/tool``,
+    scanned without a snapshot — so its advisory question was not asked.
+    """
+    base = Path.home() / ".cache" / "ihs-acceptance" / f"pair-{uuid.uuid4().hex[:10]}"
+    base.mkdir(parents=True)
+    try:
+        tree_a = release_tree(
+            base / "tree-a",
+            busybox_version="1.36.1-r2",
+            locked_root=False,
+            tool_directory="usr/lib",
+        )
+        tree_b = release_tree(
+            base / "tree-b",
+            busybox_version="1.36.1-r3",
+            locked_root=True,
+            tool_directory="usr/bin",
+        )
+        (base / "a").mkdir()
+        (base / "b").mkdir()
+        image_a = build_image(tree_a, base / "a" / "release-a.img.gz", runtime)
+        image_b = build_image(tree_b, base / "b" / "release-b.img.gz", runtime)
+        snapshot = base / "advisory.json"
+        snapshot.write_text(json.dumps(ADVISORY_SNAPSHOT, indent=2))
+
+        exit_a, document_a, report_a, output_a = scan_to(
+            runner, base, image_a, "release-a.json", "--advisory-snapshot", str(snapshot)
+        )
+        assert document_a is not None, output_a
+        _exit_b, document_b, report_b, output_b = scan_to(runner, base, image_b, "release-b.json")
+        assert document_b is not None, output_b
+        assert document_a["assessment"]["completion"] == "COMPLETE", output_a
+        assert document_b["assessment"]["completion"] == "COMPLETE", output_b
+        assert exit_a == 1, output_a  # the empty root password is critical
+        yield report_a, document_a, report_b, document_b
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+class TestTwoReleaseComparison:
+    """Slice 5B: what changed between two released images."""
+
+    def test_a_generated_pair_distinguishes_the_change_kinds(
+        self, runner: Runner, generated_pair: tuple[Path, dict, Path, dict], workdir: Path
+    ) -> None:
+        from iot_hardware_scanner.scanner.comparison import COMPARISON_SCHEMA
+        from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
+
+        report_a, document_a, report_b, document_b = generated_pair
+        # Ground truth, read from the two scans themselves.
+        base_rules = {finding["rule_id"] for finding in document_a["findings"]}
+        target_rules = {finding["rule_id"] for finding in document_b["findings"]}
+        assert "credential.unix.empty_password" in base_rules
+        assert "advisory.CVE-2024-0001" in base_rules
+        assert "credential.unix.empty_password" not in target_rules
+        assert document_a["schema_version"] == SCHEMA_VERSION
+
+        exit_code, comparison, output = compare(
+            runner, workdir, report_a, report_b, out_name="pair-comparison.json"
+        )
+        assert comparison is not None, output
+        assert exit_code == 2, output
+        assert comparison["schema_version"] == COMPARISON_SCHEMA
+
+        # 1. A real package change, from the package records themselves.
+        packages = comparison["packages"]
+        assert [entry["name"] for entry in packages["changed"]] == ["busybox"]
+        assert packages["changed"][0]["base_versions"] == ["1.36.1-r2"]
+        assert packages["changed"][0]["target_versions"] == ["1.36.1-r3"]
+        assert packages["base_names"] == 3
+        assert packages["target_names"] == 3
+
+        # 2. A removed finding, resolved because the detector settled both times.
+        findings = comparison["findings"]
+        assert [entry["rule_id"] for entry in findings["resolved"]] == [
+            "credential.unix.empty_password"
+        ]
+        assert findings["by_destination"]["credential"]["comparable"] is True
+
+        # 3. A coverage change is never a resolution.
+        advisory = findings["by_destination"]["advisory"]
+        assert advisory["comparable"] is False
+        assert findings["counts"]["indeterminate"] == 1
+        assert findings["indeterminate"][0]["rule_id"] == "advisory.CVE-2024-0001"
+        coverage = comparison["environment"]["coverage_changes"]
+        assert any(
+            change["stage"] == "advisory" and change["target"]["status"] == "SKIPPED"
+            for change in coverage
+        )
+        # The instruments are reported before any difference is interpreted.
+        assert comparison["environment"]["comparison"]["scanner_version"]["changed"] is False
+        assert comparison["comparability"]["status"] == "partial"
+
+        # 4. A relocated identical component is recognised by identity.
+        layout = comparison["layout"]
+        assert layout["counts"]["relocated"] == 1
+        relocated = layout["relocated"][0]
+        assert any("usr/lib/tool" in location for location in relocated["base_locations"])
+        assert any("usr/bin/tool" in location for location in relocated["target_locations"])
+        assert layout["counts"]["new"] == 0
+        assert layout["counts"]["removed"] == 0
+
+    def test_the_comparison_renders_without_re_reading_the_images(
+        self, runner: Runner, generated_pair: tuple[Path, dict, Path, dict], workdir: Path
+    ) -> None:
+        report_a, _document_a, report_b, _document_b = generated_pair
+        completed = runner(
+            ["compare", str(report_a), str(report_b)], cwd=workdir, env=_daemon_env()
+        )
+        assert completed.returncode == 2, completed.stdout + completed.stderr
+        assert "Release comparison" in completed.stdout
+        assert "Instruments (read before any difference)" in completed.stdout
+        assert "changed busybox: 1.36.1-r2 → 1.36.1-r3" in completed.stdout
+        assert "resolved credential.unix.empty_password" in completed.stdout
+        assert "indeterminate advisory.CVE-2024-0001" in completed.stdout
+        # Indeterminate is stated, never folded into "resolved".
+        assert "resolved advisory" not in completed.stdout
+
+
+class TestDeclarationReconciliation:
+    """Slice 5D: the build declaration against the shipped bytes."""
+
+    def test_one_matching_one_mismatch_one_declared_only_one_observed_only(
+        self, runner: Runner, generated_pair: tuple[Path, dict, Path, dict], workdir: Path
+    ) -> None:
+        _report_a, _document_a, report_b, document_b = generated_pair
+        declaration = workdir / "release-b.manifest"
+        declaration.write_text(
+            "base-files - 1589~0123456789\n"  # agreement
+            "libc - 1.2.5-r5\n"  # declared version differs from the image
+            "ghost-pkg - 1.0-r1\n"  # declared and absent from the image
+        )
+        exit_code, comparison, output = compare(
+            runner, workdir, report_b, report_b, declaration, out_name="declared.json"
+        )
+        assert comparison is not None, output
+        entry = comparison["declarations"][0]
+        assert entry["kind"] == "openwrt-target-manifest"
+        assert entry["binding"]["status"] == "unclaimed"
+        assert entry["scope"]["declared_rows"] == 3
+        assert entry["scope"]["observed_rows"] == 3
+        assert entry["outcomes"] == {
+            "agreement": 1,
+            "unresolved-revision": 0,
+            "version-conflict": 1,
+            "declared-only": 1,
+            "observed-only": 1,  # busybox is in the image and not declared
+            "unbound": 0,
+        }
+        # The image itself did not change: the only differences are declaration
+        # facts, which is what a declaration-only change is.
+        assert comparison["packages"]["counts"]["changed"] == 0
+        assert exit_code == 2, output
+        # Every observed record keeps its provenance.
+        assert (
+            entry["observed_provenance"]["database_sha256"]
+            == (document_b["opkg"]["database_sha256"])
+        )
+        assert entry["observed_only"][0]["name"] == "busybox"
+        assert entry["observed_only"][0]["evidence"]["start"] >= 0
+
+    def test_a_revision_less_supplier_row_is_unresolved_and_markdown_says_so(
+        self, runner: Runner, generated_pair: tuple[Path, dict, Path, dict], workdir: Path
+    ) -> None:
+        _report_a, _document_a, report_b, document_b = generated_pair
+        supplier = workdir / "supplier.cdx.json"
+        supplier.write_text(
+            json.dumps(
+                {
+                    "bomFormat": "CycloneDX",
+                    "specVersion": "1.4",
+                    "version": 1,
+                    "components": [{"type": "application", "name": "busybox", "version": "1.36.1"}],
+                }
+            )
+        )
+        _exit_code, comparison, output = compare(
+            runner, workdir, report_b, report_b, supplier, out_name="supplier.json"
+        )
+        assert comparison is not None, output
+        entry = comparison["declarations"][0]
+        assert entry["kind"] == "cyclonedx"
+        assert entry["spec_version"] == "1.4"
+        assert entry["outcomes"]["unresolved-revision"] == 1
+        assert entry["outcomes"]["version-conflict"] == 0
+        assert entry["rows"][0]["declared_version"] == "1.36.1"
+        assert entry["rows"][0]["observed_version"] == "1.36.1-r3"
+
+        rendered = runner(
+            [
+                "compare",
+                str(report_b),
+                str(report_b),
+                "--declaration",
+                str(supplier),
+                "--format",
+                "markdown",
+            ],
+            cwd=workdir,
+            env=_daemon_env(),
+        )
+        # Two packages in the image are not declared at all, and the supplier's
+        # BusyBox row stops short of the revision: differences, plus one row that
+        # is unresolved rather than a mismatch.
+        assert rendered.returncode == 2, rendered.stdout + rendered.stderr
+        assert "unresolved-revision" in rendered.stdout
+        assert "observed-only" in rendered.stdout
+        assert document_b["artifact"]["sha256"]
+
+    def test_a_declaration_for_another_image_resolves_nothing(
+        self, runner: Runner, generated_pair: tuple[Path, dict, Path, dict], workdir: Path
+    ) -> None:
+        _report_a, _document_a, report_b, _document_b = generated_pair
+        other = workdir / "other-image.cdx.json"
+        other.write_text(
+            json.dumps(
+                {
+                    "bomFormat": "CycloneDX",
+                    "specVersion": "1.4",
+                    "version": 1,
+                    "metadata": {
+                        "component": {
+                            "type": "firmware",
+                            "name": "some other image",
+                            "hashes": [{"alg": "SHA-256", "content": "0" * 64}],
+                        }
+                    },
+                    "components": [
+                        {"type": "application", "name": "busybox", "version": "1.36.1-r3"},
+                        {"type": "application", "name": "libc", "version": "9.9"},
+                    ],
+                }
+            )
+        )
+        exit_code, comparison, output = compare(
+            runner, workdir, report_b, report_b, other, out_name="other-image.json"
+        )
+        assert comparison is not None, output
+        entry = comparison["declarations"][0]
+        assert entry["binding"]["status"] == "mismatched"
+        assert entry["outcomes"]["unbound"] == 2
+        assert entry["outcomes"]["agreement"] == 0
+        assert entry["outcomes"]["version-conflict"] == 0
+        assert entry["observed_only"] == []
+        # Only the binding is reported; nothing was resolved from it.
+        assert exit_code == 4, output
+
+
+@pytest.fixture(scope="session")
+def reference_declarations() -> tuple[Path, Path]:
+    """The frozen OpenWrt manifest and supplier SBOM, if the operator staged them."""
+    manifest = os.environ.get(MANIFEST_ENV)
+    sbom = os.environ.get(SBOM_ENV)
+    if not manifest or not sbom:
+        pytest.skip(
+            f"{MANIFEST_ENV}/{SBOM_ENV} not set: declaration reconciliation on the "
+            "published image unverified"
+        )
+    for path in (manifest, sbom):
+        if not Path(path).is_file():
+            pytest.skip(f"declaration not found at {path}")
+    return Path(manifest), Path(sbom)
+
+
+@pytest.fixture(scope="session")
+def reference_scan(runner: Runner, runtime: str) -> dict:
+    """One scan of the pinned image, shared by the milestone D rows."""
+    configured = os.environ.get("IHS_REFERENCE_IMAGE")
+    if not configured or not Path(configured).is_file():
+        pytest.skip("IHS_REFERENCE_IMAGE not set: reference-image checks unverified")
+    base = Path.home() / ".cache" / "ihs-acceptance" / f"reference-d-{uuid.uuid4().hex[:8]}"
+    base.mkdir(parents=True)
+    try:
+        exit_code, document, report, output = scan_to(
+            runner, base, Path(configured), "reference.json"
+        )
+        assert document is not None, output
+        assert document["assessment"]["completion"] == "COMPLETE", output
+        yield {"document": document, "report": report, "exit": exit_code, "dir": base}
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+class TestReferenceDeclarationReconciliation:
+    """The published OpenWrt case: 196 image records against 124 declared rows."""
+
+    def test_the_real_comparison_keeps_every_record_and_the_72_image_only_rows(
+        self,
+        runner: Runner,
+        reference_scan: dict,
+        reference_declarations: tuple[Path, Path],
+        workdir: Path,
+    ) -> None:
+        manifest, supplier = reference_declarations
+        document = reference_scan["document"]
+        exit_code, comparison, output = compare(
+            runner,
+            workdir,
+            reference_scan["report"],
+            reference_scan["report"],
+            manifest,
+            supplier,
+            out_name="openwrt-declaration.json",
+        )
+        assert comparison is not None, output
+        # The image did not change; the supplier declaration does not agree with
+        # the opkg names, so the comparison reports differences, not a clean run.
+        assert exit_code == 2, output
+
+        # Every image record is preserved, and the package identity is the record.
+        assert len(document["opkg"]["records"]) == 196
+        assert comparison["packages"]["base_names"] == 196
+        assert comparison["packages"]["target_names"] == 196
+
+        by_kind = {entry["kind"]: entry for entry in comparison["declarations"]}
+        target_manifest = by_kind["openwrt-target-manifest"]
+        assert target_manifest["scope"]["declared_rows"] == 124
+        assert len(target_manifest["rows"]) == 124
+        assert target_manifest["outcomes"]["agreement"] == 124
+        assert target_manifest["outcomes"]["observed-only"] == 72
+        assert target_manifest["outcomes"]["declared-only"] == 0
+        assert target_manifest["outcomes"]["version-conflict"] == 0
+        assert len(target_manifest["observed_only"]) == 72
+        assert target_manifest["scope"]["observed_rows"] == 196
+        assert target_manifest["observed_provenance"]["installed"] == 196
+        assert target_manifest["observed_provenance"]["database_sha256"] == (
+            "9442acbaf4ccc25115e770533ffe2b8a10d1c81e92d59b6d32035ba5ee6a3258"
+        )
+        # Proximity and release name cannot bind it: neither document names the
+        # image digest, so both bindings are recorded as unverified.
+        assert target_manifest["binding"]["status"] == "unclaimed"
+
+        supplier_entry = by_kind["cyclonedx"]
+        assert supplier_entry["spec_version"] == "1.4"
+        assert supplier_entry["scope"]["declared_rows"] == 124
+        # BusyBox is declared as 1.36.1 while the image records 1.36.1-r2: one
+        # row unresolved at revision granularity, never a mismatch.
+        busybox = next(row for row in supplier_entry["rows"] if row["name"] == "busybox")
+        assert busybox["state"] == "unresolved-revision"
+        assert busybox["declared_version"] == "1.36.1"
+        assert busybox["observed_version"] == "1.36.1-r2"
+        assert supplier_entry["outcomes"]["version-conflict"] == 0
+        assert supplier_entry["binding"]["status"] == "unclaimed"
+        assert target_manifest["digest_sha256"] == (
+            "e5951c2355950b187ed154dd6f46547e3cac240937094502dd8b66afcc65fbff"
+        )
+        assert supplier_entry["digest_sha256"] == (
+            "50ca09d781aeb7bda85eed0069d0853c0cde506f5e450667374283d6c296a068"
+        )
+
+
+class TestCycloneDXExport:
+    """Slice 5A: the portable inventory, validated offline."""
+
+    def test_the_reference_inventory_exports_and_validates(
+        self, runner: Runner, reference_scan: dict, workdir: Path
+    ) -> None:
+        from iot_hardware_scanner.scanner.sbom_export import (
+            CYCLONEDX_SPEC_VERSION,
+            validate_sbom,
+        )
+
+        destination = workdir / "reference.cdx.json"
+        completed = runner(
+            [
+                "sbom",
+                str(reference_scan["report"]),
+                "--out",
+                str(destination),
+                "--validate",
+            ],
+            cwd=workdir,
+            env=_daemon_env(),
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        payload = json.loads(destination.read_text())
+        assert payload["bomFormat"] == "CycloneDX"
+        assert payload["specVersion"] == CYCLONEDX_SPEC_VERSION
+        validate_sbom(payload)
+
+        document = reference_scan["document"]
+        firmware = payload["metadata"]["component"]
+        assert firmware["hashes"] == [{"alg": "SHA-256", "content": document["artifact"]["sha256"]}]
+        assert len(payload["components"]) == len(document["components"]) == 196
+        records = {component["evidence"]: component for component in document["components"]}
+        for component in payload["components"]:
+            properties = {item["name"]: item["value"] for item in component["properties"]}
+            assert properties["ihs:firmware-sha256"] == document["artifact"]["sha256"]
+            assert properties["ihs:cpe-basis"] in ("nist-mapped", "opkg-package-name")
+            original = records[properties["ihs:evidence"]]
+            assert component["bom-ref"].startswith("urn:ihs:component:")
+            # The version is verbatim, and the CPE name is complete CPE 2.3.
+            # A reserved character in a component is escaped, as the grammar
+            # requires, so the escaped form is what the name carries.
+            from iot_hardware_scanner.intelligence.cpe_builder import escape_component
+
+            assert component["version"] == original["version"]
+            assert component["cpe"].count(":") == 12
+            assert component["cpe"].startswith("cpe:2.3:a:")
+            assert escape_component(original["version"]) in component["cpe"]

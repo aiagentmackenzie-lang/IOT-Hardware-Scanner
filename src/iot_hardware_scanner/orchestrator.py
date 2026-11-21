@@ -1282,24 +1282,30 @@ def _tree_metadata(context: ScanContext) -> tuple[dict[str, dict], str]:
 
 
 def _package_components(parsed: object, finding: object) -> list:
-    """Installed packages as component records, with their evidence range."""
-    from iot_hardware_scanner.intelligence.cpe_builder import cpe_name, lookup
+    """Every installed package as a component, with its evidence range.
+
+    One component per installed record: the package database is the inventory
+    Milestone D compares, so a record without a NIST-mapped product is still
+    emitted, named from its own package name with a recorded basis. Skipping
+    unmapped records is what used to hide 193 of 196 packages.
+    """
+    from iot_hardware_scanner.intelligence.cpe_builder import resolve_product
     from iot_hardware_scanner.models import SoftwareComponent
 
     components: list[SoftwareComponent] = []
     for record in getattr(parsed, "records", []):
         if not record.installed:
             continue
-        mapping = lookup(record.name)
-        if mapping is None:
+        resolved = resolve_product(record.name, record.version, fallback_to_package_name=True)
+        if resolved is None:  # pragma: no cover - the fallback always resolves
             continue
-        vendor, product = mapping
         components.append(
             SoftwareComponent(
-                vendor=vendor,
-                product=product,
+                vendor=resolved.vendor,
+                product=resolved.product,
                 version=record.version,
-                cpe_string=cpe_name(vendor, product, record.version),
+                cpe_string=resolved.cpe_string,
+                cpe_basis=resolved.basis,
                 source_file=Path(getattr(finding, "path", "usr/lib/opkg/status")),
                 source_method="opkg_status",
                 architecture=record.architecture or None,

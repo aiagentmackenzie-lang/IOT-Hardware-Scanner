@@ -75,7 +75,11 @@ class NVDClient:
 
     def __init__(self, config: ScannerConfig) -> None:
         self.config = config
-        self._cache_db = DEFAULT_CACHE_DB
+        self._cache_db = config.nvd_cache_path or DEFAULT_CACHE_DB
+        #: The provider's published endpoint unless a caller names another one.
+        #: The transport integration test points this at a loopback server; a
+        #: scan still issues no request at all, because it is offline.
+        self._api_base = config.nvd_api_base or NVD_API_BASE
         self._last_request_time: float = 0.0
         self._init_cache()
 
@@ -294,7 +298,7 @@ class NVDClient:
         if cached is not None:
             return cached
 
-        url = f"{NVD_API_BASE}?cpeName={quote(cpe_string, safe=':')}"
+        url = f"{self._api_base}?cpeName={quote(cpe_string, safe=':')}"
         logger.info("NVD CPE query: %s", cpe_string)
         result = self._paginate(url)
         if result.state in (STATE_MATCHED, STATE_KNOWN_EMPTY, STATE_PARTIAL):
@@ -308,7 +312,7 @@ class NVDClient:
         if cached is not None:
             return cached
 
-        url = f"{NVD_API_BASE}?keywordSearch={quote(keyword)}"
+        url = f"{self._api_base}?keywordSearch={quote(keyword)}"
         logger.info("NVD keyword query: %s", keyword)
         result = self._paginate(url)
         if result.state in (STATE_MATCHED, STATE_KNOWN_EMPTY, STATE_PARTIAL):

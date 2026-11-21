@@ -27,7 +27,12 @@ import re
 from pathlib import Path
 
 from iot_hardware_scanner.config import ScannerConfig
-from iot_hardware_scanner.intelligence.cpe_builder import PRODUCT_CPE_MAP, cpe_name, lookup
+from iot_hardware_scanner.intelligence.cpe_builder import (
+    BASIS_BANNER,
+    PRODUCT_CPE_MAP,
+    cpe_name,
+    lookup,
+)
 from iot_hardware_scanner.models import (
     BinaryHardening,
     BinaryIntelligenceResult,
@@ -232,6 +237,7 @@ class BinaryIntelligence:
                         product=cpe_product,
                         version=version,
                         cpe_string=cpe_name(vendor, cpe_product, version),
+                        cpe_basis=BASIS_BANNER,
                         source_file=rel_path,
                         source_method=method,
                         confidence="candidate",

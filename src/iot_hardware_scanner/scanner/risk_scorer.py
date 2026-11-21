@@ -873,7 +873,25 @@ class ControlEvaluator:
             )
         recorded = [c for c in components if c.confidence != "candidate"]
         candidates = len(components) - len(recorded)
+        installed_records = (
+            context.opkg_inventory.installed_count if context.opkg_inventory is not None else None
+        )
         evidence = [f"{len(recorded)} recorded component(s) recovered"]
+        if installed_records is not None:
+            evidence.append(
+                f"{len(recorded)} of {installed_records} installed-package record(s) "
+                "carry a component with its own evidence range"
+            )
+        by_basis: dict[str, int] = {}
+        for component in components:
+            by_basis[component.cpe_basis or "unrecorded"] = (
+                by_basis.get(component.cpe_basis or "unrecorded", 0) + 1
+            )
+        if by_basis:
+            evidence.append(
+                "naming basis: "
+                + ", ".join(f"{name} {count}" for name, count in sorted(by_basis.items()))
+            )
         if candidates:
             evidence.append(
                 f"{candidates} component(s) are banner candidates only, not installed records"

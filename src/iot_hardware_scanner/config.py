@@ -193,6 +193,21 @@ class ScannerConfig:
         ge=1,
         le=30,
     )
+    nvd_api_base: str = Field(
+        default="",
+        description=(
+            "Base URL for the advisory API. Empty means the provider's published "
+            "endpoint. It exists so the transport can be exercised against a loopback "
+            "server; a scan never issues a request, so this setting cannot make one."
+        ),
+    )
+    nvd_cache_path: Path | None = Field(
+        default=None,
+        description=(
+            "SQLite cache file for advisory answers. Empty means the default under "
+            "the user's home directory."
+        ),
+    )
     offline_mode: bool = Field(
         default=True,
         description=(

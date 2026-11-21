@@ -5,6 +5,8 @@ Subcommands:
   extract  — extraction only
   entropy  — byte-distribution measurement only
   report   — replay a saved report document into another format
+  compare  — compare two saved scans, optionally reconciling a build declaration
+  sbom     — export a saved scan as a CycloneDX 1.6 BOM
   version  — print the version
 
 Exit status is decided in exactly one place,
@@ -523,6 +525,158 @@ def report(scan_file: str, report_format: str, report_file: str | None) -> None:
             "its historical grade is shown as legacy.",
             markup=False,
         )
+    sys.exit(0)
+
+
+# ──────────────────────────────────────────────
+# compare
+# ──────────────────────────────────────────────
+
+
+@main.command()
+@click.argument("base_scan", type=click.Path(exists=True))
+@click.argument("target_scan", type=click.Path(exists=True))
+@click.option(
+    "--declaration",
+    "declarations",
+    multiple=True,
+    type=click.Path(exists=True),
+    help=(
+        "A build declaration to reconcile with the target scan: an OpenWrt target "
+        "manifest (`name - version` lines) or a CycloneDX 1.4 JSON document. "
+        "Repeatable. Declarations are read offline."
+    ),
+)
+@click.option(
+    "--format",
+    "report_format",
+    type=click.Choice(["terminal", "json", "markdown"], case_sensitive=False),
+    default="terminal",
+    help="Comparison output format",
+)
+@click.option(
+    "--out", "report_file", type=click.Path(), default=None, help="Exact output file path"
+)
+def compare(
+    base_scan: str,
+    target_scan: str,
+    declarations: tuple[str, ...],
+    report_format: str,
+    report_file: str | None,
+) -> None:
+    """Compare two saved scans and reconcile any supplied build declarations.
+
+    The comparison reads the two saved report documents. It runs no extractor,
+    re-reads no firmware and issues no request.
+    """
+    from iot_hardware_scanner.scanner.comparison import (
+        ComparisonError,
+        compare_documents,
+        decide_comparison_exit,
+        load_scan,
+        render_comparison,
+    )
+
+    try:
+        base_document = load_scan(Path(base_scan))
+        target_document = load_scan(Path(target_scan))
+        document = compare_documents(
+            base_document,
+            target_document,
+            declaration_paths=[Path(path) for path in declarations],
+            tool_version=__version__,
+        )
+    except ComparisonError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        sys.exit(3)
+
+    try:
+        content = render_comparison(document, report_format)
+    except ValueError as exc:  # pragma: no cover - guarded by click's choice
+        console.print(f"[red]Error:[/red] {exc}")
+        sys.exit(3)
+
+    exit_code, summary = decide_comparison_exit(document)
+    if report_file:
+        try:
+            written = write_atomic(Path(report_file), content)
+        except ReportWriteError as exc:
+            console.print(f"[red]Report not written:[/red] {exc}")
+            sys.exit(6)
+        console.print(f"[green]Comparison written:[/green] {written}")
+        console.print()
+    elif report_format == "terminal":
+        console.print(content, markup=False, highlight=False)
+        console.print()
+    else:
+        console.print(content, markup=False, highlight=False)
+
+    console.print(f"Exit {exit_code} — {summary}", markup=False, highlight=False)
+    sys.exit(exit_code)
+
+
+# ──────────────────────────────────────────────
+# sbom
+# ──────────────────────────────────────────────
+
+
+@main.command()
+@click.argument("scan_file", type=click.Path(exists=True))
+@click.option("--out", "sbom_file", type=click.Path(), default=None, help="Exact output file path")
+@click.option(
+    "--validate/--no-validate",
+    "validate",
+    default=False,
+    help=(
+        "Validate the BOM offline against the vendored CycloneDX 1.6 schema. "
+        "Needs the sbom extra (`pip install 'iot-hardware-scanner[sbom]'`)."
+    ),
+)
+def sbom(scan_file: str, sbom_file: str | None, validate: bool) -> None:
+    """Export a saved scan as a CycloneDX 1.6 JSON BOM.
+
+    Every component carries the firmware digest it belongs to and the inventory
+    record that evidenced it, so each entry traces back to the scan.
+    """
+    from iot_hardware_scanner.scanner.comparison import ComparisonError, load_scan
+    from iot_hardware_scanner.scanner.sbom_export import (
+        SbomExportError,
+        export_sbom,
+        render_sbom,
+        validate_sbom,
+    )
+
+    try:
+        document = load_scan(Path(scan_file))
+        payload = export_sbom(document, tool_version=__version__)
+    except (ComparisonError, SbomExportError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        sys.exit(3)
+
+    if validate:
+        try:
+            validate_sbom(payload)
+        except SbomExportError as exc:
+            console.print(f"[red]Validation failed:[/red] {exc}")
+            sys.exit(4)
+
+    content = render_sbom(payload)
+    if sbom_file:
+        try:
+            written = write_atomic(Path(sbom_file), content)
+        except ReportWriteError as exc:
+            console.print(f"[red]BOM not written:[/red] {exc}")
+            sys.exit(6)
+        console.print(
+            f"[green]BOM written:[/green] {written} "
+            f"({len(payload['components'])} component(s), CycloneDX "
+            f"{payload['specVersion']})"
+        )
+        if validate:
+            console.print("Validated offline against the vendored CycloneDX 1.6 schema.")
+        sys.exit(0)
+
+    console.print(content, markup=False, highlight=False)
     sys.exit(0)
 
 
