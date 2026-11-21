@@ -143,9 +143,11 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
-| Wheel | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — `iot_hardware_scanner-2.3.0-py3-none-any.whl`, built on macOS arm64 in this session; **not yet rebuilt or compared in Linux CI** |
-| Worker image, runtime (macOS arm64, 2.3) | `sha256:91b0ebd48c76418f767b072f73f40d75a5a9b67d43791e3b20eeb4125d942110` — **observed, not reproducible** |
-| Worker image, verification stage (macOS arm64, 2.3) | `sha256:fab6e2278f1c38f207a486210fe35a27db7bf8702edcdfca2b4c07609627f840` — observed |
+| Wheel | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — `iot_hardware_scanner-2.3.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and both Linux CI builds |
+| Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44897056652` |
+| Worker image, runtime (Linux amd64, CI, qualified) | `sha256:8f9818aa4b33aa9c045308fa51d8e5d79dba135d9f7a43b43b7544d37f7e5262` — **observed, not reproducible** |
+| Worker image, verification stage (Linux amd64, CI) | `sha256:a7c206d57ef05a403b7b102edc0cc089daca6495bfc521d0010249231605d11d` — observed |
+| Worker image, local arm64 | runtime `sha256:91b0ebd4…110`, verification `sha256:fab6e227…840` — observed |
 | Worker 2.3 Dockerfile / package lists | Dockerfile `44e6fb84…981e2`; `packages.txt` `e26f55bd…900c9` (90 exact versions, Debian snapshot); `packages-verify.txt` `7f238099…8eab` (98) |
 | Worker content reproducibility | two `--no-cache` builds: `dpkg-query -W` digest `2e938beb…` and `/usr/bin/unsquashfs` sha256 `cb10af7f…` identical; image ids differ (`7970b906…`, `ae64e345…`) |
 | Worker image (2.2, superseded) | runtime `sha256:9ec4ca96…` (CI amd64) / `sha256:3ec87f2d…` (local arm64); carried binutils, which the 2.3 runtime image does not |
@@ -169,7 +171,13 @@ configuration records a build timestamp. The report records the id it actually
 used; the Dockerfile digest, the package list and `unsquashfs version 4.5.1
 (2022/03/17)` are the reproducible facts.
 
-Qualified run for 2.2: GitHub Actions `44863590710` on `main` (`c00b0e5`), 8/8
-job instances green, `linux-extractor` 113 passed with zero skips. **2.3 has no
-CI run id yet**: nothing in this change was committed or pushed, so the 2.3 rows
-above are measured on one machine and are not yet qualified by a green CI run.
+Qualified run for 2.3: GitHub Actions **`44897056652`** on `main` (`aa16f7a`),
+**8/8 job instances green**, `linux-extractor` **166 passed with zero skips**
+(including the comparison, declaration and SBOM rows), `bounded-resources` 61
+passed with zero skips (2 GiB at 16 MiB windows in 105.06 s, peak RSS
+92,328 KiB). The 2.2 qualification was run `44863590710` on `c00b0e5`, 8/8 green,
+`linux-extractor` 113 passed.
+
+Run `44896433693` on `e32e2a1` was 7/8: the only red job failed in the CI gate
+itself (the audited-extras step imported the package with the job's interpreter
+rather than the venv holding the wheel). `aa16f7a` fixed the gate.

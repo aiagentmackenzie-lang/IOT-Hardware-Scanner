@@ -1,10 +1,17 @@
 # Milestone D — “Deliver the differentiating feature”
 
-Status: **complete locally; not yet exercised in CI.** Every Milestone D gate
-row and every Part 1 item has a passing case on this machine (macOS arm64,
-colima, the pinned worker image, the pinned corpus and the frozen
-declarations). No commit and no push has been made, so there is no CI run id in
-this record — see §7.
+Status: **complete and qualified in CI.** Every Milestone D gate row and every
+Part 1 item has a passing case, and GitHub Actions run **`44897056652`** on
+`main` (`aa16f7a`) is **8/8 job instances green** with **`linux-extractor` 166
+passed, 0 skipped** — the qualified job that fails on any skip. The acceptance
+run there includes the two-release comparison, the declaration reconciliation
+against the published OpenWrt manifest and supplier SBOM, and the CycloneDX
+export with offline validation.
+
+`e32e2a1` produced the first run (`44896433693`): 7/8 green, with one job red for
+a defect in the CI gate itself, not in the product — the audited-extras step
+imported the package with the job's interpreter instead of the venv the wheel
+was installed into. `aa16f7a` fixes the gate and is the qualified run.
 
 Starting point: `main` at `c4e0a7d`, version 2.2.0, report schema 4. This release
 is **2.3.0**, report schema **5**, profile version **4.0**, and adds two
@@ -24,7 +31,7 @@ Everything below was run with CPython **3.12.14** and `unsquashfs 4.5.1`.
 | Format | `ruff format --check src/ tests/` | clean |
 | Wheel | `uv build && shasum -a 256 dist/*.whl` | `iot_hardware_scanner-2.3.0-py3-none-any.whl`, sha256 `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` (macOS arm64 build) |
 | Installed-CLI acceptance, wheel mode | `IHS_INSTALLED_CLI=… IHS_REFERENCE_IMAGE=… pytest tests/test_installed_image_cli.py tests/test_installed_cli.py` | **34 passed, 0 skipped** against the 2.3.0 wheel installed in a clean 3.12.14 environment (was 27 before the D rows) |
-| CI | — | **not run: nothing was pushed** |
+| CI | run **`44897056652`** on `main` (`aa16f7a`) | **8/8 job instances green**: `python-gate` 3.10/3.12/3.14 (811 passed, 28 skipped each — the reference-image and container rows the qualified job runs), installed wheel with no backend, report contract (87 passed, 1 skipped), reference image with the worker off, `bounded-resources` (61 passed, 0 skipped; 2 GiB at 16 MiB windows in **105.06 s**, peak RSS **92,328 KiB**), and **`linux-extractor` 166 passed, 0 skipped** |
 
 The skips without the reference image are the reference-image and container rows,
 by design. In CI the qualified job fails on any skip, and it is where the D rows
@@ -175,9 +182,10 @@ for this corpus” stands, unchanged.
 | Item | Value |
 | --- | --- |
 | Interpreter / platform | CPython 3.12.14, macOS 27.2.1 arm64, colima (vz, 2 CPU / 4 GB) |
-| Wheel | `iot_hardware_scanner-2.3.0-py3-none-any.whl`, sha256 `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` (macOS arm64, CPython 3.12.14; **not** yet rebuilt or compared in Linux CI) |
-| Worker image, runtime (local arm64) | `sha256:91b0ebd48c76418f767b072f73f40d75a5a9b67d43791e3b20eeb4125d942110` — **observed, not reproducible** |
-| Worker image, verification stage (local arm64) | `sha256:fab6e2278f1c38f207a486210fe35a27db7bf8702edcdfca2b4c07609627f840` — observed |
+| Wheel | `iot_hardware_scanner-2.3.0-py3-none-any.whl`, sha256 `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — **byte-identical** from the macOS build (CPython 3.12.14) and both Linux CI builds (`installed-wheel-no-backend`, `linux-extractor`), as run `44897056652` printed |
+| Worker image, runtime (CI amd64, qualified) | `sha256:8f9818aa4b33aa9c045308fa51d8e5d79dba135d9f7a43b43b7544d37f7e5262` — **observed, not reproducible** |
+| Worker image, verification stage (CI amd64, qualified) | `sha256:a7c206d57ef05a403b7b102edc0cc089daca6495bfc521d0010249231605d11d` — observed |
+| Worker image, local arm64 | runtime `sha256:91b0ebd4…110`, verification `sha256:fab6e227…840` — observed |
 | Dockerfile / package lists | Dockerfile `44e6fb84…981e2`; `worker/packages.txt` `e26f55bd…900c9` (90 packages); `worker/packages-verify.txt` `7f238099…8eab` (98 packages) |
 | Reproducibility check | two `--no-cache` builds: package-set digest `2e938beb…` identical, `unsquashfs` sha256 `cb10af7f…` identical, image ids differ |
 | `unsquashfs` | `unsquashfs version 4.5.1 (2022/03/17)` |
@@ -187,7 +195,7 @@ for this corpus” stands, unchanged.
 | Supplier SBOM | `openwrt-24.10.0-armsr-armv8.bom.cdx.json`, sha256 `50ca09d781aeb7bda85eed0069d0853c0cde506f5e450667374283d6c296a068` |
 | Generated pair | A `367bab3d…a1153`, B `38b92541…60077` (gzip-wrapped SquashFS built with `mksquashfs` in the worker image) |
 | Exported BOM (reference image) | sha256 `d590e82e…130b`, 196 components, CycloneDX 1.6 |
-| CI run id | **none — nothing was pushed** |
+| CI run id | **`44897056652`** on `main` (`aa16f7a`) — 8/8 green, `linux-extractor` 166 passed with zero skips; `44896433693` (`e32e2a1`) was the 7/8 run whose only failure was the audited-extras gate itself |
 
 Side by side with the independent oracle (§2 of the support matrix) — the
 comparison numbers:
@@ -269,6 +277,9 @@ export IHS_REFERENCE_SBOM=/path/to/openwrt-24.10.0-armsr-armv8.bom.cdx.json
 uv build && shasum -a 256 dist/*.whl
 ```
 
+CI runs the same gates in `.github/workflows/ci.yml`; `linux-extractor` is the
+only job with the real extraction path, and it fails the build on any skip.
+
 The reference image, the manifest and the SBOM are never committed and are never
 fetched by the suite; `/tmp/ihs-corpus` is the operator's own staging area.
 
@@ -278,7 +289,7 @@ fetched by the suite; `/tmp/ihs-corpus` is the operator's own staging area.
 
 | Row | Why |
 | --- | --- |
-| CI qualification for 2.3.0 | **Not run.** Nothing was committed or pushed: this session had no approval to do so. The gate results above are local, from this machine only. |
+| — | (CI qualification is closed: run `44897056652`, 8/8 green, zero skips in the qualified job.) |
 | The worker image id | The package set, the Dockerfile and `unsquashfs` are reproducible; the image id is not, and is published as observed. |
 | The supplier SBOM's package names | The supplier document uses upstream names (`jansson`, `libblkid`), the opkg database uses distribution names (`jansson4`, `libblkid1`). The comparison reports that honestly as declared-only/observed-only rather than guessing a mapping between them. |
 | Broader comparison accuracy | Measured on one generated pair and one frozen OpenWrt release. There is no held-out set of release pairs, so no accuracy claim beyond those fixtures is made. |

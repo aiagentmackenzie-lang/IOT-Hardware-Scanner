@@ -19,7 +19,9 @@ and reconcile the build declaration**, export the inventory as a **CycloneDX 1.6
 BOM**, and carry **every** installed-package record as a component with a
 recorded naming basis. Everything a comparison claims comes from the two saved
 scan documents — it issues no request, runs no extractor and re-reads no
-firmware. The aggregate 0–100 grade stays retired.
+firmware. Report schema 5. The aggregate 0–100 grade stays retired.
+Qualified in CI: run `44897056652`, 8/8 jobs green, 166 acceptance tests with
+zero skips in the job that runs the real extraction path.
 
 Version 2.2 was the first qualified release: it names the rule set that produced
 each finding, gives every match a typed destination, calibrates all 12 named
