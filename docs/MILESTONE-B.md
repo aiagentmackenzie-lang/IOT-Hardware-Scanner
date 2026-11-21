@@ -1,8 +1,9 @@
 # Milestone B — “Inventory one shipped Linux image”
 
-Status: **complete as a development checkpoint; the isolated (container) extraction path is
-written and has been exercised locally on macOS, and the qualified Linux gate is the new
-`linux-extractor` CI job.** Milestone C is the first qualified release.
+Status: **complete, and qualified in CI.** CI run **`44848363402`** on `main` (`c64febb`) is
+**7/7 jobs green**, including the new `linux-extractor` job: the worker image built from
+`worker/Dockerfile`, the wheel installed outside the checkout, and **25 acceptance tests passed with
+zero skips**. Milestone C is the first qualified release.
 
 Starting point: `main` at `8596bf3` (milestone A green, CI run `44840789511`, 6/6 jobs).
 
@@ -21,11 +22,12 @@ OpenWrt image, digest-verified before use, scanned with `--offline`.
 | Types | `mypy src/` | no issues in 35 source files |
 | Tests + coverage | `pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80` | **677 passed, 0 failed, 84.41%** (with `IHS_REFERENCE_IMAGE` set); **668 passed, 9 skipped, 83.99%** without it |
 | Format | `ruff format --check src/ tests/` | 68 files already formatted |
-| Wheel | `uv build` | `iot_hardware_scanner-2.1.0-py3-none-any.whl`, sha256 `238aadf56cac243b51d0956903e16a38179707b3bbca98c9df5ce87b4b56c325` |
+| Wheel | `uv build` | `iot_hardware_scanner-2.1.0-py3-none-any.whl`; macOS build sha256 `238aadf56cac243b51d0956903e16a38179707b3bbca98c9df5ce87b4b56c325`, Linux CI build sha256 `e0243b8798b2d943f3984e08f304a679f58fa93de86c7bffa04fe2607733128a` (hatch builds are not byte-reproducible across platforms; the qualified artifact is the Linux one) |
+| CI | GitHub Actions run `44848363402` on `main` | **7/7 jobs green**: py3.10 / py3.12 / py3.14 gates (661 passed, 16 skipped, 84.2% each), installed wheel with no backend, report contract + v2→v3 migration, OpenWrt reference image with the worker off (exit 5), and the **linux-extractor** gate (25 passed, 0 skipped, `unsquashfs 4.5.1`, worker image `sha256:954d9741…8c43`) |
 
-Skipped tests are the acceptance rows that need a container runtime or the reference image. A skip
-leaves that capability unqualified, which is why they are the dedicated `linux-extractor` job's
-job — a skip there fails the job.
+Skipped tests in the three `python-gate` jobs are the acceptance rows that need a container runtime
+or the reference image; that is by design, because those rows are qualified in `linux-extractor`,
+where a skip fails the job (25 passed, 0 skipped).
 
 ---
 
