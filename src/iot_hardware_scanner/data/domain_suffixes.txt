@@ -1,0 +1,214 @@
+# Public domain suffixes this scanner treats as a plausible hostname suffix.
+#
+# A domain indicator is a claim about a name a device would resolve. A token in
+# a binary's string table that merely contains a dot is not that claim: on a
+# stock OpenWrt image the previous behaviour reported `libc.so`,
+# `lucihttp.parser.urlencoded`, `payload.offset` and `pf.os` as C2 domains,
+# because a token with a dot and a "top-level domain" of any length was
+# accepted.
+#
+# Two rules follow from that and are enforced in
+# intelligence/domain_scorer.py::plausible_domain:
+#
+#   1. The final label must appear in this list. An unlisted suffix is not a
+#      domain indicator, whatever else the token looks like.
+#   2. The token must not be the basename of a file in the image, a library
+#      soname, or a `.so`-shaped name. A dependency name is a dependency name.
+#
+# The list is deliberately bounded and is recorded in the report as a data
+# source with its digest. It is a *minimum*: names under a suffix that is not
+# listed are missed rather than guessed at. Broaden it with a current public
+# suffix list when one is supplied as an explicit input.
+
+# Generic and country-code suffixes in ordinary use
+com
+net
+org
+edu
+gov
+mil
+int
+info
+biz
+name
+pro
+mobi
+asia
+aero
+coop
+museum
+travel
+jobs
+tel
+cat
+
+ac
+ad
+ae
+af
+ag
+ai
+al
+am
+ar
+at
+au
+az
+ba
+be
+bg
+bh
+bo
+br
+by
+bz
+ca
+cd
+ch
+cl
+cn
+co
+cr
+cu
+cy
+cz
+de
+dk
+do
+dz
+ec
+ee
+eg
+es
+eu
+fi
+fr
+ge
+gh
+gr
+gt
+hk
+hn
+hr
+hu
+id
+ie
+il
+in
+iq
+ir
+is
+it
+jm
+jo
+jp
+ke
+kg
+kh
+kr
+kw
+kz
+la
+lb
+lk
+lt
+lu
+lv
+ly
+ma
+md
+me
+mk
+mm
+mn
+mt
+mu
+mx
+my
+mz
+na
+ng
+ni
+nl
+no
+np
+nz
+om
+pa
+pe
+ph
+pk
+pl
+pr
+pt
+py
+qa
+ro
+rs
+ru
+sa
+se
+sg
+si
+sk
+sn
+sv
+sy
+th
+tn
+tr
+tt
+tw
+tz
+ua
+ug
+uk
+us
+uy
+uz
+ve
+vn
+ye
+za
+zm
+zw
+
+# New generic and infrastructure suffixes
+app
+cloud
+club
+dev
+digital
+email
+live
+link
+online
+shop
+site
+space
+store
+tech
+top
+website
+work
+xyz
+click
+download
+
+# Abuse-prone free registries that appear in IoT botnet configurations
+cc
+cf
+ga
+gq
+ml
+pw
+su
+tk
+
+# Names that are resolved by special-purpose networks rather than the DNS root.
+# `.onion` and `.eth` are exactly the suffixes IoT botnets use for C2, so they
+# must remain indicators even though they are not IANA root zones.
+onion
+eth
+i2p
+bit

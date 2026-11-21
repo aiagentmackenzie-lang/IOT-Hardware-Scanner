@@ -537,7 +537,9 @@ class FirmwareIngest:
         Pattern: <base_output_dir>/scan-<date>-<short_id>/
         If no output_dir configured, use CWD/reports/.
         """
-        base = self.config.output_dir or Path.cwd() / "reports"
+        # Resolved to an absolute path: the extraction worker bind-mounts this
+        # directory into a container, and a relative path is rejected there.
+        base = (self.config.output_dir or Path.cwd() / "reports").resolve()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         short_id = scan_id[:8]
         output_dir = base / f"scan-{timestamp}-{short_id}"

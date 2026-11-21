@@ -111,7 +111,7 @@ class TestBothEntrypoints:
     def test_module_entrypoint_prints_version(self, runner: Runner, tmp_path: Path) -> None:
         result = runner(["--version"], cwd=tmp_path)
         assert result.returncode == 0
-        assert "2.1.0" in result.stdout
+        assert "2.2.0" in result.stdout
 
     def test_credentials_profile_runs_end_to_end(self, runner: Runner, tmp_path: Path) -> None:
         tree = make_tree(tmp_path / "rootfs", SHADOW_LOCKED)
@@ -200,6 +200,7 @@ class TestWheelContents:
             "iot_hardware_scanner/data/component_cpe_map.json",
             "iot_hardware_scanner/data/benign_domains.txt",
             "iot_hardware_scanner/data/suspicious_tlds.txt",
+            "iot_hardware_scanner/data/domain_suffixes.txt",
             "iot_hardware_scanner/data/threat_intel_sample.jsonl",
         ):
             assert expected in names, expected

@@ -133,6 +133,55 @@ for _pat, _cat, _sev in [
     _REGEX_PATTERNS.append((re.compile(_pat, re.IGNORECASE), _cat, _sev, False))
 
 
+#: What an empty password field means, and what it does not.
+#:
+#: Milestone C decided this in writing (docs/MILESTONE-C.md): the observation
+#: stays, and the rule stays critical. A distribution that provisions
+#: credentials at first boot still ships an account whose password field is
+#: empty until that provisioning runs, and a static scan cannot see whether it
+#: ran. The note is descriptive; it never downgrades the finding.
+EMPTY_PASSWORD_APPLICABILITY = (
+    "An empty password field describes this file as shipped. A distribution that "
+    "provisions credentials at first boot still ships a login account with no "
+    "password until provisioning runs, and whether it ran is device evidence. "
+    "The observation is reported either way."
+)
+
+
+def _deduplicate_findings(findings: list[CredentialFinding]) -> list[CredentialFinding]:
+    """Fold duplicate observations of one secret, keeping every location.
+
+    Two copies of one default password, or one key in three files, are one
+    finding with three locations -- never one location that hides the others.
+    Severity keeps the highest observed, because deduplication must not make a
+    finding look milder than one of its occurrences.
+    """
+    merged: dict[tuple[str, str], CredentialFinding] = {}
+    order: list[tuple[str, str]] = []
+    rank = {
+        Severity.INFO: 0,
+        Severity.LOW: 1,
+        Severity.MEDIUM: 2,
+        Severity.HIGH: 3,
+        Severity.CRITICAL: 4,
+    }
+    for finding in findings:
+        key = (finding.rule_id or finding.matched_pattern, finding.raw_value_hash)
+        kept = merged.get(key)
+        if kept is None:
+            merged[key] = finding
+            order.append(key)
+            continue
+        for location in finding.occurrences or [str(finding.file_path)]:
+            if location not in kept.occurrences:
+                kept.occurrences.append(location)
+        if rank[finding.severity] > rank[kept.severity]:
+            kept.severity = finding.severity
+        kept.is_default = kept.is_default or finding.is_default
+        kept.is_placeholder = kept.is_placeholder and finding.is_placeholder
+    return [merged[key] for key in order]
+
+
 def _rel_label(path: Path | None, root_id: str) -> str:
     """Locate a record inside the root it came from.
 
@@ -162,16 +211,19 @@ class CredentialScanner:
     6. Unix credential parsing (/etc/passwd, /etc/shadow)
     """
 
-    def __init__(self, config: ScannerConfig) -> None:
+    def __init__(self, config: ScannerConfig, rule_engine: YaraEngine | None = None) -> None:
         self.config = config
-        self._yara_engine: YaraEngine | None = None
+        #: The run's single compiled rule set, shared with every other detector.
+        self._yara_engine = rule_engine
         self._default_creds: list[dict] = []
         self._default_creds_loaded = False
         #: Number of passwd/shadow pairs parsed by the last unix account scan.
         self.last_account_pairs: int = 0
+        #: YARA matches the semantics rules refused to promote, with the reason.
+        self.suppressed: list[dict[str, str]] = []
 
     def _init_yara(self) -> YaraEngine:
-        """Lazy-init the YARA engine and load rules."""
+        """The shared rule set, compiled once per run."""
         if self._yara_engine is None:
             self._yara_engine = YaraEngine(self.config)
             self._yara_engine.load_rules()
@@ -199,14 +251,18 @@ class CredentialScanner:
     # ──────────────────────────────────────────
 
     def scan_inventory(self, inventory: FilesystemInventory | None) -> list[CredentialFinding]:
-        """Scan all CRITICAL/HIGH category files in the inventory."""
+        """Scan every file whose category or content could carry a secret.
+
+        Text categories are scanned for regex patterns; **every ELF binary** is
+        scanned for the credential rule set, because a secret compiled into a
+        binary is exactly the case a firmware review must not miss. The
+        reachability rules decide what a match means in that context, not the
+        file category.
+        """
         if inventory is None:
             return []
 
         findings: list[CredentialFinding] = []
-        seen_hashes: set[str] = set()
-
-        # Categories to scan
         scan_categories = [
             FileCategory.CRITICAL_CREDENTIAL,
             FileCategory.CRITICAL_CONFIG,
@@ -215,28 +271,24 @@ class CredentialScanner:
             FileCategory.HIGH_DATABASE,
         ]
 
+        scheduled: dict[Path, FileCategory | None] = {}
         for category in scan_categories:
-            files = inventory.categories.get(category, [])
-            for ff in files:
-                file_findings = self.scan_file(ff.absolute_path, ff.path, category)
-                for f in file_findings:
-                    # Deduplicate by raw_value_hash
-                    if f.raw_value_hash and f.raw_value_hash in seen_hashes:
-                        continue
-                    if f.raw_value_hash:
-                        seen_hashes.add(f.raw_value_hash)
-                    findings.append(f)
+            for finding in inventory.categories.get(category, []):
+                scheduled.setdefault(finding.absolute_path, category)
+        for finding in inventory.findings:
+            if finding.format == "elf":
+                scheduled.setdefault(finding.absolute_path, None)
+
+        by_path = {finding.absolute_path: finding for finding in inventory.findings}
+        for absolute_path in sorted(scheduled, key=str):
+            inventory_finding = by_path.get(absolute_path)
+            rel = inventory_finding.path if inventory_finding else Path(absolute_path.name)
+            findings.extend(self.scan_file(absolute_path, rel, scheduled[absolute_path]))
 
         # Unix credential parsing (account records are joined, not guessed)
-        unix_findings = self.scan_unix_accounts(inventory)
-        for f in unix_findings:
-            h = f.raw_value_hash
-            if h and h in seen_hashes:
-                continue
-            if h:
-                seen_hashes.add(h)
-            findings.append(f)
+        findings.extend(self.scan_unix_accounts(inventory))
 
+        findings = _deduplicate_findings(findings)
         logger.info("Credential scan: %d findings", len(findings))
         return findings
 
@@ -262,11 +314,13 @@ class CredentialScanner:
         # ── Layer 1: YARA scanning ──
         yara_engine = self._init_yara()
         if yara_engine.is_available:
-            yara_matches = yara_engine.scan_file(abs_path)
-            existing_hashes = {f.raw_value_hash for f in findings}
-            for ym in yara_matches:
-                finding = self._yara_match_to_finding(ym, rel_path)
-                if finding and finding.raw_value_hash not in existing_hashes:
+            for ym in yara_engine.scan_file(abs_path):
+                if ym.destination != "credential":
+                    # Service, crypto and indicator matches belong to their own
+                    # detectors; a category is never relabelled here.
+                    continue
+                finding = self._yara_match_to_finding(ym, rel_path, is_binary)
+                if finding is not None:
                     findings.append(finding)
 
         # ── Layer 2: Regex scanning (skip for binary files) ──
@@ -446,6 +500,7 @@ class CredentialScanner:
                     matched_pattern="credential.unix.empty_password",
                     raw_value=description,
                     context=f"{description} — {locations}",
+                    applicability_note=EMPTY_PASSWORD_APPLICABILITY,
                 ).with_rule_id("credential.unix.empty_password")
             )
 
@@ -525,8 +580,16 @@ class CredentialScanner:
         {"credential", "password", "api_key", "private_key", "token", "connection_string"}
     )
 
-    def _yara_match_to_finding(self, ym: YaraMatch, rel_path: Path) -> CredentialFinding | None:
-        """Convert a credential YARA match; ignore rules owned elsewhere."""
+    #: Rules whose match is only a credential when the *location* can hold one.
+    #: A `password = "..."` assignment is a statement in a file; the same bytes
+    #: inside a shared library are code that looks for it. Those rules are not
+    #: promoted on an ELF binary, and the refusal is recorded with its reason.
+    _SOURCE_CODE_ONLY_RULES = frozenset({"hardcoded_password_variable"})
+
+    def _yara_match_to_finding(
+        self, ym: YaraMatch, rel_path: Path, is_binary: bool
+    ) -> CredentialFinding | None:
+        """Convert a credential YARA match, applying the reachability rules."""
         meta = ym.meta
         category = meta.get("category", "password")
         if category not in self._CREDENTIAL_YARA_CATEGORIES:
@@ -537,11 +600,28 @@ class CredentialScanner:
                 category,
             )
             return None
+
+        # Reachability: an assignment-shaped match inside a compiled library is
+        # the library looking for a password, not a shipped secret.
+        if is_binary and ym.rule_name in self._SOURCE_CODE_ONLY_RULES:
+            self.suppressed.append(
+                {
+                    "rule": ym.rule_name,
+                    "location": str(rel_path),
+                    "reason": (
+                        "assignment-shaped match inside a compiled binary; the rule "
+                        "describes a source statement, not a stored secret"
+                    ),
+                }
+            )
+            return None
+
         severity_str = meta.get("severity", "HIGH").upper()
         severity = Severity(severity_str) if severity_str in Severity.__members__ else Severity.HIGH
-        description = meta.get("description", ym.rule_name)
+        description = str(meta.get("description", ym.rule_name))
 
-        # Extract matched data from strings
+        # The matched bytes never leave this method: the value is masked before
+        # it can reach a finding, a log line or a report.
         raw_value = ""
         offset = None
         if ym.strings:
@@ -549,10 +629,7 @@ class CredentialScanner:
             raw_value = sdata.decode(errors="ignore")
 
         masked = self._mask_value(raw_value) if raw_value else description[:64]
-        if raw_value:
-            raw_hash = hashlib.sha256(raw_value.encode()).hexdigest()
-        else:
-            raw_hash = hashlib.sha256(description.encode()).hexdigest()
+        raw_hash = hashlib.sha256(raw_value.encode()).hexdigest()
 
         return CredentialFinding(
             severity=severity,
@@ -567,6 +644,9 @@ class CredentialScanner:
             is_default=False,
             is_placeholder=False,
             rule_id=f"credential.yara.{ym.rule_name}",
+            occurrences=[f"{rel_path}@{item}" for item in ym.offsets] or [str(rel_path)],
+            namespace=ym.namespace,
+            ruleset_digest=ym.ruleset_digest,
         )
 
     # ──────────────────────────────────────────
@@ -584,6 +664,7 @@ class CredentialScanner:
         context: str,
         is_default: bool = False,
         is_placeholder: bool = False,
+        applicability_note: str = "",
     ) -> CredentialFinding:
         """Build a CredentialFinding with masking and hashing."""
         masked = self._mask_value(raw_value)
@@ -600,7 +681,11 @@ class CredentialScanner:
             context=context,
             is_default=is_default,
             is_placeholder=is_placeholder,
+            applicability_note=applicability_note,
             rule_id=f"credential.regex.{category}",
+            occurrences=[
+                f"{file_path}:{line_number}" if line_number is not None else str(file_path)
+            ],
         )
 
     # ──────────────────────────────────────────

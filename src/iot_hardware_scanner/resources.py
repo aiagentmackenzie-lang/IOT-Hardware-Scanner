@@ -28,6 +28,7 @@ SAMPLE_FILES: dict[str, str] = {
 DATA_ROLES: dict[str, str] = {
     "benign_domains.txt": "domain allow-list used to damp indicator scores",
     "suspicious_tlds.txt": "TLD list used to raise indicator scores",
+    "domain_suffixes.txt": "domain suffixes a token must end in to be an indicator",
     "component_cpe_map.json": "product-to-CPE mapping",
     "default_credentials.json": "known default credential table",
     "kev_catalog.json": "known-exploited-vulnerability identifiers",

@@ -154,6 +154,21 @@ class ScannerConfig:
         ge=0,
         le=10,
     )
+    nvd_max_results_per_page: int = Field(
+        default=2000,
+        description="Results requested per advisory page (NVD's own maximum is 2000).",
+        ge=1,
+        le=2000,
+    )
+    nvd_max_pages: int = Field(
+        default=5,
+        description=(
+            "Bound on result pages fetched for one advisory query. Reaching the bound "
+            "is recorded as a partial lookup, not as a complete answer."
+        ),
+        ge=1,
+        le=100,
+    )
 
     # ── Credential Scanner ──
     yara_rules_dirs: list[Path] = Field(
@@ -184,6 +199,25 @@ class ScannerConfig:
             "Disable all network requests (NVD, threat intel). Default true: a "
             "scan never reaches the network unless the operator asks it to."
         ),
+    )
+
+    # ── Advisory assessment (offline, snapshot-driven) ──
+    advisory_snapshot: Path | None = Field(
+        default=None,
+        description=(
+            "Local advisory snapshot to apply (ihs-advisory-snapshot/1). A scan never "
+            "fetches; refresh is a separate operation. Without a snapshot, advisory "
+            "applicability is reported as not assessed."
+        ),
+    )
+    advisory_snapshot_max_age_days: int = Field(
+        default=30,
+        description=(
+            "Age at which a snapshot is reported stale. A stale snapshot still answers "
+            "queries, but a clean result from it is not a pass."
+        ),
+        ge=1,
+        le=365,
     )
 
     # ── C2 Detector ──

@@ -1,3 +1,12 @@
+// Password rules.
+//
+// A hash-shaped string is not a stored credential unless it is in an account
+// database or a configuration file; the account databases are read verbatim by
+// the Unix account parser, which is the only place a stored hash has meaning.
+// The old `unix_md5_hash` regex matched a hash example inside libc's data on a
+// stock OpenWrt image, so it is gone: `/etc/shadow` is now the only source for
+// "this account stores an MD5 hash".
+
 rule hardcoded_password_variable {
     meta:
         description = "Hardcoded password assignment in config/script"
@@ -12,17 +21,4 @@ rule hardcoded_password_variable {
 
     condition:
         any of ($pwd*)
-}
-
-rule unix_md5_hash {
-    meta:
-        description = "MD5 crypt hash detected (weak algorithm)"
-        severity = "HIGH"
-        category = "credential"
-
-    strings:
-        $md5 = /\$1\$[a-zA-Z0-9.\/]{0,8}\$[a-zA-Z0-9.\/]{22}/
-
-    condition:
-        $md5
 }

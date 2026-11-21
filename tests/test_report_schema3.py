@@ -136,9 +136,9 @@ def populate(context: ScanContext) -> None:
 
 
 class TestSchemaThree:
-    def test_version_is_three(self, context: ScanContext) -> None:
+    def test_version_is_current(self, context: ScanContext) -> None:
         document = build_document(context, version=__version__)
-        assert document["schema_version"] == SCHEMA_VERSION == 3
+        assert document["schema_version"] == SCHEMA_VERSION == 4
 
     def test_image_map_keeps_the_three_sizes_apart(self, context: ScanContext) -> None:
         populate(context)
@@ -253,12 +253,20 @@ class TestVersionTwoUpgrade:
 
         document = load_document(v2)
 
-        assert document["schema_version"] == 3
+        assert document["schema_version"] == SCHEMA_VERSION
         assert document["findings"] == v2["findings"]
         assert document["stages"] == v2["stages"]
         assert document["migration"]["from"] == 2
         # Not recorded, and said so -- not silently empty.
-        for section in ("image_map", "extraction", "input_binding", "opkg", "tree"):
+        for section in (
+            "image_map",
+            "extraction",
+            "input_binding",
+            "opkg",
+            "tree",
+            "ruleset",
+            "advisory",
+        ):
             assert document[section] is None
         assert document["elf"]["records"] == []
 
@@ -269,6 +277,6 @@ class TestVersionTwoUpgrade:
         populate(context)
         document = build_document(context, version=__version__)
         again = load_document(json.loads(render(document, "json")))
-        assert again["schema_version"] == 3
+        assert again["schema_version"] == SCHEMA_VERSION
         assert again["opkg"]["installed"] == 196
         assert again["image_map"]["nodes"][1]["extent_bytes"] == 4_348_264

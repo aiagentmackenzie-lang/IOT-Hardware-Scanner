@@ -137,6 +137,8 @@ def detector(config: ScannerConfig, threat_intel_isolated: ThreatIntelManager) -
     det._threat_intel = threat_intel_isolated
     det._domain_scorer = DomainScorer(config, threat_intel=threat_intel_isolated)
     det._yara_engine = None
+    det.suppressed = {}
+    det.crypto_findings = []
     return det
 
 

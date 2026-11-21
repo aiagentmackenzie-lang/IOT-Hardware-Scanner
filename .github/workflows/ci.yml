@@ -199,7 +199,68 @@ jobs:
             -k "WorkerOff or ReplacedBuildOutput or snapshot_stays_in_use"
 
   # ---------------------------------------------------------------------------
-  # MILESTONE B QUALIFIED GATE. This is the only job with the real extraction
+  # Bounded resource and performance job. No container runtime is needed: the
+  # entropy pass streams the input, and the point is that a 2 GiB artifact is
+  # measured without being pulled into memory. A skip fails the job.
+  # ---------------------------------------------------------------------------
+  bounded-resources:
+    name: Bounded resources (2 GiB, no worker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Reader and budget contracts
+        run: |
+          set -o pipefail
+          pytest tests/test_bounded_reader.py tests/test_entropy.py \
+            -v -rfs 2>&1 | tee /tmp/resources.log
+      - name: No skips in the resource gate
+        run: |
+          test -s /tmp/resources.log || { echo "the resource run produced no log"; exit 1; }
+          grep -qE "[0-9]+ passed" /tmp/resources.log || { echo "the resource run did not pass"; exit 1; }
+          if grep -qE "[0-9]+ skipped" /tmp/resources.log; then
+            echo "a skip leaves the resource limit case unexercised"
+            exit 1
+          fi
+      - name: Sparse 2 GiB measurement
+        run: |
+          cd "$RUNNER_TEMP"
+          python - <<'PY'
+          import json, os, resource, subprocess, sys, time
+          target = "sparse-2g.bin"
+          with open(target, "wb") as handle:
+              handle.truncate(2 * 1024 * 1024 * 1024)
+          command = [
+              sys.executable, "-m", "iot_hardware_scanner", "entropy", target,
+              "--format", "json", "--block-size", "16777216",
+          ]
+          env = dict(os.environ, IOT_HARDWARE_SCANNER_MAX_ENTROPY_SCAN_SIZE_MB="4096")
+          started = time.monotonic()
+          completed = subprocess.run(command, env=env)
+          elapsed = time.monotonic() - started
+          usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+          record = {
+              "bytes": os.path.getsize(target),
+              "exit": completed.returncode,
+              "elapsed_seconds": round(elapsed, 2),
+              "peak_rss_kib": usage.ru_maxrss,
+          }
+          print(json.dumps(record))
+          assert record["exit"] == 0, record
+          # 2 GiB at 16 MiB windows: bounded memory, not one flat allocation.
+          assert record["peak_rss_kib"] < 512 * 1024, record
+          assert record["elapsed_seconds"] < 300, record
+          PY
+      - name: Publish the measurement
+        run: echo "measurement recorded in the job log; the release notes quote it"
+
+  # ---------------------------------------------------------------------------
+  # MILESTONE C QUALIFIED GATE (was milestone B). This is the only job with the real extraction
   # path: a pinned worker image built here, the installed wheel, the pinned
   # corpus, and every acceptance row of the milestone. A skip in this job means
   # the capability is unqualified, so the job fails on skips.
@@ -238,7 +299,7 @@ jobs:
           /tmp/ihs-venv/bin/pip install dist/*.whl
           /tmp/ihs-venv/bin/pip install pytest
 
-      - name: Milestone B acceptance rows (reference image, worker image)
+      - name: Milestone C acceptance rows (reference image, worker image)
         env:
           IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
           IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
@@ -246,8 +307,16 @@ jobs:
           # `-rfs` lists every skip reason. In this job a skip means the
           # capability is unqualified, so the next step fails the gate on it.
           set -o pipefail
+          # Every module that carries a release-gate row runs here, against the
+          # wheel installed outside the checkout. A skip in this job leaves that
+          # capability unqualified, and the next step fails on it.
           /tmp/ihs-venv/bin/python -m pytest \
-            tests/test_installed_image_cli.py tests/test_elf_parser.py \
+            tests/test_installed_image_cli.py \
+            tests/test_elf_parser.py \
+            tests/test_rule_semantics.py \
+            tests/test_control_matrix.py \
+            tests/test_advisory.py \
+            tests/test_invariance.py \
             -v -rfs 2>&1 | tee /tmp/gate.log
 
       - name: No skips in the qualified gate

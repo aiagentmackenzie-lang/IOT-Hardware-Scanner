@@ -34,6 +34,7 @@ from iot_hardware_scanner.models import (
     Completion,
     ControlResult,
     CredentialFinding,
+    CryptoFinding,
     CVEFinding,
     ReportFinding,
     ScanContext,
@@ -52,9 +53,14 @@ logger = logging.getLogger(__name__)
 PROFILE_FIRMWARE = "firmware-static"
 PROFILE_FIRMWARE_TREE = "firmware-tree"
 PROFILE_CREDENTIALS = "credentials-only"
-PROFILE_VERSION = "3.0"
+PROFILE_VERSION = "4.0"
 
 #: Stages a profile must finish before it may report a complete assessment.
+#:
+#: ``rule_compilation`` is required from profile version 4.0: every detector in
+#: the qualified profile routes matches by the destination its rule's own
+#: category declares, so a rule set that did not compile is a capability the
+#: profile asked for and did not get.
 #:
 #: The firmware profile names every question the released product claims to
 #: answer about a shipped Linux image. Until extraction, enumeration, ELF
@@ -63,6 +69,7 @@ PROFILE_VERSION = "3.0"
 REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
     PROFILE_FIRMWARE: (
         StageId.INGEST,
+        StageId.RULE_COMPILATION,
         StageId.EXTRACTION,
         StageId.ROOT_DISCOVERY,
         StageId.ENUMERATION,
@@ -81,6 +88,7 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
     #: byte stream to measure entropy on, so neither is required.
     PROFILE_FIRMWARE_TREE: (
         StageId.INGEST,
+        StageId.RULE_COMPILATION,
         StageId.ENUMERATION,
         StageId.BINARY_INVENTORY,
         StageId.ELF_METADATA,
@@ -93,6 +101,7 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
     ),
     PROFILE_CREDENTIALS: (
         StageId.INGEST,
+        StageId.RULE_COMPILATION,
         StageId.ENUMERATION,
         StageId.CREDENTIAL_SCAN,
         StageId.UNIX_ACCOUNTS,
@@ -165,6 +174,14 @@ def _location(file_path: object, line_number: int | None, offset: int | None) ->
 
 def _credential_to_finding(finding: CredentialFinding) -> ReportFinding:
     rule_id = finding.rule_id or f"credential.{finding.category}"
+    locations = list(finding.occurrences) or [
+        _location(finding.file_path, finding.line_number, finding.offset)
+    ]
+    evidence = [finding.masked_value] if finding.masked_value else []
+    if finding.namespace:
+        evidence.append(f"rule namespace {finding.namespace}")
+    if finding.applicability_note:
+        evidence.append(finding.applicability_note)
     return ReportFinding(
         rule_id=rule_id,
         severity=finding.severity,
@@ -174,39 +191,80 @@ def _credential_to_finding(finding: CredentialFinding) -> ReportFinding:
             f"(value {finding.masked_value or 'redacted'})"
         ).strip(),
         category=finding.category,
-        locations=[_location(finding.file_path, finding.line_number, finding.offset)],
-        evidence=[finding.masked_value] if finding.masked_value else [],
+        locations=locations,
+        evidence=evidence,
+        destination="credential",
+        namespaces=[finding.namespace] if finding.namespace else [],
+        ruleset_digest=finding.ruleset_digest,
         critical_qualified=finding_is_critical(rule_id, finding.severity),
     )
 
 
 def _c2_to_finding(finding: C2Finding) -> ReportFinding:
-    rule_id = f"c2.{finding.indicator_type}"
+    rule_id = finding.rule_id or f"c2.{finding.indicator_type}"
     severity = _C2_SEVERITY.get(finding.severity, Severity.INFO)
+    locations = list(finding.occurrences) or [_location(finding.file_path, None, None)]
     return ReportFinding(
         rule_id=rule_id,
         severity=severity,
         title=f"C2 indicator ({finding.indicator_type})",
         description=finding.description or f"{finding.indicator_type} indicator",
         category="c2_indicator",
-        locations=[_location(finding.file_path, None, None)],
+        locations=locations,
         evidence=[f"score={finding.suspicion_score:.0f}"],
+        destination=("service" if finding.indicator_type == "backdoor_service" else "indicator"),
         critical_qualified=finding_is_critical(rule_id, severity),
     )
 
 
-def _cve_to_finding(finding: CVEFinding) -> ReportFinding:
+def _crypto_to_finding(finding: CryptoFinding) -> ReportFinding:
+    """An observed algorithm implementation, as its own kind of finding.
+
+    This is evidence that weak-crypto *code* is in the image. It is not a
+    statement that the device uses it, and the control that consumes it says
+    so rather than failing the image outright.
+    """
+    rule_id = finding.rule_id or f"crypto.{finding.algorithm.lower()}"
+    return ReportFinding(
+        rule_id=rule_id,
+        severity=Severity.MEDIUM,
+        title=f"{finding.algorithm} implementation present",
+        description=(
+            f"{finding.description} — the implementation is present in the shipped "
+            "binary; whether it is reachable or in use needs runtime evidence."
+        ),
+        category="crypto",
+        locations=[finding.evidence or str(finding.file_path)],
+        evidence=[f"algorithm={finding.algorithm}", f"strength={finding.strength}"],
+        destination="crypto",
+        namespaces=[finding.namespace] if finding.namespace else [],
+        ruleset_digest=finding.ruleset_digest,
+        critical_qualified=False,
+    )
+
+
+def _advisory_to_finding(finding: CVEFinding) -> ReportFinding:
     rule_id = f"advisory.{finding.cve_id}"
+    locations = list(finding.occurrences) or [
+        f"{finding.affected_product} {finding.affected_version}".strip(),
+    ]
+    evidence = [
+        f"applicability={finding.applicability}",
+        f"kev={finding.is_in_kev}",
+        f"provider={finding.provider or 'unrecorded'}",
+        f"score={finding.provider_score if finding.provider_score is not None else 'n/a'}",
+    ]
+    if finding.stale:
+        evidence.append("snapshot=stale")
     return ReportFinding(
         rule_id=rule_id,
         severity=finding.severity,
         title=f"{finding.cve_id} in {finding.affected_product or 'component'}",
         description=finding.description,
         category="advisory",
-        locations=[
-            f"{finding.affected_product} {finding.affected_version}".strip(),
-        ],
-        evidence=[f"kev={finding.is_in_kev}"],
+        locations=locations,
+        evidence=evidence,
+        destination="advisory",
         critical_qualified=finding_is_critical(rule_id, finding.severity),
     )
 
@@ -220,7 +278,8 @@ def collect_findings(context: ScanContext) -> list[ReportFinding]:
     findings: list[ReportFinding] = []
     findings.extend(_credential_to_finding(f) for f in context.credential_findings)
     findings.extend(_c2_to_finding(f) for f in context.c2_findings)
-    findings.extend(_cve_to_finding(f) for f in context.cve_findings)
+    findings.extend(_crypto_to_finding(f) for f in context.crypto_findings)
+    findings.extend(_advisory_to_finding(f) for f in context.cve_findings)
 
     findings.sort(key=lambda f: (f.category, f.rule_id, tuple(f.locations), f.severity.value))
     return findings
@@ -266,10 +325,19 @@ def build_assessment(
     context: ScanContext,
     controls: list[ControlResult] | None = None,
     limitations: list[str] | None = None,
+    extra_required: tuple[StageId, ...] = (),
 ) -> Assessment:
-    """Derive assessment completion from the stages that actually ran."""
+    """Derive assessment completion from the stages that actually ran.
+
+    ``extra_required`` promotes a stage the operator explicitly asked for (for
+    example advisory assessment, when a snapshot was supplied) into the
+    profile's required set for this run. The exit table itself is unchanged:
+    a requested stage that could not run leaves the assessment incomplete, and
+    if what was missing is an external input the stage records it as a
+    dependency.
+    """
     profile = context.profile or PROFILE_FIRMWARE
-    required = REQUIRED_STAGES.get(profile, ())
+    required = tuple(REQUIRED_STAGES.get(profile, ())) + tuple(extra_required)
     stages = sorted(context.stages, key=lambda s: s.stage_id.value)
 
     missing_deps: list[str] = []

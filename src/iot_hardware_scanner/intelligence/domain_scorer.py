@@ -56,6 +56,10 @@ _BOTNET_PATTERNS: list[re.Pattern] = [
 # ── DGA hex/random patterns ──
 _HEX_SUBDOMAIN = re.compile(r"^[0-9a-f]{" + str(_DGA_MIN_SUBDOMAIN_LEN) + r",}$")
 _CONSONANT_CLUSTER = re.compile(r"[bcdfghjklmnpqrstvwxz]{4,}", re.IGNORECASE)
+#: A hostname's whole shape: labels of letters/digits/hyphens, at least one dot.
+_HOST_LABEL = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$"
+)
 
 
 class DomainScorer:
@@ -64,6 +68,11 @@ class DomainScorer:
     Thresholds (configurable via ScannerConfig):
       Score >= c2_suspicion_threshold (default 40) → SUSPICIOUS
       Score >= c2_likely_threshold (default 60) → LIKELY_C2
+
+    A score is only ever computed for a token that is *plausible as a
+    hostname* (:meth:`plausible_domain`). A token in a string table that
+    happens to contain a dot is not a domain, and scoring it produced eleven
+    review findings on a stock OpenWrt image before this check existed.
     """
 
     def __init__(
@@ -75,6 +84,57 @@ class DomainScorer:
         self.threat_intel = threat_intel or ThreatIntelManager(config)
         self._benign_domains: set[str] | None = None
         self._suspicious_tlds: set[str] | None = None
+        self._domain_suffixes: set[str] | None = None
+
+    # ──────────────────────────────────────────
+    # Reachability / semantics
+    # ──────────────────────────────────────────
+
+    def _load_domain_suffixes(self) -> set[str]:
+        """Load the bounded suffix list a token must end in to be a domain."""
+        if self._domain_suffixes is not None:
+            return self._domain_suffixes
+
+        suffixes: set[str] = set()
+        path = resources.data_file("domain_suffixes.txt")
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                entry = line.strip().lower()
+                if entry and not entry.startswith("#"):
+                    suffixes.add(entry)
+        except OSError as exc:
+            logger.warning("Cannot load domain suffix list: %s", exc)
+        self._domain_suffixes = suffixes
+        return suffixes
+
+    def plausible_domain(self, token: str, known_names: set[str] | None = None) -> tuple[bool, str]:
+        """Whether a token is a candidate domain, and why not when it is not.
+
+        ``known_names`` are the basenames of files in the inspected artifact and
+        the dependency/soname values recorded from its ELF files. A token equal
+        to one of those is a dependency name, not an indicator: this is the
+        rule that stops a shared library's own symbol table from being read as
+        C2 infrastructure.
+        """
+        candidate = token.strip().lower().rstrip(".")
+        if not candidate or " " in candidate or "\t" in candidate:
+            return False, "not a single token"
+        if candidate.startswith(".") or candidate.endswith("."):
+            return False, "not a hostname"
+        labels = candidate.split(".")
+        if len(labels) < 2 or any(not label for label in labels):
+            return False, "not a dotted name"
+        if not _HOST_LABEL.match(candidate):
+            return False, "characters outside a hostname"
+        if candidate.endswith(".so") or re.search(r"\.so\.\d", candidate):
+            return False, "library soname"
+        if known_names and candidate in known_names:
+            return False, "name of a file or library in this image"
+
+        suffixes = self._load_domain_suffixes()
+        if suffixes and labels[-1] not in suffixes:
+            return False, f"suffix .{labels[-1]} is not in the shipped suffix list"
+        return True, ""
 
     def _load_benign_domains(self) -> set[str]:
         """Load benign domain whitelist from data file."""

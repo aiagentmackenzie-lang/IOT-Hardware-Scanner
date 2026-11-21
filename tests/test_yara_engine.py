@@ -168,7 +168,11 @@ class TestScanFile:
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
             f.write(
-                "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBAKx1\n-----END RSA PRIVATE KEY-----\n"
+                "-----BEGIN RSA PRIVATE KEY-----\n"
+                + "MIIBogIBAAJBAKx1"
+                + "A" * 64
+                + "\n"
+                + "-----END RSA PRIVATE KEY-----\n"
             )
             f.flush()
             path = Path(f.name)

@@ -84,8 +84,11 @@ class TestIngestHappyPath:
 
         assert context.output_dir.exists()
         assert context.output_dir.is_dir()
-        # Directory should be under the configured output path
-        assert str(context.output_dir).startswith(str(temp_dir / "scan_output"))
+        # Directory should be under the configured output path. Both sides are
+        # resolved: the scan resolves its base so a container worker can bind
+        # mount it, and on macOS a temporary directory is reached through a
+        # symlink (/var -> /private/var).
+        assert str(context.output_dir).startswith(str((temp_dir / "scan_output").resolve()))
 
     def test_output_directory_auto_fallback(self, small_firmware: Path) -> None:
         """When no output_dir configured, uses CWD/reports/."""

@@ -19,6 +19,7 @@ from iot_hardware_scanner.intelligence.domain_scorer import DomainScorer
 from iot_hardware_scanner.intelligence.threat_intel import ThreatIntelManager
 from iot_hardware_scanner.models import (
     C2Finding,
+    CryptoFinding,
     FileCategory,
     FilesystemInventory,
 )
@@ -73,14 +74,21 @@ class C2Detector:
     3. detect_malware_signatures — YARA-based malware family detection
     """
 
-    def __init__(self, config: ScannerConfig) -> None:
+    def __init__(self, config: ScannerConfig, rule_engine: YaraEngine | None = None) -> None:
         self.config = config
         self._threat_intel = ThreatIntelManager(config)
         self._domain_scorer = DomainScorer(config, self._threat_intel)
-        self._yara_engine: YaraEngine | None = None
+        #: The run's single compiled rule set. One compile per run: the caller
+        #: builds it and every detector uses it.
+        self._yara_engine = rule_engine
+        #: Tokens rejected by the reachability/semantics rules, with the reason.
+        #: Reported as stage coverage so a suppression is never invisible.
+        self.suppressed: dict[str, dict[str, str]] = {}
+        #: Cryptographic algorithms observed in the artifact (destination crypto).
+        self.crypto_findings: list[CryptoFinding] = []
 
     def _init_yara(self) -> YaraEngine:
-        """Lazy-init YARA engine."""
+        """The shared rule set, compiled once by the orchestrator."""
         if self._yara_engine is None:
             self._yara_engine = YaraEngine(self.config)
             self._yara_engine.load_rules()
@@ -90,7 +98,11 @@ class C2Detector:
     # Domain detection
     # ──────────────────────────────────────────
 
-    def detect_domains(self, inventory: FilesystemInventory) -> list[C2Finding]:
+    def detect_domains(
+        self,
+        inventory: FilesystemInventory,
+        known_names: set[str] | None = None,
+    ) -> list[C2Finding]:
         """Extract domains from the inventory and derive one decision per indicator.
 
         Occurrences are collected **first**, then each occurrence is scored in
@@ -99,6 +111,11 @@ class C2Detector:
         first file seen decided the verdict and reversing enumeration order
         flipped a domain between SUSPICIOUS and LIKELY_C2.
 
+        A token is only a candidate when it is plausible as a hostname (see
+        :meth:`DomainScorer.plausible_domain`): a dot in a string table is not a
+        domain, and a dependency name is not infrastructure. Rejected tokens are
+        counted by reason and reported as coverage, never silently dropped.
+
         Aggregate rule: an indicator takes the **highest** score of any of its
         occurrences. One occurrence inside a binary is not made safer by the
         same string also appearing in a config file. The reported location is
@@ -106,6 +123,7 @@ class C2Detector:
         byte-for-byte stable for a given inventory.
         """
         occurrences: dict[str, list[tuple[Path, dict]]] = {}
+        names = known_names or self._image_names(inventory)
 
         for ff in sorted(inventory.findings, key=lambda f: str(f.path)):
             if self._is_benign_path(ff.path):
@@ -120,15 +138,46 @@ class C2Detector:
             for domain in sorted(self._extract_domains_from_file(ff.absolute_path)):
                 if self._is_email_domain(domain, ff.absolute_path):
                     continue
+                plausible, reason = self._domain_scorer.plausible_domain(domain, names)
+                if not plausible:
+                    self._record_suppressed(domain, reason, ff.path)
+                    continue
                 occurrences.setdefault(domain.lower(), []).append((ff.path, context))
 
         findings = self._aggregate_domains(occurrences)
         logger.info(
-            "C2 domain detection: %d indicators from %d occurrence(s)",
+            "C2 domain detection: %d indicators from %d occurrence(s), %d token(s) rejected",
             len(findings),
             sum(len(v) for v in occurrences.values()),
+            len(self.suppressed),
         )
         return findings
+
+    @staticmethod
+    def _image_names(inventory: FilesystemInventory) -> set[str]:
+        """File basenames in the image: these are names, not hostnames."""
+        names: set[str] = set()
+        for finding in inventory.findings:
+            names.add(finding.path.name.lower())
+        return names
+
+    def _record_suppressed(self, token: str, reason: str, path: Path) -> None:
+        entry = self.suppressed.setdefault(token.lower(), {"reason": reason, "example": str(path)})
+        entry["example"] = min(entry["example"], str(path))
+
+    @property
+    def suppression_summary(self) -> list[str]:
+        """One line per rejected token class, for stage coverage."""
+        if not self.suppressed:
+            return []
+        by_reason: dict[str, list[str]] = {}
+        for token, entry in self.suppressed.items():
+            by_reason.setdefault(entry["reason"], []).append(token)
+        return [
+            f"{len(tokens)} domain-shaped token(s) rejected for indicator use: "
+            f"{reason} (e.g. {', '.join(sorted(tokens)[:3])})"
+            for reason, tokens in sorted(by_reason.items())
+        ]
 
     def _aggregate_domains(
         self, occurrences: dict[str, list[tuple[Path, dict]]]
@@ -249,7 +298,14 @@ class C2Detector:
         findings: list[C2Finding] = []
         seen_hashes: set[str] = set()
 
-        scan_categories = [FileCategory.CRITICAL_BINARY, FileCategory.CRITICAL_SERVICE]
+        # A backdoor *directive* lives in a config or init file; a malware
+        # *implementation* lives in a binary. Both are scanned, and the rule
+        # destinations decide which is which.
+        scan_categories = [
+            FileCategory.CRITICAL_BINARY,
+            FileCategory.CRITICAL_SERVICE,
+            FileCategory.CRITICAL_CONFIG,
+        ]
         yara_engine = self._init_yara()
 
         if not yara_engine.is_available:
@@ -261,10 +317,9 @@ class C2Detector:
             for ff in files:
                 yara_matches = yara_engine.scan_file(ff.absolute_path)
                 for ym in yara_matches:
-                    meta = ym.meta
-                    yara_category = meta.get("category", "")
-
-                    if yara_category not in ("malware_signature", "backdoor_service"):
+                    # Route by the destination the rule's own category earned.
+                    # A credential or crypto match belongs to its own detector.
+                    if ym.destination not in ("indicator", "service"):
                         continue
 
                     # Deduplicate
@@ -274,51 +329,101 @@ class C2Detector:
                         continue
                     seen_hashes.add(raw_hash)
 
-                    # Determine indicator type
-                    indicator_type = (
-                        "backdoor_service"
-                        if yara_category == "backdoor_service"
-                        else "malware_signature"
-                    )
-
-                    # Map MITRE ATT&CK techniques
-                    family = meta.get("family", "").lower()
-                    mitre = self._get_mitre_techniques(family, indicator_type)
-
-                    # Severity from YARA meta
-                    severity_str = meta.get("severity", "HIGH").upper()
-                    if severity_str in ("CRITICAL", "HIGH"):
-                        classification = "LIKELY_C2"
-                    else:
-                        classification = "SUSPICIOUS"
-
-                    # Extract matched data for description
-                    matched_data = ""
-                    if ym.strings:
-                        _, _ident, sdata = ym.strings[0]
-                        matched_data = sdata.decode(errors="ignore")[:64]
-
-                    description = meta.get("description", ym.rule_name)
-                    if matched_data:
-                        description += f" (matched: {matched_data!r})"
-
-                    findings.append(
-                        C2Finding(
-                            severity=classification,
-                            indicator_type=indicator_type,
-                            value=f"{ym.rule_name}:{ff.path}",
-                            file_path=ff.path,
-                            suspicion_score=80.0 if classification == "LIKELY_C2" else 50.0,
-                            score_breakdown={
-                                "yara_match": (80.0 if classification == "LIKELY_C2" else 50.0)
-                            },
-                            threat_intel_match=None,
-                            mitre_attack=mitre,
-                            description=description,
-                        )
-                    )
+                    findings.append(self._yara_indicator(ym, ff.path))
 
         logger.info("Malware signature detection: %d findings", len(findings))
+        return findings
+
+    def _yara_indicator(self, ym: YaraMatch, path: Path) -> C2Finding:
+        """One YARA match as an indicator, with its rule identity and offsets."""
+        meta = ym.meta
+        indicator_type = "backdoor_service" if ym.destination == "service" else "malware_signature"
+
+        # A configured backdoor entry is not a listening socket. The finding
+        # keeps the configuration as evidence and the description says so.
+        if indicator_type == "backdoor_service":
+            classification = "SUSPICIOUS"
+            score = 50.0
+        else:
+            classification = "LIKELY_C2" if ym.severity in ("CRITICAL", "HIGH") else "SUSPICIOUS"
+            score = 80.0 if classification == "LIKELY_C2" else 50.0
+
+        matched_data = ""
+        if ym.strings:
+            _offset, _ident, sdata = ym.strings[0]
+            matched_data = sdata.decode(errors="ignore")[:64]
+
+        description = str(meta.get("description", ym.rule_name))
+        if matched_data:
+            description += f" (matched: {matched_data!r})"
+        if indicator_type == "backdoor_service":
+            description += (
+                " — a startup directive or implementation string configures this "
+                "service; whether it listens requires device evidence."
+            )
+
+        return C2Finding(
+            severity=classification,
+            indicator_type=indicator_type,
+            value=f"{ym.rule_name}:{path}",
+            file_path=path,
+            suspicion_score=score,
+            score_breakdown={"yara_match": score},
+            threat_intel_match=None,
+            mitre_attack=self._get_mitre_techniques(
+                str(meta.get("family", "")).lower(), indicator_type
+            ),
+            description=description,
+            rule_id=f"c2.yara.{ym.rule_name}",
+            occurrences=[f"{path}@{offset}" for offset in ym.offsets] or [str(path)],
+        )
+
+    def detect_crypto(self, inventory: FilesystemInventory) -> list[CryptoFinding]:
+        """Observe cryptographic algorithms in the image's binaries.
+
+        This is *algorithm evidence*, deliberately separate from binary
+        hardening (NX/PIE/canary) and from account hash algorithms. A match
+        means the implementation is present; it does not mean the device uses
+        it, and the crypto check says so.
+        """
+        findings: list[CryptoFinding] = []
+        engine = self._init_yara()
+        if not engine.is_available:
+            return findings
+
+        seen: set[tuple[str, str]] = set()
+        for finding in sorted(inventory.findings, key=lambda f: str(f.path)):
+            if finding.format != "elf":
+                continue
+            for match in engine.scan_file(finding.absolute_path):
+                if match.destination != "crypto":
+                    continue
+                algorithm = str(match.meta.get("algorithm", "unknown"))
+                key = (match.rule_name, str(finding.path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(
+                    CryptoFinding(
+                        rule_id=f"crypto.yara.{match.rule_name}",
+                        algorithm=algorithm,
+                        strength=str(match.meta.get("strength", "unknown")),
+                        file_path=finding.path,
+                        offset=match.offsets[0] if match.offsets else None,
+                        matched_pattern=match.rule_name,
+                        namespace=match.namespace,
+                        ruleset_digest=match.ruleset_digest,
+                        description=str(match.meta.get("description", match.rule_name)),
+                        evidence=(
+                            f"{finding.path}@{match.offsets[0]}"
+                            if match.offsets
+                            else str(finding.path)
+                        ),
+                    )
+                )
+
+        self.crypto_findings = findings
+        logger.info("Crypto algorithm evidence: %d finding(s)", len(findings))
         return findings
 
     def detect_artifact(self, artifact: Path) -> list[C2Finding]:
@@ -357,6 +462,14 @@ class C2Detector:
                     addresses.setdefault(address, window.offset)
             if yara_engine.is_available:
                 yara_matches.extend(yara_engine.scan_data(window.data, module_name=artifact.name))
+
+        # The same reachability rule as the inventory path: a token in an opaque
+        # artifact is only an indicator when it is plausible as a hostname.
+        for domain in sorted(domains):
+            plausible, reason = self._domain_scorer.plausible_domain(domain)
+            if not plausible:
+                self._record_suppressed(domain, reason, Path(artifact.name))
+                del domains[domain]
 
         context = {"in_binary": True, "in_hosts": False}
         occurrences: dict[str, list[tuple[Path, dict]]] = {
@@ -401,27 +514,11 @@ class C2Detector:
             )
 
         for match in yara_matches:
-            yara_category = match.meta.get("category", "")
-            if yara_category not in ("malware_signature", "backdoor_service"):
+            # Only indicator and service destinations belong here; a credential
+            # or crypto match is another detector's business.
+            if match.destination not in ("indicator", "service"):
                 continue
-            indicator_type = (
-                "backdoor_service" if yara_category == "backdoor_service" else "malware_signature"
-            )
-            severe = match.meta.get("severity", "HIGH").upper() in ("CRITICAL", "HIGH")
-            findings.append(
-                C2Finding(
-                    severity="LIKELY_C2" if severe else "SUSPICIOUS",
-                    indicator_type=indicator_type,
-                    value=f"{match.rule_name}:{artifact.name}",
-                    file_path=Path(artifact.name),
-                    suspicion_score=80.0 if severe else 50.0,
-                    score_breakdown={"yara_match": 80.0 if severe else 50.0},
-                    mitre_attack=self._get_mitre_techniques(
-                        match.meta.get("family", "").lower(), indicator_type
-                    ),
-                    description=match.meta.get("description", match.rule_name),
-                )
-            )
+            findings.append(self._yara_indicator(match, Path(artifact.name)))
 
         if sweep.sampled:
             for finding in findings:

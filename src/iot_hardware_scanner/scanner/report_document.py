@@ -58,11 +58,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 TOOL_NAME = "iot-hardware-scanner"
 
 _EXTENSIONS = {"json": ".json", "markdown": ".md", "html": ".html", "terminal": ".txt"}
@@ -95,7 +95,11 @@ def _control_to_dict(control: ControlResult) -> dict[str, Any]:
         "control_id": control.control_id,
         "control_name": control.control_name,
         "status": control.status.value,
+        "evidence_status": control.evidence_status,
         "applicability": control.applicability,
+        "question": control.question,
+        "required_source": control.required_source,
+        "applicability_note": control.applicability_note,
         "result": control.result,
         "evidence": control.evidence,
         "remediation": control.remediation,
@@ -139,6 +143,8 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "elf": _elf_section(context),
         "opkg": _opkg_section(context),
         "tree": _tree_section(context),
+        "ruleset": _ruleset_section(context),
+        "advisory": _advisory_section(context),
         "components": _components_section(context),
         "data_sources": _data_sources_section(),
         "risk_score": None,
@@ -192,6 +198,9 @@ def _finding_to_dict(finding: Any) -> dict[str, Any]:
         "evidence": finding.evidence,
         "remediation": finding.remediation,
         "critical_qualified": finding.critical_qualified,
+        "destination": finding.destination,
+        "namespaces": finding.namespaces,
+        "ruleset_digest": finding.ruleset_digest,
     }
 
 
@@ -260,6 +269,83 @@ def _entropy_section(context: ScanContext) -> dict[str, Any] | None:
         "notes": [
             "Entropy describes byte distribution only. It does not establish "
             "encryption, readability, or any control verdict.",
+        ],
+    }
+
+
+def _ruleset_section(context: ScanContext) -> dict[str, Any] | None:
+    """The one compiled rule set this run used, and what it could not compile."""
+    info = context.ruleset
+    if info is None:
+        return None
+    return {
+        "digest": info.digest,
+        "engine": info.engine,
+        "engine_version": info.engine_version,
+        "source": info.source,
+        "rule_files": [
+            {
+                "namespace": record.namespace,
+                "name": record.name,
+                "sha256": record.sha256,
+                "rule_count": record.rule_count,
+                "destinations": record.destinations,
+            }
+            for record in info.files
+        ],
+        "compile_errors": list(info.errors),
+        "notes": [
+            "The rule set is compiled once per run and shared by every detector.",
+            "A compile error is a coverage gap: it is listed here and in the "
+            "rule_compilation stage.",
+        ],
+    }
+
+
+def _advisory_section(context: ScanContext) -> dict[str, Any] | None:
+    """The local snapshot that was applied, and one lookup per component."""
+    advisory = context.advisory
+    if advisory is None:
+        return None
+    snapshot = advisory.snapshot
+    return {
+        "state": advisory.state,
+        "complete": advisory.complete,
+        "matched": advisory.matched,
+        "kev_matches": advisory.kev_matches,
+        "kev_source": advisory.kev_source,
+        "keyword_candidates_rejected": advisory.keyword_candidates_rejected,
+        "snapshot": (
+            {
+                "path": snapshot.path,
+                "digest_sha256": snapshot.digest_sha256,
+                "schema": snapshot.schema,
+                "provider": snapshot.provider,
+                "acquired_at": snapshot.acquired_at,
+                "entries": snapshot.entries,
+                "age_days": snapshot.age_days,
+                "stale": snapshot.stale,
+                "includes_kev": snapshot.includes_kev,
+                "sample": snapshot.sample,
+            }
+            if snapshot is not None
+            else None
+        ),
+        "lookups": [
+            {
+                "component": lookup.component,
+                "version": lookup.version,
+                "cpe": lookup.cpe,
+                "state": lookup.state,
+                "matches": lookup.matches,
+                "reason": lookup.reason,
+            }
+            for lookup in advisory.lookups
+        ],
+        "notes": [
+            "The scan issued no network request: the snapshot was read from disk.",
+            "KEV membership, public exploit availability and applicability are "
+            "independent facts and are recorded separately.",
         ],
     }
 
@@ -506,7 +592,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("report document must be a JSON object")
 
     raw_version = data.get("schema_version")
-    if raw_version == 3:
+    if raw_version == SCHEMA_VERSION:
         document = dict(data)
         document.setdefault("findings", [])
         document.setdefault("controls", [])
@@ -516,10 +602,48 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("risk_score", None)
         return document
 
+    if raw_version == 3:
+        return _upgrade_v3(data)
+
     if raw_version == 2:
         return _upgrade_v2(data)
 
     return _upgrade_v1(data)
+
+
+#: Sections a schema-3 document never recorded.
+_V4_SECTIONS = ("ruleset", "advisory")
+
+
+def _upgrade_v3(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-3 document to schema 4 without inventing rule identity.
+
+    Every v3 fact is preserved. The rule set and the advisory assessment were
+    never recorded, so they are ``None`` with a migration note; findings keep
+    their recorded shape and simply have no ``destination``.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 3; the rule-set identity and advisory assessment were "
+        "not recorded by that version"
+    )
+    for section in _V4_SECTIONS:
+        document.setdefault(section, None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 3,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before each finding carried a typed "
+                "destination, before the compiled rule set was identified by digest, "
+                "and before advisory applicability could be assessed offline. Those "
+                "sections are absent, not empty."
+            ),
+        },
+    )
+    return document
 
 
 #: Sections a schema-2 document never recorded. They are added as explicit
@@ -537,8 +661,10 @@ def _upgrade_v2(data: dict[str, Any]) -> dict[str, Any]:
     """
     document = dict(data)
     document["schema_version"] = SCHEMA_VERSION
-    document["schema_note"] = "upgraded from schema 2; v3 evidence sections were not recorded"
-    for section in _V3_SECTIONS:
+    document["schema_note"] = (
+        "upgraded from schema 2; v3 and v4 evidence sections were not recorded"
+    )
+    for section in _V3_SECTIONS + _V4_SECTIONS:
         document.setdefault(section, None)
     document.setdefault("elf", {"eligible": 0, "parsed": 0, "records": [], "rejected": []})
     for key in ("findings", "controls", "stages", "components"):
@@ -824,6 +950,26 @@ def render_terminal(document: dict[str, Any]) -> str:
             "their own headers"
         )
 
+    ruleset = document.get("ruleset")
+    if ruleset:
+        lines.append(
+            f"Rule set: {len(ruleset.get('rule_files') or [])} file(s), digest "
+            f"{str(ruleset.get('digest'))[:16]}… ({ruleset.get('source')})"
+        )
+        for error in ruleset.get("compile_errors") or []:
+            lines.append(f"  rule gap: {error.get('file')}: {error.get('reason')}")
+
+    advisory = document.get("advisory")
+    if advisory:
+        snapshot = advisory.get("snapshot") or {}
+        lines.append(
+            f"Advisory: {advisory.get('state')} — {advisory.get('matched')} match(es), "
+            f"{advisory.get('kev_matches')} in KEV, {len(advisory.get('lookups') or [])} "
+            f"lookup(s); snapshot {str(snapshot.get('digest_sha256'))[:16]}…"
+        )
+    elif document.get("stages"):
+        lines.append("Advisory: not assessed (no snapshot supplied)")
+
     binding = document.get("input_binding")
     if binding:
         lines.append(
@@ -1085,6 +1231,57 @@ def render_markdown(document: dict[str, Any]) -> str:
                 )
         lines.append("")
 
+    ruleset = document.get("ruleset")
+    if ruleset:
+        lines += [
+            "## Rule set",
+            "",
+            f"- Digest: `{ruleset.get('digest')}`",
+            f"- Engine: {ruleset.get('engine')} {ruleset.get('engine_version') or ''}".rstrip(),
+            f"- Source: {ruleset.get('source')}",
+            f"- Rule files: {len(ruleset.get('rule_files') or [])}",
+            "",
+            "| Namespace | File | Rules | Destinations | SHA-256 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for record in ruleset.get("rule_files") or []:
+            lines.append(
+                f"| {_md_cell(record.get('namespace', ''))} | {_md_cell(record.get('name', ''))} | "
+                f"{record.get('rule_count')} | {', '.join(record.get('destinations') or [])} | "
+                f"`{record.get('sha256')}` |"
+            )
+        for error in ruleset.get("compile_errors") or []:
+            lines.append(f"- Not compiled: {error.get('file')}: {error.get('reason')}")
+        lines.append("")
+
+    advisory = document.get("advisory")
+    if advisory:
+        snapshot = advisory.get("snapshot") or {}
+        lines += [
+            "## Advisory assessment",
+            "",
+            f"- State: {advisory.get('state')}",
+            f"- Applicable matches: {advisory.get('matched')} "
+            f"({advisory.get('kev_matches')} in CISA KEV)",
+            f"- Snapshot: `{snapshot.get('path')}` ({snapshot.get('provider')}, "
+            f"acquired {snapshot.get('acquired_at')}, {snapshot.get('entries')} entries, "
+            f"{snapshot.get('age_days')} day(s) old, stale: "
+            f"{'yes' if snapshot.get('stale') else 'no'})",
+            f"- Snapshot SHA-256: `{snapshot.get('digest_sha256')}`",
+            "",
+            "| Component | Version | Lookup state | Matches | Reason |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for lookup in advisory.get("lookups") or []:
+            lines.append(
+                f"| {_md_cell(lookup.get('component', ''))} | "
+                f"{_md_cell(lookup.get('version', ''))} | {lookup.get('state')} | "
+                f"{lookup.get('matches')} | {_md_cell(lookup.get('reason') or '—')} |"
+            )
+        for note in advisory.get("notes") or []:
+            lines.append(f"- {note}")
+        lines.append("")
+
     components = document.get("components") or []
     if components:
         lines += [
@@ -1227,7 +1424,8 @@ def render_html(document: dict[str, Any]) -> str:
         parts.append("<p>None reported.</p>")
     else:
         parts.append(
-            "<table><tr><th>Severity</th><th>Rule</th><th>Locations</th><th>Kind</th></tr>"
+            "<table><tr><th>Severity</th><th>Rule</th><th>Destination</th>"
+            "<th>Locations</th><th>Kind</th></tr>"
         )
         for finding in findings:
             kind = "critical" if finding.get("critical_qualified") else "review"
@@ -1235,6 +1433,7 @@ def render_html(document: dict[str, Any]) -> str:
                 "<tr>"
                 f"<td>{html.escape(str(finding.get('severity')))}</td>"
                 f"<td><code>{html.escape(str(finding.get('rule_id')))}</code></td>"
+                f"<td>{html.escape(str(finding.get('destination') or 'unrecorded'))}</td>"
                 f"<td>{html.escape(', '.join(finding.get('locations') or []))}</td>"
                 f"<td>{kind}</td>"
                 "</tr>"
@@ -1252,10 +1451,56 @@ def render_html(document: dict[str, Any]) -> str:
             parts.append(
                 "<tr>"
                 f"<td>{html.escape(str(control.get('control_id')))}</td>"
-                f"<td>{html.escape(str(control.get('control_name')))}</td>"
+                f"<td>{html.escape(str(control.get('control_name')))}"
+                f'<div class="note">{html.escape(str(control.get("question") or ""))}</div></td>'
                 f"<td>{html.escape(str(control.get('status')))}</td>"
                 f"<td>{html.escape(str(control.get('result')))}</td>"
                 f"<td>{html.escape(evidence)}</td>"
+                "</tr>"
+            )
+        parts.append("</table>")
+
+    ruleset = document.get("ruleset")
+    if ruleset:
+        parts.append("<h2>Rule set</h2><table>")
+        parts.append(
+            f"<tr><th>Digest</th><td><code>"
+            f"{html.escape(str(ruleset.get('digest')))}</code></td></tr>"
+        )
+        parts.append(
+            f"<tr><th>Engine</th><td>{html.escape(str(ruleset.get('engine')))} "
+            f"{html.escape(str(ruleset.get('engine_version') or ''))}</td></tr>"
+        )
+        parts.append(f"<tr><th>Rule files</th><td>{len(ruleset.get('rule_files') or [])}</td></tr>")
+        parts.append("</table>")
+        for error in ruleset.get("compile_errors") or []:
+            parts.append(
+                f'<p class="note">Not compiled: {html.escape(str(error.get("file")))}: '
+                f"{html.escape(str(error.get('reason')))}</p>"
+            )
+
+    advisory = document.get("advisory")
+    if advisory:
+        snapshot = advisory.get("snapshot") or {}
+        parts.append("<h2>Advisory assessment</h2><table>")
+        parts.append(
+            f"<tr><th>State</th><td>{html.escape(str(advisory.get('state')))}</td></tr>"
+            f"<tr><th>Matches</th><td>{html.escape(str(advisory.get('matched')))} "
+            f"({html.escape(str(advisory.get('kev_matches')))} in KEV)</td></tr>"
+            f"<tr><th>Snapshot</th><td><code>"
+            f"{html.escape(str(snapshot.get('digest_sha256')))}</code> "
+            f"({html.escape(str(snapshot.get('provider')))}, acquired "
+            f"{html.escape(str(snapshot.get('acquired_at')))})</td></tr>"
+            "</table><table>"
+            "<tr><th>Component</th><th>Version</th><th>Lookup</th><th>Reason</th></tr>"
+        )
+        for lookup in advisory.get("lookups") or []:
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(str(lookup.get('component')))}</td>"
+                f"<td>{html.escape(str(lookup.get('version')))}</td>"
+                f"<td>{html.escape(str(lookup.get('state')))}</td>"
+                f"<td>{html.escape(str(lookup.get('reason') or ''))}</td>"
                 "</tr>"
             )
         parts.append("</table>")

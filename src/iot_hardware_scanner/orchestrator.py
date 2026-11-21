@@ -58,6 +58,7 @@ from iot_hardware_scanner.scanner.input_snapshot import (
     release_snapshot,
     reverify_source,
 )
+from iot_hardware_scanner.yara.yara_engine import YaraEngine
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -79,10 +80,20 @@ class Orchestrator:
         *,
         input_tree: bool = False,
         build_manifest: Path | None = None,
+        advisory_snapshot: Path | None = None,
     ) -> None:
         self.config = config or ScannerConfig()
         self.input_tree = input_tree
+        #: The one compiled rule set this run uses. Built on first need and
+        #: shared by every detector, so the rule set is compiled once and the
+        #: report carries one digest.
+        self._rule_engine: YaraEngine | None = None
         self.build_manifest = build_manifest
+        #: A local advisory snapshot makes advisory assessment a requested stage
+        #: for this run. None keeps it unassessed, which the report states.
+        self.advisory_snapshot = advisory_snapshot or (
+            self.config.advisory_snapshot if config is not None else None
+        )
         if profile is None:
             if creds_only:
                 profile = PROFILE_CREDENTIALS
@@ -115,6 +126,8 @@ class Orchestrator:
         context.profile = self.profile
         context.profile_version = PROFILE_VERSION
 
+        self._phase_rules(context)
+
         if self.profile == PROFILE_CREDENTIALS:
             context = self._run_credentials_profile(context)
         else:
@@ -124,8 +137,75 @@ class Orchestrator:
             context.input_snapshot = reverify_source(context.input_snapshot)
 
         context.completed_at = datetime.now(timezone.utc)
-        build_assessment(context, controls=context.controls, limitations=self._limitations(context))
+        build_assessment(
+            context,
+            controls=context.controls,
+            limitations=self._limitations(context),
+            extra_required=(StageId.ADVISORY,) if self.advisory_snapshot else (),
+        )
         return context
+
+    # ──────────────────────────────────────────
+    # Phase 0: the rule set (once per run)
+    # ──────────────────────────────────────────
+
+    def _phase_rules(self, context: ScanContext) -> ScanContext:
+        """Compile the packaged rules and any explicit additions, once."""
+        console.print("[bold]═══ Phase 0: Rule set ═══[/bold]")
+        try:
+            engine = self.rule_engine()
+        except Exception as exc:  # a broken rule install must not crash the scan
+            record_stage(
+                context,
+                StageId.RULE_COMPILATION,
+                StageStatus.FAILED,
+                reason=f"the packaged rule set could not be compiled: {exc}",
+                omissions=["credential, service, crypto and indicator rules never ran"],
+            )
+            console.print(f"  [red]✗[/red] Rule set unusable: {exc}")
+            return context
+
+        context.ruleset = engine.info
+        errors = engine.diagnostics
+        if not engine.is_available:
+            record_stage(
+                context,
+                StageId.RULE_COMPILATION,
+                StageStatus.UNAVAILABLE,
+                reason="yara-python is not importable, so the packaged rules could not run",
+                dependency="yara-python (the rule engine)",
+                omissions=["credential, service, crypto and indicator rules never ran"],
+            )
+            console.print("  [yellow]![/yellow] No rule engine — rule-based stages cannot run")
+            return context
+
+        record_stage(
+            context,
+            StageId.RULE_COMPILATION,
+            StageStatus.PARTIAL if errors else StageStatus.COMPLETE,
+            reason=(
+                f"{engine.rule_count} rule file(s) compiled from the "
+                f"{engine.info.source.replace('+', ' + ')}; digest {engine.digest[:16]}…"
+            ),
+            inspected=engine.rule_count,
+            eligible=engine.rule_count + len(errors),
+            omissions=[f"{item['file']}: {item['reason']}" for item in errors],
+        )
+        console.print(
+            f"  [green]✓[/green] {engine.rule_count} rule file(s) compiled "
+            f"(digest {engine.digest[:16]}…)"
+        )
+        for item in errors:
+            console.print(f"  [yellow]![/yellow] {item['file']}: {item['reason']}")
+        return context
+
+    def rule_engine(self) -> YaraEngine:
+        """The shared, compiled rule set for this run."""
+        if self._rule_engine is None:
+            engine = YaraEngine(self.config)
+            engine.load_rules()
+            self._rule_engine = engine
+        return self._rule_engine
 
     # ──────────────────────────────────────────
     # Profiles
@@ -805,7 +885,7 @@ class Orchestrator:
         console.print("[bold]═══ Phase 4: Credentials ═══[/bold]")
         from iot_hardware_scanner.scanner.credential_scanner import CredentialScanner
 
-        scanner = CredentialScanner(self.config)
+        scanner = CredentialScanner(self.config, rule_engine=self.rule_engine())
         scanned_categories = {
             FileCategory.CRITICAL_CREDENTIAL,
             FileCategory.CRITICAL_CONFIG,
@@ -816,11 +896,10 @@ class Orchestrator:
 
         artifacts_scanned = 0
         if context.filesystem_inventory is not None:
-            eligible = sum(
-                len(context.filesystem_inventory.categories.get(cat, []))
-                for cat in scanned_categories
-            )
-            findings = scanner.scan_inventory(context.filesystem_inventory)
+            inventory = context.filesystem_inventory
+            eligible = sum(len(inventory.categories.get(cat, [])) for cat in scanned_categories)
+            eligible += sum(1 for finding in inventory.findings if finding.format == "elf")
+            findings = scanner.scan_inventory(inventory)
             inspected = eligible
         else:
             findings = scanner.scan_artifact(self._read_path(context), context.input_kind)
@@ -834,12 +913,16 @@ class Orchestrator:
             StageId.CREDENTIAL_SCAN,
             StageStatus.COMPLETE,
             reason=(
-                "inventory-scoped scan"
+                "inventory-scoped scan: text categories plus every ELF binary"
                 if context.filesystem_inventory is not None
                 else f"artifact-scoped bound read ({artifacts_scanned} artifact unit)"
             ),
             inspected=inspected,
             eligible=eligible,
+            omissions=[
+                f"{item['rule']} at {item['location']}: {item['reason']}"
+                for item in scanner.suppressed
+            ],
         )
 
         if findings:
@@ -866,7 +949,7 @@ class Orchestrator:
             )
             return context
 
-        scanner = CredentialScanner(self.config)
+        scanner = CredentialScanner(self.config, rule_engine=self.rule_engine())
         findings = scanner.scan_unix_accounts(inventory, context.firmware_path)
         known = {f.raw_value_hash for f in context.credential_findings if f.raw_value_hash}
         added = [f for f in findings if not (f.raw_value_hash and f.raw_value_hash in known)]
@@ -888,34 +971,125 @@ class Orchestrator:
         return context
 
     def _phase_advisory(self, context: ScanContext) -> ScanContext:
-        """Phase 5: Advisory assessment (not implemented in this release)."""
+        """Phase 5: apply a local advisory snapshot, or say it was not assessed.
+
+        Nothing here opens a socket. Without a snapshot the stage is SKIPPED and
+        the report says applicability was not assessed; that is not a pass, and
+        check 3 is OMITTED. With a snapshot, every component gets one lookup
+        whose state says whether its question was answered.
+        """
+        from iot_hardware_scanner.intelligence.advisory import (
+            AdvisorySnapshotError,
+            assess,
+            describe_snapshot,
+            load_snapshot,
+        )
+
         console.print("[bold]═══ Phase 5: Advisory ═══[/bold]")
+        if not self.advisory_snapshot:
+            record_stage(
+                context,
+                StageId.ADVISORY,
+                StageStatus.SKIPPED,
+                reason=(
+                    "no advisory snapshot was supplied; advisory applicability was not "
+                    "assessed (pass --advisory-snapshot to assess it offline)"
+                ),
+            )
+            console.print("  [yellow]![/yellow] No advisory snapshot — applicability not assessed")
+            return context
+
+        path = Path(self.advisory_snapshot)
+        if not path.is_file():
+            record_stage(
+                context,
+                StageId.ADVISORY,
+                StageStatus.UNAVAILABLE,
+                reason=f"advisory snapshot {path} does not exist",
+                dependency=f"local advisory snapshot ({path})",
+            )
+            console.print(f"  [red]✗[/red] Advisory snapshot missing: {path}")
+            return context
+
+        try:
+            document, digest = load_snapshot(path)
+        except AdvisorySnapshotError as exc:
+            record_stage(
+                context,
+                StageId.ADVISORY,
+                StageStatus.FAILED,
+                reason=str(exc),
+                omissions=["advisory applicability was not assessed"],
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+
+        snapshot = describe_snapshot(
+            document, digest, path, self.config.advisory_snapshot_max_age_days
+        )
+        findings, assessment = assess(document, snapshot, context.software_components)
+        context.cve_findings = findings
+        context.advisory = assessment
+
+        status = StageStatus.COMPLETE
+        omissions: list[str] = []
+        if assessment.state == "PARTIAL":
+            status = StageStatus.PARTIAL
+            omissions = [
+                f"{lookup.component} {lookup.version}: {lookup.state}"
+                + (f" — {lookup.reason}" if lookup.reason else "")
+                for lookup in assessment.lookups
+                if lookup.state in ("UNAVAILABLE", "PARTIAL")
+            ]
+        elif assessment.state == "STALE":
+            status = StageStatus.PARTIAL
+            omissions = [
+                f"the snapshot is {snapshot.age_days:.0f} day(s) old; a clean result "
+                "from it is not current"
+            ]
+        elif assessment.state == "UNAVAILABLE":
+            status = StageStatus.NOT_APPLICABLE
+            omissions = ["no component carried product and version evidence to match"]
+
         record_stage(
             context,
             StageId.ADVISORY,
-            StageStatus.SKIPPED,
+            status,
             reason=(
-                "advisory assessment is not implemented in this release; "
-                "advisory applicability was not assessed"
+                f"{len(assessment.lookups)} component lookup(s) against a "
+                f"{snapshot.provider} snapshot ({snapshot.entries} advisor"
+                f"{'y' if snapshot.entries == 1 else 'ies'}, digest {digest[:16]}…, "
+                f"acquired {snapshot.acquired_at or 'undated'})"
             ),
+            inspected=len(assessment.lookups),
+            eligible=len(assessment.lookups),
+            omissions=omissions,
         )
         console.print(
-            "  [yellow]![/yellow] Advisory assessment not implemented — applicability not assessed"
+            f"  [green]✓[/green] {assessment.matched} applicable advisor"
+            f"{'y' if assessment.matched == 1 else 'ies'}"
+            f" ({assessment.kev_matches} in KEV) across {len(assessment.lookups)} component(s)"
         )
+        if assessment.keyword_candidates_rejected:
+            console.print(
+                f"  [yellow]![/yellow] {assessment.keyword_candidates_rejected} keyword "
+                "candidate(s) rejected: the advisory did not name the product and version"
+            )
         return context
 
     @staticmethod
     def _advisory_assessed(context: ScanContext) -> bool:
         stage = next((s for s in context.stages if s.stage_id is StageId.ADVISORY), None)
-        return stage is not None and stage.status is StageStatus.COMPLETE
+        return stage is not None and stage.status in (StageStatus.COMPLETE, StageStatus.PARTIAL)
 
     def _phase_c2(self, context: ScanContext) -> ScanContext:
         """Phase 6: C2 and malicious indicator detection."""
         console.print("[bold]═══ Phase 6: C2 & Malware ═══[/bold]")
         from iot_hardware_scanner.scanner.c2_detector import C2Detector
 
-        detector = C2Detector(self.config)
+        detector = C2Detector(self.config, rule_engine=self.rule_engine())
         inventory = context.filesystem_inventory
+        crypto: list = []
 
         if inventory is not None:
             findings = (
@@ -923,13 +1097,19 @@ class Orchestrator:
                 + detector.detect_ips(inventory)
                 + detector.detect_malware_signatures(inventory)
             )
+            crypto = detector.detect_crypto(inventory)
+            context.crypto_findings = crypto
             record_stage(
                 context,
                 StageId.C2_INDICATORS,
                 StageStatus.COMPLETE,
-                reason="indicator sweep over the enumerated inventory",
+                reason=(
+                    "indicator sweep over the enumerated inventory, with dependency "
+                    "names and the shipped suffix list applied before scoring"
+                ),
                 inspected=len(inventory.findings),
                 eligible=len(inventory.findings),
+                omissions=detector.suppression_summary,
             )
         else:
             findings = detector.detect_artifact(self._read_path(context))
@@ -940,6 +1120,7 @@ class Orchestrator:
                 reason="artifact-scoped indicator sweep over bounded windows",
                 inspected=1,
                 eligible=1,
+                omissions=detector.suppression_summary,
             )
 
         context.c2_findings = findings

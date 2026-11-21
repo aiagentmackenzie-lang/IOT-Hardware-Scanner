@@ -84,6 +84,7 @@ class StageId(str, Enum):
     SERVICE_ANALYSIS = "service_analysis"
     ADVISORY = "advisory"
     C2_INDICATORS = "c2_indicators"
+    RULE_COMPILATION = "rule_compilation"
     RISK_CONTROLS = "risk_controls"
 
 
@@ -161,11 +162,25 @@ class ControlResult:
     evidence: list[str] = field(default_factory=list)
     remediation: str = ""
     source_stage: StageId | None = None
+    #: The question this check asks, in one sentence. Kept on the record so a
+    #: reader never has to infer the question from a verdict.
+    question: str = ""
+    #: The evidence source that can answer the question. Missing evidence is
+    #: reported as such, never as a pass.
+    required_source: str = ""
+    #: APPLICABLE | NOT_APPLICABLE (with the rule that decided it).
+    applicability: str = "APPLICABLE"
+    applicability_note: str = ""
+
+    def __post_init__(self) -> None:
+        """Keep the applicability flag and the evidence status consistent."""
+        if self.status is CheckStatus.NOT_APPLICABLE and self.applicability == "APPLICABLE":
+            self.applicability = "NOT_APPLICABLE"
 
     @property
-    def applicability(self) -> str:
-        """Whether this check applied to the selected profile and artifact."""
-        return "NOT_APPLICABLE" if self.status is CheckStatus.NOT_APPLICABLE else "APPLICABLE"
+    def evidence_status(self) -> str:
+        """Alias kept for readers that speak of the check's evidence status."""
+        return self.status.value
 
 
 @dataclass
@@ -186,6 +201,12 @@ class ReportFinding:
     evidence: list[str] = field(default_factory=list)
     remediation: str | None = None
     critical_qualified: bool = False
+    #: Typed destination: credential | service | crypto | indicator | advisory.
+    destination: str = "indicator"
+    #: Rule namespaces that produced this finding, when it came from a rule set.
+    namespaces: list[str] = field(default_factory=list)
+    #: Digest of the compiled rule set that produced it, when applicable.
+    ruleset_digest: str = ""
 
 
 @dataclass
@@ -294,6 +315,16 @@ class ScanContext:
     # Populated by Phase 5
     cve_findings: list[CVEFinding] = field(default_factory=list)
     software_components: list[SoftwareComponent] = field(default_factory=list)
+    #: Result of applying a local advisory snapshot (slice 4C), or None when no
+    #: snapshot was supplied and advisory applicability was not assessed.
+    advisory: AdvisoryAssessment | None = None
+
+    # Populated by Phase 5b (slices 4A/4D): cryptographic algorithms observed in
+    # the artifact, kept separate from binary hardening.
+    crypto_findings: list[CryptoFinding] = field(default_factory=list)
+
+    # Populated by Phase 0b (slice 4A): the one compiled rule set this run used.
+    ruleset: RuleSetInfo | None = None
 
     # Populated by Phase 6
     c2_findings: list[C2Finding] = field(default_factory=list)
@@ -845,7 +876,18 @@ class BinaryIntelligenceResult:
 
 @dataclass
 class YaraMatch:
-    """A single YARA rule match result."""
+    """A single YARA match, with the destination its category earns.
+
+    ``destination`` is the *typed* answer to "what kind of fact is this?" —
+    a credential, a configured service, a cryptographic algorithm, or an
+    indicator. A rule file's category decides it, once, in
+    :mod:`iot_hardware_scanner.yara.yara_engine`, so a match can never be
+    relabelled by the detector that happens to see it first.
+
+    ``namespace`` is the compiled rule file's namespace, ``rule_file`` its
+    name and ``ruleset_digest`` the digest of the whole compiled set, so a
+    finding is traceable to the exact rules that produced it.
+    """
 
     rule_name: str
     namespace: str
@@ -854,6 +896,49 @@ class YaraMatch:
         default_factory=list,
     )  # (offset, identifier, data)
     file_path: Path | None = None
+    #: credential | service | crypto | indicator
+    destination: str = "indicator"
+    #: Category declared by the rule's own meta block.
+    category: str = ""
+    #: Severity declared by the rule's own meta block (a label, not a verdict).
+    severity: str = "INFO"
+    rule_file: str = ""
+    ruleset_digest: str = ""
+
+    @property
+    def offsets(self) -> list[int]:
+        """Every offset at which this rule matched, ascending."""
+        return sorted({offset for offset, _ident, _data in self.strings})
+
+
+@dataclass
+class RuleFileRecord:
+    """One compiled rule file, with the digest that identifies it."""
+
+    namespace: str
+    name: str
+    sha256: str
+    rule_count: int
+    destinations: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RuleSetInfo:
+    """The one compiled rule set a run used, and what it could not compile."""
+
+    digest: str = ""
+    engine: str = "yara-python"
+    engine_version: str | None = None
+    files: list[RuleFileRecord] = field(default_factory=list)
+    #: Files that were found but rejected, with the reason. A rejected rule is
+    #: a coverage gap, so it is recorded rather than logged and forgotten.
+    errors: list[dict[str, str]] = field(default_factory=list)
+    source: str = "package"  # package | package+explicit
+
+    @property
+    def available(self) -> bool:
+        """Whether any rule was compiled at all."""
+        return bool(self.files)
 
 
 @dataclass
@@ -872,6 +957,15 @@ class CredentialFinding:
     is_default: bool = False
     is_placeholder: bool = False
     rule_id: str = ""
+    #: Every artifact location this finding was evidenced at. Deduplication
+    #: keeps the union, so two copies of one secret stay two locations.
+    occurrences: list[str] = field(default_factory=list)
+    #: Namespace of the rule that produced the match, and the digest of the
+    #: compiled rule set, when the finding came from YARA.
+    namespace: str = ""
+    ruleset_digest: str = ""
+    #: Why a rule match was not promoted, when the semantics rules refused it.
+    applicability_note: str = ""
 
     def with_rule_id(self, rule_id: str) -> CredentialFinding:
         """Attach the stable rule identifier used by the exit contract."""
@@ -940,7 +1034,14 @@ class SoftwareComponent:
 
 @dataclass
 class CVEFinding:
-    """A CVE discovered for a software component."""
+    """A CVE discovered for a software component.
+
+    Applicability is kept separate from severity and from exploitation:
+    ``applicability`` states how the shipped version was matched,
+    ``is_in_kev`` and ``exploit_available_public`` are independent facts about
+    the CVE, and ``provider_score`` is the number the provider published rather
+    than one derived here.
+    """
 
     cve_id: str
     severity: Severity
@@ -953,6 +1054,101 @@ class CVEFinding:
     references: list[str] = field(default_factory=list)
     is_in_kev: bool = False
     exploit_available: bool = False
+    #: How the advisory's own applicability statement matched this component.
+    applicability: str = "UNKNOWN"  # cpe-exact | version-range | keyword-unverified
+    #: The provider's published score and the time the provider recorded it.
+    provider_score: float | None = None
+    provider: str = ""
+    last_modified: str = ""
+    #: Every component occurrence this CVE applies to is kept, never deduplicated away.
+    occurrences: list[str] = field(default_factory=list)
+    #: True when a vendor backport makes the recorded version uncertain.
+    vendor_backport_uncertain: bool = False
+    #: True when the match came from a stale snapshot.
+    stale: bool = False
+
+
+# ──────────────────────────────────────────────
+# Phase 5b: Cryptographic algorithm evidence (slice 4A/4D)
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class CryptoFinding:
+    """An observed cryptographic algorithm, distinct from binary hardening.
+
+    ``strength`` is only ever ``weak`` when the rule set identified a named
+    weak algorithm; the absence of a match is not evidence of strength.
+    """
+
+    rule_id: str
+    algorithm: str
+    strength: str  # weak | unknown
+    file_path: Path
+    offset: int | None = None
+    matched_pattern: str = ""
+    namespace: str = ""
+    ruleset_digest: str = ""
+    description: str = ""
+    evidence: str = ""
+
+
+# ──────────────────────────────────────────────
+# Phase 5c: Advisory applicability (slice 4C)
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class AdvisorySnapshotInfo:
+    """The local advisory snapshot a run applied, and where it came from."""
+
+    path: str
+    digest_sha256: str
+    schema: str
+    provider: str
+    acquired_at: str
+    entries: int
+    age_days: float
+    stale: bool
+    includes_kev: bool = False
+    sample: bool = False
+
+
+@dataclass
+class AdvisoryLookup:
+    """One component's advisory lookup, with an explicit state.
+
+    ``state`` is one of ``MATCHED``, ``KNOWN_EMPTY``, ``UNAVAILABLE``,
+    ``STALE`` or ``PARTIAL``. A clean verdict requires every lookup to be
+    ``KNOWN_EMPTY``; anything else is a stated gap.
+    """
+
+    component: str
+    version: str
+    cpe: str = ""
+    state: str = "KNOWN_EMPTY"
+    matches: int = 0
+    reason: str = ""
+
+
+@dataclass
+class AdvisoryAssessment:
+    """The result of applying one local snapshot to the component inventory."""
+
+    snapshot: AdvisorySnapshotInfo | None = None
+    lookups: list[AdvisoryLookup] = field(default_factory=list)
+    state: str = "UNAVAILABLE"  # ASSESSED | STALE | PARTIAL | UNAVAILABLE
+    matched: int = 0
+    kev_matches: int = 0
+    keyword_candidates_rejected: int = 0
+    kev_source: str = ""
+
+    @property
+    def complete(self) -> bool:
+        """Whether every lookup settled, so a clean result means something."""
+        return bool(self.lookups) and all(
+            lookup.state in ("MATCHED", "KNOWN_EMPTY") for lookup in self.lookups
+        )
 
 
 # ──────────────────────────────────────────────

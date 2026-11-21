@@ -163,6 +163,14 @@ class TestCVEScannerWithMock:
                 "cvss_v3_vector": "AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                 "published_date": "2022-06-01T00:00:00",
                 "references": [],
+                # A keyword candidate is only promoted when the advisory's own
+                # CPE data names the product and version.
+                "matches": [
+                    {
+                        "cpe": "cpe:2.3:a:busybox:busybox:*:*:*:*:*:*:*:*",
+                        "version_end_excluding": "1.29.0",
+                    }
+                ],
             },
         ]
 
@@ -213,6 +221,9 @@ class TestCVEScannerWithMock:
                 "cvss_v3_vector": None,
                 "published_date": "2022-12-01T00:00:00",
                 "references": [],
+                "matches": [
+                    {"cpe": "cpe:2.3:a:unknown_vendor:unknown_product:1.0.0:*:*:*:*:*:*:*"}
+                ],
             },
         ]
 
@@ -302,7 +313,9 @@ class TestKEVCatalog:
             assert len(findings) == 1
             assert findings[0].is_in_kev is True
             assert findings[0].severity == Severity.CRITICAL
-            assert findings[0].exploit_available is True
+            # KEV membership is a separate fact from public exploit
+            # availability, and neither rewrites the other.
+            assert findings[0].exploit_available is False
 
     def test_non_kev_not_escalated(self, config: ScannerConfig) -> None:
         """Non-KEV CVEs are not escalated beyond CVSS-based severity."""
@@ -348,51 +361,64 @@ class TestNVDClient:
         result = client.query_cpe("cpe:2.3:a:busybox:busybox:1.28.4")
         assert result == []
 
-    def test_cache_round_trip(self, config: ScannerConfig) -> None:
-        """Cache write and read works correctly."""
-        from iot_hardware_scanner.intelligence.nvd_client import NVDClient
+    def test_cache_round_trip_keeps_state_and_pagination(self, config: ScannerConfig) -> None:
+        """A cached answer keeps the state and pagination that produced it."""
+        from iot_hardware_scanner.intelligence.nvd_client import (
+            STATE_MATCHED,
+            LookupResult,
+            NVDClient,
+        )
 
         client = NVDClient(config)
-        test_data = [{"cve_id": "CVE-2023-0001", "description": "Test"}]
+        client._set_cached_result(
+            "test_key",
+            LookupResult(
+                records=[{"cve_id": "CVE-2023-0001", "description": "Test"}],
+                state=STATE_MATCHED,
+                pages=2,
+                total_results=4,
+            ),
+        )
 
-        # Write to cache
-        client._set_cached("test_key", test_data)
-
-        # Read from cache
-        cached = client._get_cached("test_key")
+        cached = client._get_cached_result("test_key")
         assert cached is not None
-        assert len(cached) == 1
-        assert cached[0]["cve_id"] == "CVE-2023-0001"
+        assert cached.state == STATE_MATCHED
+        assert cached.pages == 2
+        assert cached.records[0]["cve_id"] == "CVE-2023-0001"
 
-    def test_cache_expiry(self, config: ScannerConfig) -> None:
-        """Expired cache entries are not returned."""
-        from iot_hardware_scanner.intelligence.nvd_client import NVDClient
+    def test_an_expired_entry_is_returned_but_marked_stale(self, config: ScannerConfig) -> None:
+        """An expired answer is a stale answer, not silence and not fresh data."""
+        from iot_hardware_scanner.intelligence.nvd_client import (
+            STATE_KNOWN_EMPTY,
+            STATE_STALE,
+            LookupResult,
+            NVDClient,
+        )
 
         client = NVDClient(config)
-        test_data = [{"cve_id": "CVE-2023-0002", "description": "Expired"}]
-
-        # Write with a very old timestamp
-        client._set_cached("expired_key", test_data)
-        # Manually set cached_at to past
+        client._set_cached_result(
+            "expired_key",
+            LookupResult(records=[], state=STATE_KNOWN_EMPTY),
+        )
         with sqlite3.connect(str(client._cache_db)) as conn:
             conn.execute(
                 "UPDATE nvd_cache SET cached_at = ? WHERE query_key = ?",
-                (0, "expired_key"),  # epoch time = very old
+                (0, "expired_key"),
             )
             conn.commit()
 
-        # Set TTL to 1 day, data is from epoch → expired
         config.nvd_cache_days = 1
-        cached = client._get_cached("expired_key")
-        assert cached is None
+        cached = client._get_cached_result("expired_key")
+        assert cached is not None
+        assert cached.state == STATE_STALE
+        assert "TTL" in cached.reason
 
     def test_cache_miss(self, config: ScannerConfig) -> None:
         """Missing cache key returns None."""
         from iot_hardware_scanner.intelligence.nvd_client import NVDClient
 
         client = NVDClient(config)
-        cached = client._get_cached("nonexistent_key")
-        assert cached is None
+        assert client._get_cached_result("nonexistent_key") is None
 
 
 # ──────────────────────────────────────────────

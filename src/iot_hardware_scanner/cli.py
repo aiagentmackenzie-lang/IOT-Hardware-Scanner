@@ -158,6 +158,16 @@ def main(verbose: bool) -> None:
     help="JSON manifest of declared permissions/ownership for a staged tree",
 )
 @click.option(
+    "--advisory-snapshot",
+    "advisory_snapshot",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Apply a local advisory snapshot offline (ihs-advisory-snapshot/1). Supplying one "
+        "makes advisory assessment a required stage for this run."
+    ),
+)
+@click.option(
     "--worker",
     "extraction_worker",
     type=click.Choice(["auto", "podman", "docker", "host-process", "none"]),
@@ -188,6 +198,7 @@ def scan(
     creds: bool,
     input_tree: bool,
     build_manifest: str | None,
+    advisory_snapshot: str | None,
     extraction_worker: str | None,
     config_file: str | None,
     offline: bool | None,
@@ -209,6 +220,7 @@ def scan(
             "yara_rules": "yara_rules_dirs",
             "max_size": "max_file_size_mb",
             "extraction_worker": "extraction_worker",
+            "advisory_snapshot": "advisory_snapshot",
         },
     )
     # Normalise CLI-shaped values after the precedence merge.
@@ -222,6 +234,8 @@ def scan(
         config.max_file_size_mb = max_size
     if extraction_worker:
         config.extraction_worker = extraction_worker
+    if advisory_snapshot:
+        config.advisory_snapshot = Path(advisory_snapshot)
 
     input_path = Path(firmware)
     selected_profile = profile or (
@@ -234,6 +248,7 @@ def scan(
             profile=selected_profile,
             input_tree=input_tree,
             build_manifest=Path(build_manifest) if build_manifest else None,
+            advisory_snapshot=Path(advisory_snapshot) if advisory_snapshot else None,
         )
         context = orchestrator.run(input_path)
     except ScannerError as exc:

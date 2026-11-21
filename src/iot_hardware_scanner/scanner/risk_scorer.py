@@ -21,6 +21,7 @@ replaying a v1 report that already contains them.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import ClassVar
 
 from iot_hardware_scanner.config import ScannerConfig
@@ -69,6 +70,99 @@ OWASP_IOT_MAP: dict[str, list[int]] = {
 #: Programs whose configured startup is a genuine exposure concern.
 DANGEROUS_SERVICES = frozenset({"telnetd", "ftpd", "rshd", "rlogind", "tftpd"})
 
+#: Packages whose presence and version identify the shipped TLS implementation.
+TLS_PACKAGE_NAMES = frozenset(
+    {
+        "libopenssl",
+        "openssl-util",
+        "libopenssl-conf",
+        "libustream-openssl",
+        "libustream-mbedtls",
+        "libustream-wolfssl",
+        "libmbedtls",
+        "libwolfssl",
+        "libgnutls",
+        "libnettle",
+        "libcyassl",
+        "libmbedcrypto",
+    }
+)
+
+#: What each check asks, and which source can answer it. A check is only
+#: reported as PERFORMED when its required source actually produced evidence;
+#: a missing source is OMITTED or INCONCLUSIVE with the reason, never a pass.
+CONTROL_SPECS: dict[int, dict[str, str]] = {
+    1: {
+        "question": "Does the artifact contain a default or hardcoded credential?",
+        "required_source": (
+            "the credential rule set and the account databases, with placeholder, "
+            "documentation and reachability semantics applied"
+        ),
+    },
+    2: {
+        "question": "Does the artifact configure a network service, and is it listening?",
+        "required_source": (
+            "startup directives with their source line (configured); a socket table "
+            "from the device (listening) — the second is not available from an image"
+        ),
+    },
+    3: {
+        "question": "Does an applicable advisory affect a component this artifact ships?",
+        "required_source": "a local advisory snapshot, applied to observed product and version",
+    },
+    4: {
+        "question": "Is data stored in the artifact encrypted at rest?",
+        "required_source": (
+            "format evidence (an encrypted container, a key-management record); byte "
+            "distribution is an observation and never a verdict"
+        ),
+    },
+    5: {
+        "question": "Does shipped content contain a signature or digest verification step?",
+        "required_source": "the update-path files in the enumerated image, read bounded",
+    },
+    6: {
+        "question": "Does the board enforce that verified content at boot?",
+        "required_source": (
+            "boot log, fuse/OTP state or secure-boot configuration from the device; a "
+            "static image cannot answer this"
+        ),
+    },
+    7: {
+        "question": "Does the artifact contain a backdoor interface?",
+        "required_source": (
+            "the indicator rule set and the domain/IP sweep, after reachability rules"
+        ),
+    },
+    8: {
+        "question": "Does the artifact use a strong cryptographic algorithm?",
+        "required_source": (
+            "algorithm identifiers in shipped binaries, account hash algorithms and the "
+            "TLS implementation recorded by the package database — not binary hardening"
+        ),
+    },
+    9: {
+        "question": "Is the attack surface minimal (no SUID or world-writable files)?",
+        "required_source": "permission bits from the image or a declared build manifest",
+    },
+    10: {
+        "question": "Do shipped binaries carry positive hardening evidence?",
+        "required_source": (
+            "program headers: NX stack, PIE, RELRO; a missing symbol table is unknown"
+        ),
+    },
+    11: {
+        "question": "Does the artifact carry a C2 or malware indicator?",
+        "required_source": (
+            "the indicator rule set and the heuristic sweep, with typed destinations"
+        ),
+    },
+    12: {
+        "question": "Does the artifact carry an accurate component inventory?",
+        "required_source": "the image's own installed-package database and read ELF metadata",
+    },
+}
+
 
 class ControlEvaluator:
     """Evaluate each control independently and record why it reached a verdict."""
@@ -110,6 +204,11 @@ class ControlEvaluator:
             result = method(context, advisory_assessed)
             result.control_id = control_id
             result.control_name = name
+            spec = CONTROL_SPECS[control_id]
+            result.question = spec["question"]
+            result.required_source = spec["required_source"]
+            if result.status is CheckStatus.NOT_APPLICABLE:
+                result.applicability = "NOT_APPLICABLE"
             results.append(result)
         return results
 
@@ -215,13 +314,67 @@ class ControlEvaluator:
 
     # ── Control 3: outdated components ──
     def _eval_components(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        """Applicability from the local snapshot, with each lookup's state.
+
+        A clean result is only a pass when **every** lookup settled as an empty
+        or matched answer against a current snapshot. An unavailable, partial or
+        stale lookup is a stated gap: the check answers INCONCLUSIVE and names
+        which component's question went unanswered.
+        """
         if not advisory_assessed:
             return _omitted(
                 "No advisory snapshot was applied — applicability was not assessed",
-                "Supply a local intelligence snapshot and request advisory assessment.",
+                "Supply a local snapshot with --advisory-snapshot to assess it offline.",
                 StageId.ADVISORY,
             )
-        if not context.cve_findings:
+
+        advisory = context.advisory
+        findings = context.cve_findings
+        stale = advisory is not None and (
+            advisory.state == "STALE" or (advisory.snapshot is not None and advisory.snapshot.stale)
+        )
+        evidence: list[str] = []
+        if advisory is not None:
+            evidence.append(
+                f"{len(advisory.lookups)} component lookup(s) against {advisory.state.lower()} "
+                f"snapshot data"
+                + (
+                    f" from {advisory.snapshot.provider} acquired {advisory.snapshot.acquired_at}"
+                    if advisory.snapshot is not None
+                    else ""
+                )
+            )
+            if advisory.keyword_candidates_rejected:
+                evidence.append(
+                    f"{advisory.keyword_candidates_rejected} keyword candidate(s) were rejected "
+                    "because the advisory did not name the shipped product and version"
+                )
+
+        kev = [finding for finding in findings if finding.is_in_kev]
+        critical = [finding for finding in findings if finding.severity is Severity.CRITICAL]
+        if findings:
+            evidence.append(f"{len(findings)} applicable advisory finding(s)")
+            if kev:
+                evidence.append(
+                    f"{len(kev)} listed in CISA KEV: "
+                    + ", ".join(sorted({finding.cve_id for finding in kev}))
+                )
+            if stale:
+                evidence.append(
+                    "The snapshot this matched is older than the configured age, so the "
+                    "match itself may no longer hold; refresh it before acting."
+                )
+            return ControlResult(
+                control_id=3,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE if stale else CheckStatus.PERFORMED,
+                result="FAIL" if kev or critical else "REVIEW",
+                evidence=evidence,
+                remediation="Refresh the snapshot, then update the affected components.",
+                source_stage=StageId.ADVISORY,
+            )
+
+        if advisory is None:
             return ControlResult(
                 control_id=3,
                 control_name="",
@@ -231,18 +384,52 @@ class ControlEvaluator:
                 source_stage=StageId.ADVISORY,
             )
 
-        kev = [f for f in context.cve_findings if f.is_in_kev]
-        critical = [f for f in context.cve_findings if f.severity is Severity.CRITICAL]
-        evidence = [f"{len(context.cve_findings)} applicable advisory finding(s)"]
-        if kev:
-            evidence.append(f"{len(kev)} listed in CISA KEV")
+        if advisory.state == "STALE" or advisory.snapshot is None or advisory.snapshot.stale:
+            return ControlResult(
+                control_id=3,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    *evidence,
+                    "The snapshot is older than the configured age, so a clean result "
+                    "from it is not a statement about the current advisory picture.",
+                ],
+                remediation="Refresh the advisory snapshot in a separate operation and re-run.",
+                source_stage=StageId.ADVISORY,
+            )
+
+        if not advisory.complete:
+            gaps = [
+                f"{lookup.component} {lookup.version}: {lookup.state.lower()}"
+                + (f" — {lookup.reason}" if lookup.reason else "")
+                for lookup in advisory.lookups
+                if lookup.state not in ("MATCHED", "KNOWN_EMPTY")
+            ]
+            return ControlResult(
+                control_id=3,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    *evidence,
+                    "Not every component's advisory question was answered: " + "; ".join(gaps),
+                ],
+                remediation=(
+                    "Refresh the snapshot so every queried component has a settled lookup."
+                ),
+                source_stage=StageId.ADVISORY,
+            )
+
         return ControlResult(
             control_id=3,
             control_name="",
             status=CheckStatus.PERFORMED,
-            result="FAIL" if kev or critical else "REVIEW",
-            evidence=evidence,
-            remediation="Update the affected components before shipping.",
+            result="PASS",
+            evidence=[
+                *evidence,
+                "Every component's advisory lookup settled with no applicable match.",
+            ],
             source_stage=StageId.ADVISORY,
         )
 
@@ -294,22 +481,29 @@ class ControlEvaluator:
             source_stage=StageId.ENTROPY,
         )
 
-    # ── Control 5: update mechanism ──
+    # ── Control 5: signed-content verification ──
     def _eval_update(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        """Content verification only. Whether the board enforces it is control 6.
+
+        The evidence is what the shipped files contain, read through the bounded
+        reader: an update path plus a verification step (a signature check, a
+        digest comparison, a verification program). That is a statement about
+        content, not about a running updater.
+        """
         inventory = context.filesystem_inventory
         if inventory is None:
             return _omitted(
-                "No filesystem inventory — update mechanism not inspected",
-                "Extract the root filesystem and re-run.",
+                "No filesystem inventory — no update path could be read",
+                "Extract the root filesystem and re-run the service check.",
                 StageId.ENUMERATION,
             )
 
         update_files = [
-            f
-            for f in inventory.findings
+            finding
+            for finding in inventory.findings
             if any(
-                kw in str(f.path).lower()
-                for kw in ("update", "upgrade", "firmware", "ota", "sysupgrade")
+                keyword in str(finding.path).lower()
+                for keyword in ("update", "upgrade", "firmware", "ota", "sysupgrade")
             )
         ]
         if not update_files:
@@ -318,33 +512,43 @@ class ControlEvaluator:
                 control_name="",
                 status=CheckStatus.INCONCLUSIVE,
                 result="UNKNOWN",
-                evidence=["No update-related files were found in the inventory"],
-                remediation="Document the update mechanism and its verification step.",
+                evidence=[
+                    "No update-related file was found in the enumerated image, so the "
+                    "update mechanism could not be inspected."
+                ],
+                remediation=(
+                    "Document the update mechanism and the verification step it performs."
+                ),
                 source_stage=StageId.ENUMERATION,
             )
 
-        verifying: list[str] = []
+        verifiers: list[str] = []
         for entry in update_files:
-            try:
-                content = entry.absolute_path.read_text(errors="ignore").lower()
-            except (OSError, PermissionError):
+            text = _read_text_bounded(entry.absolute_path, self.config)
+            if not text:
                 continue
-            if any(kw in content for kw in ("verify", "signature", "gpg", "sha256sum", "checksum")):
-                verifying.append(str(entry.path))
+            lowered = text.lower()
+            if any(
+                keyword in lowered
+                for keyword in ("verify", "signature", "gpg", "sha256sum", "checksum", "ed25519")
+            ):
+                verifiers.append(str(entry.path))
 
-        if verifying:
+        if verifiers:
             return ControlResult(
                 control_id=5,
                 control_name="",
                 status=CheckStatus.PERFORMED,
                 result="REVIEW",
                 evidence=[
-                    f"{len(update_files)} update-related file(s); verification string "
-                    f"present in {', '.join(verifying[:3])}"
+                    f"{len(update_files)} update-related file(s); a verification step is "
+                    f"present in {', '.join(sorted(verifiers)[:3])}",
+                    "Content verification in a shipped script is not proof that the device "
+                    "runs it, or that the public key is pinned. Board enforcement is check 6.",
                 ],
                 remediation=(
-                    "A verification string is not proof the check runs; confirm "
-                    "signed updates on the device."
+                    "Confirm on the device that the updater verifies a signature against a "
+                    "pinned key and refuses unsigned content."
                 ),
                 source_stage=StageId.ENUMERATION,
             )
@@ -354,23 +558,34 @@ class ControlEvaluator:
             control_name="",
             status=CheckStatus.PERFORMED,
             result="FAIL",
-            evidence=[f"{len(update_files)} update-related file(s), none verifying a signature"],
-            remediation="Implement signed firmware updates with cryptographic verification.",
+            evidence=[
+                f"{len(update_files)} update-related file(s), and none of them contains a "
+                "signature, digest or checksum verification step"
+            ],
+            remediation="Implement signed firmware updates and verify the signature on the device.",
             source_stage=StageId.ENUMERATION,
         )
 
-    # ── Control 6: secure boot ──
+    # ── Control 6: secure boot / board enforcement ──
     def _eval_secure_boot(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
+        """Enforcement, not content: the question a static image cannot answer.
+
+        Check 5 reports whether shipped content verifies a signature. This check
+        asks whether the board refuses unverified content at boot, which needs
+        boot logs, fuse/OTP state or secure-boot configuration from the device.
+        """
         return ControlResult(
             control_id=6,
             control_name="",
             status=CheckStatus.INCONCLUSIVE,
             result="UNKNOWN",
             evidence=[
-                "Boot enforcement happens on the device; a static image cannot "
-                "establish that a verified boot chain runs or cannot be bypassed."
+                "Boot enforcement happens on the device; a static image cannot establish "
+                "that a verified boot chain runs or that it cannot be bypassed.",
+                "Signed-content verification inside the image is reported separately as "
+                "check 5; it says nothing about enforcement.",
             ],
-            remediation="Provide boot log or fuse/OTP state from the device.",
+            remediation="Provide a boot log and the fuse/OTP state from the device.",
             source_stage=StageId.ENUMERATION,
         )
 
@@ -415,24 +630,87 @@ class ControlEvaluator:
 
     # ── Control 8: cryptography ──
     def _eval_crypto(self, context: ScanContext, advisory_assessed: bool) -> ControlResult:
-        weak = [
-            f
-            for f in context.credential_findings
-            if f.category == "password" and f.rule_id == "credential.unix.md5_hash"
+        """Algorithm evidence, kept apart from binary hardening (check 10).
+
+        Three sources can answer part of this question, and each is named:
+
+        * an account hash algorithm read from the joined ``/etc/shadow`` records;
+        * an algorithm identifier next to a structural constant in a shipped
+          binary (the ``crypto`` destination of the rule set) — evidence that an
+          implementation is *present*, not that it is reachable or in use;
+        * the TLS implementation and version recorded by the package database.
+
+        A weak account hash is contrary evidence and fails the check. Presence
+        of a weak algorithm in library code is a review: the image ships it, and
+        a static scan cannot say whether anything calls it. Missing every source
+        leaves the check omitted, never passed.
+        """
+        weak_accounts = [
+            finding
+            for finding in context.credential_findings
+            if finding.rule_id == "credential.unix.md5_hash"
         ]
-        if weak:
+        weak_code = list(context.crypto_findings)
+        tls_libraries = _tls_libraries(context)
+
+        evidence: list[str] = []
+        if weak_accounts:
+            evidence.append(
+                f"{len(weak_accounts)} account(s) store an MD5 password hash: "
+                + ", ".join(sorted({str(item.file_path) for item in weak_accounts}))
+            )
+        elif _stage_completed(context, StageId.UNIX_ACCOUNTS):
+            evidence.append("The account database was joined and no account stores an MD5 hash.")
+        if weak_code:
+            evidence.append(
+                f"{len(weak_code)} weak-algorithm implementation(s) are present in shipped "
+                "binaries: "
+                + ", ".join(sorted({f"{item.algorithm} in {item.file_path}" for item in weak_code}))
+            )
+        if tls_libraries:
+            evidence.append(
+                "The package database records "
+                + ", ".join(
+                    f"{record.name} {record.version}"
+                    for record in sorted(tls_libraries, key=lambda r: r.name)
+                )
+            )
+
+        if weak_accounts:
             return ControlResult(
                 control_id=8,
                 control_name="",
                 status=CheckStatus.PERFORMED,
                 result="FAIL",
-                evidence=[f"{len(weak)} account(s) use an MD5 password hash"],
+                evidence=evidence,
                 remediation="Re-hash account credentials with SHA-512 or bcrypt.",
                 source_stage=StageId.UNIX_ACCOUNTS,
             )
+
+        if weak_code or tls_libraries:
+            return ControlResult(
+                control_id=8,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=[
+                    *evidence,
+                    "No account uses a broken hash, but an implementation being present is "
+                    "not proof of the algorithms in use. Cipher suites, key sizes and "
+                    "protocol versions need a configuration or runtime source.",
+                ],
+                remediation=(
+                    "Disable weak ciphers in the shipped configuration and provide the TLS "
+                    "configuration as evidence."
+                ),
+                source_stage=StageId.OPKG_INVENTORY if tls_libraries else StageId.C2_INDICATORS,
+            )
+
         return _omitted(
-            "No evidence source identifies cryptographic algorithms in this release",
-            "Qualify a crypto-algorithm detector before claiming this control.",
+            "No evidence source identified a cryptographic algorithm in this artifact "
+            "(no account database, no algorithm identifier in a parsed binary, no TLS "
+            "package record)",
+            "Extract the image, or supply the package database, so an algorithm can be named.",
             StageId.ELF_METADATA,
         )
 
@@ -642,6 +920,30 @@ class ControlEvaluator:
         11: "_eval_c2",
         12: "_eval_inventory",
     }
+
+
+def _tls_libraries(context: ScanContext) -> list:
+    """Package records that identify the shipped TLS implementation."""
+    inventory = context.opkg_inventory
+    if inventory is None:
+        return []
+    return [
+        record
+        for record in inventory.records
+        if record.installed and record.name.lower() in TLS_PACKAGE_NAMES
+    ]
+
+
+def _read_text_bounded(path: Path, config: ScannerConfig, budget_bytes: int | None = None) -> str:
+    """Read a file for inspection without ever reading an arbitrary amount."""
+    from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+
+    budget = budget_bytes or config.max_scan_file_size_mb * 1024 * 1024
+    try:
+        text, _truncated = open_bounded(path).read_text_bounded(budget, encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    return text
 
 
 def _stage_completed(context: ScanContext, stage_id: StageId) -> bool:

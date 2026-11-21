@@ -654,3 +654,157 @@ class TestBudgets:
         assert runs["sampled"]["elapsed_seconds"] < 120
         assert runs["whole_image"]["elapsed_seconds"] < 300
         assert scratch_bytes < 64 * 1024 * 1024
+
+
+# ──────────────────────────────────────────────
+# Milestone C rows: typed destinations, honest controls, offline advisories
+# ──────────────────────────────────────────────
+
+
+ADVISORY_SNAPSHOT = {
+    "schema": "ihs-advisory-snapshot/1",
+    "provider": "nvd",
+    "acquired_at": "2026-11-01T00:00:00+00:00",
+    "kev": {"source": "cisa-kev-sample", "cves": ["CVE-2024-0001"]},
+    "advisories": [
+        {
+            "cve_id": "CVE-2024-0001",
+            "description": "recorded provider response: busybox heap overflow",
+            "published": "2024-01-10T00:00:00",
+            "last_modified": "2024-02-01T00:00:00",
+            "provider_score": 9.8,
+            "provider_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "matches": [
+                {
+                    "cpe": "cpe:2.3:a:busybox:busybox:1.36.1-r2:*:*:*:*:*:*:*",
+                    "vulnerable": True,
+                }
+            ],
+        }
+    ],
+    "lookups": [],
+}
+
+
+class TestReleasedDetectionSemantics:
+    def test_the_rule_set_is_identified_and_compiled_once(
+        self, runner: Runner, runtime: str, reference_image: Path, workdir: Path
+    ) -> None:
+        """One compile, one digest, and every destination present."""
+        exit_code, document, output = scan(runner, workdir, reference_image)
+        assert document is not None, output
+        ruleset = document["ruleset"]
+        assert ruleset is not None
+        assert len(ruleset["digest"]) == 64
+        assert ruleset["compile_errors"] == []
+        assert len(ruleset["rule_files"]) >= 12
+        destinations = {
+            destination
+            for record in ruleset["rule_files"]
+            for destination in record["destinations"]
+        }
+        assert destinations == {"credential", "service", "crypto", "indicator"}
+        assert all(len(record["sha256"]) == 64 for record in ruleset["rule_files"])
+
+        # Every finding names the rule identity and the set it came from.
+        for finding in document["findings"]:
+            assert finding["destination"] in {
+                "credential",
+                "service",
+                "crypto",
+                "indicator",
+                "advisory",
+            }
+            if finding["destination"] in {"credential", "service", "crypto", "indicator"}:
+                assert finding["ruleset_digest"] in ("", ruleset["digest"])
+        assert exit_code == 1, output
+
+    def test_the_reference_image_raises_no_indicator_noise(
+        self, runner: Runner, runtime: str, reference_image: Path, workdir: Path
+    ) -> None:
+        """The eleven false positives measured in Milestone B are gone.
+
+        The corpus is the negative control: a stock OpenWrt image must not
+        produce a C2 domain or malware-signature finding. The one review finding
+        that remains is a true observation (DES implementation code in mbedTLS).
+        """
+        exit_code, document, output = scan(runner, workdir, reference_image)
+        assert document is not None, output
+        indicators = [f for f in document["findings"] if f["category"] == "c2_indicator"]
+        assert indicators == [], [f["rule_id"] for f in indicators]
+
+        critical = [f for f in document["findings"] if f["critical_qualified"]]
+        assert [f["rule_id"] for f in critical] == ["credential.unix.empty_password"]
+        assert exit_code == 1, output
+
+        # The suppressions are reported as coverage, not silently dropped.
+        c2_stage = stage(document, "c2_indicators")
+        assert c2_stage["status"] == "COMPLETE"
+        assert any("rejected" in omission for omission in c2_stage["omissions"])
+
+    def test_control_8_has_an_evidence_source_on_the_reference_image(
+        self, runner: Runner, runtime: str, reference_image: Path, workdir: Path
+    ) -> None:
+        _exit_code, document, output = scan(runner, workdir, reference_image)
+        assert document is not None, output
+        crypto = next(c for c in document["controls"] if c["control_id"] == 8)
+        assert crypto["status"] == "PERFORMED", crypto["evidence"]
+        assert crypto["result"] in ("REVIEW", "FAIL")
+        assert crypto["required_source"]
+        assert crypto["question"]
+        # It is not hardening evidence, and hardening is its own check.
+        assert any("not proof" in item or "presence" in item for item in crypto["evidence"])
+        hardening = next(c for c in document["controls"] if c["control_id"] == 10)
+        assert hardening["control_id"] != crypto["control_id"]
+
+    def test_an_offline_advisory_snapshot_is_assessed(
+        self, runner: Runner, runtime: str, reference_image: Path, workdir: Path
+    ) -> None:
+        snapshot_path = workdir / "advisory.json"
+        snapshot_path.write_text(json.dumps(ADVISORY_SNAPSHOT, indent=2))
+
+        exit_code, document, output = scan(
+            runner,
+            workdir,
+            reference_image,
+            "--advisory-snapshot",
+            str(snapshot_path),
+        )
+        assert document is not None, output
+
+        advisory = document["advisory"]
+        assert advisory is not None
+        assert advisory["state"] == "ASSESSED"
+        assert advisory["matched"] == 1
+        assert advisory["kev_matches"] == 1
+        assert advisory["snapshot"]["digest_sha256"]
+        assert advisory["snapshot"]["provider"] == "nvd"
+        assert advisory["lookups"], "no component was looked up"
+
+        finding = next(f for f in document["findings"] if f["category"] == "advisory")
+        assert finding["rule_id"] == "advisory.CVE-2024-0001"
+        assert finding["destination"] == "advisory"
+        assert any("applicability=cpe-exact" in item for item in finding["evidence"])
+        assert any("kev=True" in item for item in finding["evidence"])
+
+        advisory_stage = stage(document, "advisory")
+        assert advisory_stage["status"] == "COMPLETE"
+        assert advisory_stage["required"] is True
+        control_3 = next(c for c in document["controls"] if c["control_id"] == 3)
+        assert control_3["status"] == "PERFORMED"
+        assert control_3["result"] == "FAIL"
+        assert exit_code == 1, output
+
+    def test_without_a_snapshot_advisory_stays_unassessed(
+        self, runner: Runner, runtime: str, reference_image: Path, workdir: Path
+    ) -> None:
+        exit_code, document, output = scan(runner, workdir, reference_image)
+        assert document is not None, output
+        assert document["advisory"] is None
+        advisory_stage = stage(document, "advisory")
+        assert advisory_stage["status"] == "SKIPPED"
+        assert advisory_stage["required"] is False
+        control_3 = next(c for c in document["controls"] if c["control_id"] == 3)
+        assert control_3["status"] == "OMITTED"
+        assert control_3["result"] == "UNKNOWN"
+        assert exit_code == 1, output

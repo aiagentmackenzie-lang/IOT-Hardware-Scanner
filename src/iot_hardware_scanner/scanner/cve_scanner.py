@@ -38,6 +38,9 @@ class CVEScanner:
         self._nvd = NVDClient(config)
         self._cpe_builder = CPEBuilder()
         self._kev_ids: set[str] | None = None
+        #: Keyword search results that were not promoted because the advisory
+        #: did not name the shipped product. Counted, never silently dropped.
+        self.last_keyword_candidates: int = 0
 
     def _load_kev_catalog(self) -> set[str]:
         """Load CISA KEV catalog for cross-referencing.
@@ -70,92 +73,111 @@ class CVEScanner:
         return kev_ids
 
     def scan_component(self, component: SoftwareComponent) -> list[CVEFinding]:
-        """Look up known CVEs for a specific software component.
+        """Look up known CVEs for one component, keeping applicability explicit.
 
-        Strategy:
-        1. Try CPE-based NVD query
-        2. If no results, try keyword-based query
-        3. Cross-reference KEV catalog
-        4. Map CVSS scores to severity levels
-
-        Returns empty list on API failure with warning logged.
+        1. A CPE query returns advisories the provider matched to this CPE.
+        2. A keyword query is a *candidate*: its results are promoted only when
+           the advisory's own CPE match names the same product, and the
+           candidate count is recorded either way.
+        3. KEV membership is recorded as its own fact; it does not rewrite the
+           provider's severity, because "known exploited somewhere" and "this
+           image is affected here" are different statements.
         """
         findings: list[CVEFinding] = []
+        self.last_keyword_candidates = 0
 
-        # Strategy 1: CPE-based query
         cpe: str | None = component.cpe_string
         if not cpe:
-            # Try to build CPE from product name
             cpe = self._cpe_builder.build(component.product, component.version)
 
         raw_results: list[dict] = []
+        applicability = "UNKNOWN"
         if cpe:
             raw_results = self._nvd.query_cpe(cpe)
+            applicability = "cpe-exact"
 
-        # Strategy 2: Keyword fallback (when CPE is unavailable or returns no results)
         if not raw_results:
             keyword = f"{component.product} {component.version}"
-            raw_results = self._nvd.query_keyword(keyword)
+            candidates = self._nvd.query_keyword(keyword)
+            raw_results = [entry for entry in candidates if self._names_product(entry, component)]
+            self.last_keyword_candidates = len(candidates)
+            applicability = "keyword-validated"
 
-        # Convert raw results to CVEFinding
         kev_ids = self._load_kev_catalog()
         for raw in raw_results:
-            cve_id: str = str(raw.get("cve_id", ""))
+            cve_id = str(raw.get("cve_id", ""))
             if not cve_id:
                 continue
 
-            cvss_score: float | None = raw.get("cvss_v3_score")  # type: ignore[assignment]
-            severity = self._cvss_to_severity(cvss_score)
-
-            # KEV check
+            score = raw.get("cvss_v3_score")
+            provider_score = float(score) if score is not None else None
             is_in_kev = cve_id in kev_ids
-            if is_in_kev:
-                severity = Severity.CRITICAL
-
             findings.append(
                 CVEFinding(
                     cve_id=cve_id,
-                    severity=severity,
-                    cvss_v3_score=cvss_score,
-                    cvss_v3_vector=str(raw.get("cvss_v3_vector", "")),
+                    severity=self._cvss_to_severity(provider_score),
+                    cvss_v3_score=provider_score,
+                    cvss_v3_vector=str(raw.get("cvss_v3_vector") or ""),
                     description=str(raw.get("description", "")),
                     affected_product=component.product,
                     affected_version=component.version,
                     published_date=str(raw.get("published_date", "")),
-                    references=list(raw.get("references", [])),  # type: ignore[arg-type]
+                    references=[str(url) for url in raw.get("references", [])],
                     is_in_kev=is_in_kev,
-                    exploit_available=is_in_kev,  # KEV implies known exploitation
+                    exploit_available=bool(raw.get("exploit_available_public", False)),
+                    applicability=applicability,
+                    provider_score=provider_score,
+                    provider=str(raw.get("provider", "nvd")),
+                    last_modified=str(raw.get("last_modified", "")),
+                    occurrences=[f"{component.product} {component.version}"],
                 )
             )
 
         logger.info(
-            "CVE scan: %s %s → %d findings",
+            "CVE scan: %s %s → %d finding(s) (%s); %d keyword candidate(s)",
             component.product,
             component.version,
             len(findings),
+            applicability,
+            self.last_keyword_candidates,
         )
         return findings
 
-    def scan_all(self, components: list[SoftwareComponent]) -> list[CVEFinding]:
-        """Scan all detected software components for known CVEs."""
-        findings: list[CVEFinding] = []
-        seen_ids: set[str] = set()
+    @staticmethod
+    def _names_product(entry: dict, component: SoftwareComponent) -> bool:
+        """Whether a keyword candidate's own CPE data names this product."""
+        for match in entry.get("matches") or []:
+            cpe = str(match.get("cpe", "")).lower()
+            parts = cpe.split(":")
+            if component.product.lower() in parts or component.vendor.lower() in parts:
+                return True
+        return False
 
+    def scan_all(self, components: list[SoftwareComponent]) -> list[CVEFinding]:
+        """Scan every component, keeping one finding per CVE with every location."""
+        findings: dict[str, CVEFinding] = {}
+        order: list[str] = []
         for component in components:
-            component_findings = self.scan_component(component)
-            for f in component_findings:
-                # Deduplicate by CVE ID
-                if f.cve_id in seen_ids:
+            for finding in self.scan_component(component):
+                existing = findings.get(finding.cve_id)
+                if existing is None:
+                    findings[finding.cve_id] = finding
+                    order.append(finding.cve_id)
                     continue
-                seen_ids.add(f.cve_id)
-                findings.append(f)
+                for location in finding.occurrences:
+                    if location not in existing.occurrences:
+                        existing.occurrences.append(location)
+                existing.is_in_kev = existing.is_in_kev or finding.is_in_kev
+                existing.exploit_available = existing.exploit_available or finding.exploit_available
+                if finding.severity is Severity.CRITICAL:
+                    existing.severity = Severity.CRITICAL
 
         logger.info(
-            "CVE scan complete: %d unique findings across %d components",
+            "CVE scan complete: %d unique finding(s) across %d component(s)",
             len(findings),
             len(components),
         )
-        return findings
+        return [findings[cve_id] for cve_id in order]
 
     @staticmethod
     def _cvss_to_severity(score: float | None) -> Severity:
