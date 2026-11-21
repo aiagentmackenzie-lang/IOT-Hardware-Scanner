@@ -5,8 +5,9 @@ Repository state: `main` at `b6f6ca0` + working-tree changes for milestone A.
 
 Everything below was run locally on macOS (arm64) with CPython **3.12.14** in a
 fresh virtual environment created by `uv`, plus a wheel installed into a second
-clean environment for the installed-CLI checks. Nothing here was executed on CI;
-the jobs that would run it are configured in `.github/workflows/ci.yml`.
+clean environment for the installed-CLI checks. The same gates are enforced in
+`.github/workflows/ci.yml`, which was **re-enabled and executed** for this
+checkpoint: the first green run is `44840789511` on `main` (6/6 jobs).
 
 ---
 
@@ -19,6 +20,7 @@ the jobs that would run it are configured in `.github/workflows/ci.yml`.
 | Types | `mypy src/` | no issues in 29 source files |
 | Tests + coverage | `pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80` | **560 passed, 2 skipped, 85.44%** |
 | Wheel | `uv build` | `iot_hardware_scanner-2.0.0-py3-none-any.whl`, sha256 `165d43e17b37c2ae6e1107e0829b9b12eb8fc3c15288208de58ee3f87be2921a` |
+| CI | GitHub Actions run `44840789511` on `main` | **6/6 jobs green**, no annotations: py3.10 / py3.12 / py3.14 gates (557 passed, 5 skipped on 3.12; 85.34% coverage), installed wheel with no backend, report contract, and the OpenWrt reference image (`sha256sum -c: OK`, gate test passed) |
 
 The two skips are `test_installed_cli.py::…openwrt…` (needs
 `IHS_REFERENCE_IMAGE`) and the pre-existing Binwalk integration test. Both are
