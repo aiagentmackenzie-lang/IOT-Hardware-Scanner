@@ -118,13 +118,21 @@ the corpus; where none exists, the cell says so rather than claiming zero.
 
 | Artifact | Digest |
 | --- | --- |
-| Wheel (macOS build, CPython 3.12.14) | `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391` — `iot_hardware_scanner-2.2.0-py3-none-any.whl` |
-| Wheel (Linux CI build) | **pending the release run**; hatch builds are not byte-reproducible across platforms, and the Linux build is the qualified artifact |
+| Wheel | `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391` — `iot_hardware_scanner-2.2.0-py3-none-any.whl`; identical from the macOS (CPython 3.12.14) and Linux CI builds |
+| Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44863590710` |
+| Worker image (Linux amd64, CI, qualified) | `sha256:9ec4ca966a7d9a62d8c14614886a08fe33d884b8fec311da2cf89b684fadba26` |
 | Worker image (macOS arm64, local) | `sha256:3ec87f2d57639e770efa65155d918e232222d0b12dc84353724927cf6772739c` |
-| Worker image (Linux amd64, CI) | recorded by the `linux-extractor` job on the release run; the previous release measured `sha256:954d974164878ae93e3b13ea8d8f71887d329aa37be2edf80e070df8f1078c43` |
 | `unsquashfs` | `unsquashfs version 4.5.1 (2022/03/17)` |
 | Rule set | `2ca7a94b511400528f49ea9290359d716e5a3e7ecb408ab0b62cbee6a946258d` (12 rule files, yara-python 4.5.4) |
 | Corpus | `8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02` |
 
 The rule-set digest is over the sorted `namespace|file|sha256(content)` of the
 compiled sources, so it is independent of install path and file order.
+
+The worker image id is not reproducible: the Dockerfile pins the base image by
+digest and `squashfs-tools` by version, but `binutils` and the rest of the base
+resolve at build time. The report records the id it actually used; `unsquashfs
+version 4.5.1 (2022/03/17)` is the reproducible fact.
+
+Qualified run: GitHub Actions `44863590710` on `main` (`c00b0e5`), 8/8 job
+instances green, `linux-extractor` 113 passed with zero skips.

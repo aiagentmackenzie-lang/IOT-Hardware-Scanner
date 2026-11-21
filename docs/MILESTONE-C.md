@@ -1,10 +1,18 @@
 # Milestone C — “Ship the qualified scanner”
 
-Status: **locally green, CI pending the push.** Slices 4A → 4D → 4C → 6A → 6B
-are implemented, and every mandatory fixture outcome passes with **zero skips**
-on this machine (765 passed, 0 skipped). The three rows that cannot be closed
-before a push are named in §6: the Linux CI wheel digest, the Linux worker image
-digest and the green CI run id.
+Status: **complete, and qualified in CI.** CI run **`44863590710`** on `main`
+(`c00b0e5`) is **8/8 job instances green**, including the `linux-extractor` gate:
+the pinned worker image built from `worker/Dockerfile`, the wheel installed
+outside the checkout, the reference image digest-verified before the scan, and
+**113 acceptance tests passed with zero skips**. Slices 4A → 4D → 4C → 6A → 6B
+are implemented, and every mandatory fixture outcome passes with zero skips
+(765 passed, 0 skipped locally; the same total in CI, with the reference-image
+rows run in the qualified job).
+
+The first run of this release, `44863090126`, failed one step: the blank-image
+gate asserted `schema_version == 3` as a literal while every other job passed.
+That is fixed in `c00b0e5` — the gate now reads `SCHEMA_VERSION` from the wheel
+under test — because a duplicated constant is how a gate goes stale.
 
 Starting point: `main` at `0373f25` (milestone B green, CI runs `44848363402` and
 `44848829742`, 7/7 jobs each). Version **2.2.0**, report **schema 4**, profile
@@ -25,8 +33,9 @@ image, digest-verified before use, scanned with `--offline`.
 | Types | `mypy src/` | no issues in 36 source files |
 | Tests + coverage | `pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80` | **765 passed, 0 skipped, 86.44%** with `IHS_REFERENCE_IMAGE` set and the worker image present; **751 passed, 14 skipped, 86.06%** without |
 | Format | `ruff format --check src/ tests/` | 73 files already formatted |
-| Wheel | `uv build` | `iot_hardware_scanner-2.2.0-py3-none-any.whl`, macOS sha256 `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391` (hatch builds are not byte-reproducible across platforms; the qualified artifact is the Linux CI build) |
+| Wheel | `uv build` | `iot_hardware_scanner-2.2.0-py3-none-any.whl`, sha256 `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391` — **byte-identical between the macOS build and the Linux CI build** for this release |
 | Installed-CLI acceptance, wheel mode | `IHS_INSTALLED_CLI=… IHS_REFERENCE_IMAGE=… pytest tests/test_installed_image_cli.py tests/test_installed_cli.py` | **27 passed, 0 skipped** |
+| CI | GitHub Actions run `44863590710` on `main` (`c00b0e5`) | **8/8 green**: `python-gate` on 3.10 / 3.12 / 3.14 (744 passed, 21 skipped each — the reference-image and container rows, which the qualified job runs), installed wheel with no backend, report contract, reference image with the worker off, `bounded-resources` (61 passed, 0 skipped; 2 GiB at 16 MiB windows in 78.62 s, peak RSS 91,492 KiB), and **`linux-extractor` (113 passed, 0 skipped)** |
 
 The fourteen skips without the image are the reference-image and container rows,
 by design; the `linux-extractor` CI job is where a skip fails the build.
@@ -79,12 +88,12 @@ proves it, not the command that happened to run.
 | Item | Value |
 | --- | --- |
 | Interpreter / platform | CPython 3.12.14, macOS 27.2.1 arm64 (`Darwin`), colima VM (vz, 2 CPU / 4 GB) for the container path |
-| Wheel | `iot_hardware_scanner-2.2.0-py3-none-any.whl` — macOS build `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391`; **Linux build pending the release CI run** |
-| Worker image | local arm64 `sha256:3ec87f2d57639e770efa65155d918e232222d0b12dc84353724927cf6772739c`; CI amd64 `sha256:954d974164878ae93e3b13ea8d8f71887d329aa37be2edf80e070df8f1078c43` (previous release, same `worker/Dockerfile`); **release-run digest pending** |
+| Wheel | `iot_hardware_scanner-2.2.0-py3-none-any.whl` — `610ce64d87623fc5d2413d36198f800492adcbdf2910ecd3da4cdc78cfbe8391`, identical from the macOS build and the Linux CI build |
+| Worker image | CI amd64 (qualified) `sha256:9ec4ca966a7d9a62d8c14614886a08fe33d884b8fec311da2cf89b684fadba26`; local arm64 `sha256:3ec87f2d57639e770efa65155d918e232222d0b12dc84353724927cf6772739c` |
 | `unsquashfs` | `unsquashfs version 4.5.1 (2022/03/17)` |
 | Rule set | `2ca7a94b511400528f49ea9290359d716e5a3e7ecb408ab0b62cbee6a946258d` (`yara-python 4.5.4`, 12 files) |
 | Corpus | `8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02` |
-| CI run id | **pending the push**; the previous green run is `44848829742` (7/7). The workflow now defines six jobs — `python-gate` (3.10/3.12/3.14), `installed-wheel-no-backend`, `report-contract`, `reference-image`, the new `bounded-resources`, and `linux-extractor` — so the release run is 8 job instances |
+| CI run id | **`44863590710`** on `main` (`c00b0e5`) — 8 job instances, all green. The workflow defines six jobs: `python-gate` (3.10/3.12/3.14), `installed-wheel-no-backend`, `report-contract`, `reference-image`, `bounded-resources`, `linux-extractor` |
 | Profile result | `firmware-static` v4.0, `COMPLETE`, 15 stages settled, exit 1 |
 
 Reference image, installed wheel, worker present — side by side with the
@@ -135,9 +144,8 @@ honest answer, and it is the one a firmware review should give.
 
 | Row | Why |
 | --- | --- |
-| Linux CI wheel digest | A hatch build is not byte-reproducible across platforms, so the qualified artifact has to be built by CI. That needs a push. |
-| Linux worker image digest and the green CI run id | Same: they are produced by the `linux-extractor` job. |
 | Advisory refresh, end to end over the network | Deliberately out of the scan. `NVDClient` pagination, retry, rate limiting and cache states are unit-tested against recorded responses; no test in this suite opens a socket, by design. |
+| Worker image id is not reproducible | The image pins `debian:bookworm-slim` by digest and `squashfs-tools=1:4.5.1-1` by version, but `binutils` and the rest of the base resolve at build time, so the image id differs between the previous release (`sha256:954d9741…`) and this one (`sha256:9ec4ca96…`). The report records the id it actually used; the `unsquashfs` version is the reproducible fact. |
 | Component inventory → CPE coverage | 3 of the reference image's 196 installed records map to a product in the shipped CPE map, so `components[]` is much smaller than `opkg.records[]`. This is slice 4B's mapping table, not a detector defect, and it is now stated in the release notes and the support matrix instead of being implied. |
 | Broader accuracy claims | A held-out corpus of sufficient size does not exist here. Per-detector misses are recorded as *not measurable* on this corpus rather than as zero. |
 
