@@ -50,8 +50,9 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 
 PROFILE_FIRMWARE = "firmware-static"
+PROFILE_FIRMWARE_TREE = "firmware-tree"
 PROFILE_CREDENTIALS = "credentials-only"
-PROFILE_VERSION = "2.0"
+PROFILE_VERSION = "3.0"
 
 #: Stages a profile must finish before it may report a complete assessment.
 #:
@@ -75,6 +76,21 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
         StageId.C2_INDICATORS,
         StageId.RISK_CONTROLS,
     ),
+    #: A staged tree is already an enumerable root. This profile has **no**
+    #: extraction prerequisite at all: there is no container to decode and no
+    #: byte stream to measure entropy on, so neither is required.
+    PROFILE_FIRMWARE_TREE: (
+        StageId.INGEST,
+        StageId.ENUMERATION,
+        StageId.BINARY_INVENTORY,
+        StageId.ELF_METADATA,
+        StageId.OPKG_INVENTORY,
+        StageId.CREDENTIAL_SCAN,
+        StageId.UNIX_ACCOUNTS,
+        StageId.SERVICE_ANALYSIS,
+        StageId.C2_INDICATORS,
+        StageId.RISK_CONTROLS,
+    ),
     PROFILE_CREDENTIALS: (
         StageId.INGEST,
         StageId.ENUMERATION,
@@ -87,6 +103,12 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
 #: Stages that never block completion, with the reason they are not requested.
 OPTIONAL_STAGES: dict[str, tuple[StageId, ...]] = {
     PROFILE_FIRMWARE: (StageId.ADVISORY,),
+    PROFILE_FIRMWARE_TREE: (
+        StageId.EXTRACTION,
+        StageId.ROOT_DISCOVERY,
+        StageId.ENTROPY,
+        StageId.ADVISORY,
+    ),
     PROFILE_CREDENTIALS: (
         StageId.CREDENTIAL_SCAN,
         StageId.ADVISORY,

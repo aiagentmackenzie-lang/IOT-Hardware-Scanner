@@ -33,8 +33,12 @@ class ScannerConfig:
     # ── Extraction ──
     extraction_timeout_seconds: int = Field(
         default=300,
-        description="Timeout for firmware extraction in seconds",
-        ge=30,
+        description=(
+            "Wall-clock deadline for the extraction worker in seconds. A short "
+            "deadline is a legitimate choice; when it expires the worker is killed "
+            "and the analysis is reported incomplete."
+        ),
+        ge=5,
         le=3600,
     )
     extraction_depth: int = Field(
@@ -42,6 +46,63 @@ class ScannerConfig:
         description="Maximum recursive extraction depth (Matryoshka)",
         ge=1,
         le=10,
+    )
+    extraction_worker: str = Field(
+        default="auto",
+        description=(
+            "Image extraction worker: auto (podman, then docker), podman, docker, "
+            "host-process (unsandboxed, Linux only) or none"
+        ),
+    )
+    extraction_require_isolation: bool = Field(
+        default=True,
+        description=(
+            "Refuse a host-process extraction helper. A qualified result needs the "
+            "read-only, no-network, size-limited worker sandbox."
+        ),
+    )
+    worker_image: str = Field(
+        default="ihs-squashfs-worker:4.5.1",
+        description="Pinned worker image carrying upstream unsquashfs",
+    )
+    worker_memory_mb: int = Field(
+        default=1024,
+        description="Memory limit for the extraction worker in MB",
+        ge=128,
+        le=16384,
+    )
+    max_decoded_bytes_mb: int = Field(
+        default=1024,
+        description=(
+            "Budget for bytes decoded from the gzip wrapper. Separate from the wrapper "
+            "size and from the filesystem extent."
+        ),
+        ge=1,
+        le=16384,
+    )
+    max_extracted_bytes_mb: int = Field(
+        default=1024,
+        description="Budget for bytes materialised from an extracted filesystem",
+        ge=1,
+        le=16384,
+    )
+    max_extracted_entries: int = Field(
+        default=200000,
+        description="Budget for entries in an extracted filesystem",
+        ge=1,
+    )
+    keep_scratch: bool = Field(
+        default=False,
+        description="Keep the extraction scratch directory after a failed run",
+    )
+    snapshot_budget_mb: int = Field(
+        default=4096,
+        description=(
+            "Storage budget for the private immutable copy of a file input; every "
+            "later read is bound to this snapshot"
+        ),
+        ge=1,
+        le=65536,
     )
     disk_space_multiplier: float = Field(
         default=3.0,
@@ -77,6 +138,15 @@ class ScannerConfig:
         ),
         ge=1,
         le=1024,
+    )
+    bounded_window_kb: int = Field(
+        default=1024,
+        description=(
+            "Window size for bounded passes over a binary artifact; every window keeps "
+            "its original offset"
+        ),
+        ge=4,
+        le=65536,
     )
     nvd_max_retries: int = Field(
         default=3,

@@ -22,7 +22,8 @@ from iot_hardware_scanner.models import (
     FileCategory,
     FilesystemInventory,
 )
-from iot_hardware_scanner.yara.yara_engine import YaraEngine
+from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+from iot_hardware_scanner.yara.yara_engine import YaraEngine, YaraMatch
 
 logger = logging.getLogger(__name__)
 
@@ -321,45 +322,52 @@ class C2Detector:
         return findings
 
     def detect_artifact(self, artifact: Path) -> list[C2Finding]:
-        """Scan a whole artifact as one unit, for input with no enumeration.
+        """Sweep a whole artifact in bounded windows that keep their offsets.
 
-        The artifact is bounded by ``max_scan_file_size_mb``; a larger artifact
-        is truncated at that boundary and the truncation is reported in the
-        finding description rather than silently analysed in full.
+        No window is joined to the next: an indicator is recorded with the offset
+        of the first window it appeared in, and the scan stops at the configured
+        byte budget. When the artifact is larger than the budget the truncation
+        is stated on every finding rather than silently analysed in full.
         """
         findings: list[C2Finding] = []
         if artifact.is_dir() or not artifact.is_file():
             return findings
 
         limit = self.config.max_scan_file_size_mb * 1024 * 1024
-        size = artifact.stat().st_size
-        try:
-            with artifact.open("rb") as handle:
-                data = handle.read(limit)
-        except (OSError, PermissionError) as exc:
-            logger.warning("Cannot read artifact for indicator sweep: %s", exc)
-            return findings
+        window_size = self.config.bounded_window_kb * 1024
+        reader = open_bounded(artifact)
+        sweep = reader.scan_windows(window_size, budget=limit)
 
-        truncated = size > limit
-        text = data.decode("latin-1", errors="ignore")
+        domains: dict[str, int] = {}
+        addresses: dict[str, int] = {}
+        yara_matches: list[YaraMatch] = []
+        yara_engine = self._init_yara()
+
+        for window in sweep.windows:
+            text = window.data.decode("latin-1", errors="ignore")
+            for url in _URL_RE.findall(text):
+                host = url.split("://", 1)[-1].split("/")[0].split(":")[0]
+                if _DOMAIN_RE.match(host):
+                    domains.setdefault(host.lower(), window.offset)
+            for domain in _DOMAIN_RE.findall(text):
+                if not all(part.isdigit() for part in domain.split(".")):
+                    domains.setdefault(domain.lower(), window.offset)
+            for address in _IP_RE.findall(text):
+                if all(0 <= int(octet) <= 255 for octet in address.split(".")):
+                    addresses.setdefault(address, window.offset)
+            if yara_engine.is_available:
+                yara_matches.extend(yara_engine.scan_data(window.data, module_name=artifact.name))
+
         context = {"in_binary": True, "in_hosts": False}
-
-        domains: set[str] = set()
-        for url in _URL_RE.findall(text):
-            host = url.split("://", 1)[-1].split("/")[0].split(":")[0]
-            if _DOMAIN_RE.match(host):
-                domains.add(host.lower())
-        domains |= {d.lower() for d in _DOMAIN_RE.findall(text)}
-        domains = {d for d in domains if not all(p.isdigit() for p in d.split("."))}
-
         occurrences: dict[str, list[tuple[Path, dict]]] = {
             domain: [(Path(artifact.name), context)] for domain in sorted(domains)
         }
         findings.extend(self._aggregate_domains(occurrences))
+        for finding in findings:
+            if finding.indicator_type == "domain":
+                finding.description += f" (first window at offset {domains[finding.value]:,})"
 
-        for ip_str in sorted(set(_IP_RE.findall(text))):
-            if not all(0 <= int(octet) <= 255 for octet in ip_str.split(".")):
-                continue
+        for ip_str in sorted(addresses):
             if self._is_private_or_reserved(ip_str):
                 continue
             score = 0.0
@@ -385,42 +393,46 @@ class C2Detector:
                     file_path=Path(artifact.name),
                     suspicion_score=score,
                     score_breakdown=breakdown,
-                    description=f"IP scored {score:.0f}: {classification} in artifact",
+                    description=(
+                        f"IP scored {score:.0f}: {classification} in artifact "
+                        f"(first window at offset {addresses[ip_str]:,})"
+                    ),
                 )
             )
 
-        yara_engine = self._init_yara()
-        if yara_engine.is_available:
-            for match in yara_engine.scan_data(data, module_name=artifact.name):
-                yara_category = match.meta.get("category", "")
-                if yara_category not in ("malware_signature", "backdoor_service"):
-                    continue
-                indicator_type = (
-                    "backdoor_service"
-                    if yara_category == "backdoor_service"
-                    else "malware_signature"
+        for match in yara_matches:
+            yara_category = match.meta.get("category", "")
+            if yara_category not in ("malware_signature", "backdoor_service"):
+                continue
+            indicator_type = (
+                "backdoor_service" if yara_category == "backdoor_service" else "malware_signature"
+            )
+            severe = match.meta.get("severity", "HIGH").upper() in ("CRITICAL", "HIGH")
+            findings.append(
+                C2Finding(
+                    severity="LIKELY_C2" if severe else "SUSPICIOUS",
+                    indicator_type=indicator_type,
+                    value=f"{match.rule_name}:{artifact.name}",
+                    file_path=Path(artifact.name),
+                    suspicion_score=80.0 if severe else 50.0,
+                    score_breakdown={"yara_match": 80.0 if severe else 50.0},
+                    mitre_attack=self._get_mitre_techniques(
+                        match.meta.get("family", "").lower(), indicator_type
+                    ),
+                    description=match.meta.get("description", match.rule_name),
                 )
-                severe = match.meta.get("severity", "HIGH").upper() in ("CRITICAL", "HIGH")
-                findings.append(
-                    C2Finding(
-                        severity="LIKELY_C2" if severe else "SUSPICIOUS",
-                        indicator_type=indicator_type,
-                        value=f"{match.rule_name}:{artifact.name}",
-                        file_path=Path(artifact.name),
-                        suspicion_score=80.0 if severe else 50.0,
-                        score_breakdown={"yara_match": 80.0 if severe else 50.0},
-                        mitre_attack=self._get_mitre_techniques(
-                            match.meta.get("family", "").lower(), indicator_type
-                        ),
-                        description=match.meta.get("description", match.rule_name),
-                    )
-                )
+            )
 
-        if truncated:
+        if sweep.sampled:
             for finding in findings:
-                finding.description += f" (artifact truncated at {limit:,} bytes of {size:,})"
+                finding.description += (
+                    f" (artifact sampled: {sweep.bytes_read:,} of {reader.size:,} bytes read; "
+                    f"{sweep.omissions[0] if sweep.omissions else 'regions unread'})"
+                )
             logger.warning(
-                "Indicator sweep read the first %s of %s", _fmt_size(limit), _fmt_size(size)
+                "Indicator sweep read %s of %s",
+                _fmt_size(sweep.bytes_read),
+                _fmt_size(reader.size),
             )
 
         return findings
@@ -603,12 +615,21 @@ class C2Detector:
 
 
 # ── Module-level text extractors (usable without OOM gating) ──
-def _extract_domains_text(path: Path) -> set[str]:
-    """Extract domain names from file text (no size gating)."""
-    domains: set[str] = set()
+def _read_text_bounded(path: Path, budget: int = 8 * 1024 * 1024) -> str:
+    """Read a text file through the bounded reader, or return ``""``."""
     try:
-        content = path.read_text(errors="ignore")
-    except (OSError, PermissionError):
+        reader = open_bounded(path)
+        text, _truncated = reader.read_text_bounded(budget, encoding="latin-1")
+        return text
+    except (OSError, ValueError):
+        return ""
+
+
+def _extract_domains_text(path: Path) -> set[str]:
+    """Extract domain names from file text, bounded."""
+    domains: set[str] = set()
+    content = _read_text_bounded(path)
+    if not content:
         return domains
 
     urls = _URL_RE.findall(content)
@@ -634,11 +655,10 @@ def _extract_domains_text(path: Path) -> set[str]:
 
 
 def _extract_ips_text(path: Path) -> set[str]:
-    """Extract IPv4 addresses from file text (no size gating)."""
+    """Extract IPv4 addresses from file text, bounded."""
     ips: set[str] = set()
-    try:
-        content = path.read_text(errors="ignore")
-    except (OSError, PermissionError):
+    content = _read_text_bounded(path)
+    if not content:
         return ips
 
     for match in _IP_RE.findall(content):
@@ -654,9 +674,8 @@ def _is_email_domain_text(domain: str, path: Path) -> bool:
     Quick heuristic: if the file contains the domain with an @ prefix,
     it's likely just an email, not a C2 domain.
     """
-    try:
-        content = path.read_text(errors="ignore")
-    except (OSError, PermissionError):
+    content = _read_text_bounded(path)
+    if not content:
         return False
 
     email_count = len(_EMAIL_RE.findall(content))

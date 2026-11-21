@@ -25,6 +25,7 @@ from typing import ClassVar
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import (
+    BinaryHardening,
     CheckStatus,
     ControlResult,
     ScanContext,
@@ -80,6 +81,7 @@ class ControlEvaluator:
     #: read as a broad one.
     PROFILE_CONTROLS: ClassVar[dict[str, frozenset[int]]] = {
         "firmware-static": frozenset(range(1, 13)),
+        "firmware-tree": frozenset(range(1, 13)),
         "credentials-only": frozenset({1}),
     }
 
@@ -458,6 +460,26 @@ class ControlEvaluator:
                 remediation="Audit SUID binaries and fix world-writable permissions.",
                 source_stage=StageId.ENUMERATION,
             )
+        if inventory.metadata_source != "image" and inventory.metadata_source != "declared":
+            # Nothing was observed, and the bits that were read describe this
+            # host's copy of the tree, not the shipped image. "No SUID binary"
+            # is therefore not an observation about the device.
+            return ControlResult(
+                control_id=9,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    f"Permission bits are {inventory.metadata_source}-derived "
+                    f"({inventory.permission_unknown_count} entr(ies) unknown); a clean "
+                    "result cannot be claimed from them."
+                ],
+                remediation=(
+                    "Supply a build manifest with declared modes/ownership, or extract "
+                    "the shipped image so its own metadata is available."
+                ),
+                source_stage=StageId.ENUMERATION,
+            )
         return ControlResult(
             control_id=9,
             control_name="",
@@ -476,27 +498,54 @@ class ControlEvaluator:
                 "Analyze the target ELF binaries.",
                 StageId.ELF_METADATA,
             )
-        unknown = sum(1 for b in bi.binaries if b.hardening.nx_enabled is None)
-        evidence = [f"{bi.hardened_binaries}/{bi.total_binaries} binaries show hardening evidence"]
+        # "Hardened" here means *positive* evidence: an NX stack and PIE (or a
+        # shared library, for which PIE is not applicable) read from the file's
+        # own program headers. A missing symbol table cannot earn credit.
+        evidenced = [b for b in bi.binaries if _has_positive_hardening(b.hardening)]
+        unknown = sum(
+            1
+            for b in bi.binaries
+            if b.hardening.nx_enabled is None
+            or b.hardening.stack_canary is None
+            or b.hardening.pie_enabled is None
+        )
+        evidence = [
+            f"{len(evidenced)}/{bi.total_binaries} binaries show positive hardening evidence"
+        ]
         if unknown:
-            evidence.append(f"{unknown} binary/binaries with unknown hardening state")
-        if bi.hardened_binaries == 0:
+            evidence.append(
+                f"{unknown} binary/binaries have at least one unknown hardening property "
+                "(no symbol table, or no program header that supports a verdict)"
+            )
+        if not evidenced:
             return ControlResult(
                 control_id=10,
                 control_name="",
                 status=CheckStatus.INCONCLUSIVE,
                 result="UNKNOWN",
                 evidence=evidence,
-                remediation="Read ELF program headers before drawing a conclusion.",
+                remediation="Build with an NX stack and PIE, then re-scan the image.",
+                source_stage=StageId.ELF_METADATA,
+            )
+        if len(evidenced) < bi.total_binaries:
+            return ControlResult(
+                control_id=10,
+                control_name="",
+                status=CheckStatus.PERFORMED,
+                result="REVIEW",
+                evidence=evidence,
+                remediation=(
+                    "Enable NX, stack canaries, full RELRO and PIE for every shipped binary."
+                ),
                 source_stage=StageId.ELF_METADATA,
             )
         return ControlResult(
             control_id=10,
             control_name="",
-            status=CheckStatus.PERFORMED,
-            result="REVIEW" if bi.hardened_binaries < bi.total_binaries else "PASS",
+            status=CheckStatus.PERFORMED if not unknown else CheckStatus.INCONCLUSIVE,
+            result="PASS" if not unknown else "REVIEW",
             evidence=evidence,
-            remediation="Enable NX, stack canaries, full RELRO and PIE for all binaries.",
+            remediation="",
             source_stage=StageId.ELF_METADATA,
         )
 
@@ -544,12 +593,38 @@ class ControlEvaluator:
                 ),
                 source_stage=StageId.OPKG_INVENTORY,
             )
+        recorded = [c for c in components if c.confidence != "candidate"]
+        candidates = len(components) - len(recorded)
+        evidence = [f"{len(recorded)} recorded component(s) recovered"]
+        if candidates:
+            evidence.append(
+                f"{candidates} component(s) are banner candidates only, not installed records"
+            )
+        inventory_stage = next(
+            (s for s in context.stages if s.stage_id is StageId.OPKG_INVENTORY), None
+        )
+        if inventory_stage is not None and inventory_stage.status is not StageStatus.COMPLETE:
+            return ControlResult(
+                control_id=12,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    *evidence,
+                    f"the installed-package database was not read: {inventory_stage.reason}",
+                ],
+                remediation=(
+                    "Read the image's own package database; a banner-derived list does "
+                    "not establish what is installed."
+                ),
+                source_stage=StageId.OPKG_INVENTORY,
+            )
         return ControlResult(
             control_id=12,
             control_name="",
             status=CheckStatus.PERFORMED,
-            result="PASS",
-            evidence=[f"{len(components)} component(s) recovered"],
+            result="PASS" if not candidates else "REVIEW",
+            evidence=evidence,
             source_stage=StageId.OPKG_INVENTORY,
         )
 
@@ -585,6 +660,13 @@ def _omitted(reason: str, remediation: str, stage: StageId) -> ControlResult:
         remediation=remediation,
         source_stage=stage,
     )
+
+
+def _has_positive_hardening(hardening: BinaryHardening) -> bool:
+    """Whether the structures support a hardening claim, positively."""
+    if hardening.nx_enabled is not True:
+        return False
+    return bool(hardening.pie_enabled is not False)
 
 
 def _program_name(program: str) -> str:

@@ -24,6 +24,7 @@ from iot_hardware_scanner.models import (
     Severity,
     YaraMatch,
 )
+from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 from iot_hardware_scanner.scanner.unix_cred_parser import (
     STATE_EMPTY,
     AccountRecord,
@@ -279,12 +280,19 @@ class CredentialScanner:
                 )
                 return findings
             try:
-                content = abs_path.read_text(errors="ignore")
-            except (OSError, PermissionError):
+                # Bounded: a line longer than 64 KiB is yielded as empty text,
+                # and the pass stops at the configured byte budget. Offsets stay
+                # exact, so a finding can be quoted back to a physical range.
+                text_lines = list(
+                    open_bounded(abs_path).iter_lines(budget=max_size, encoding="utf-8")
+                )
+            except (OSError, ValueError):
                 return findings
 
-            lines = content.splitlines()
-            for line_num, line in enumerate(lines, 1):
+            lines = [line.text for line in text_lines]
+            for line_obj in text_lines:
+                line_num = line_obj.number
+                line = line_obj.text
                 for pattern, cred_category, severity, has_group in _REGEX_PATTERNS:
                     match = pattern.search(line)
                     if not match:
@@ -375,7 +383,10 @@ class CredentialScanner:
         if inventory is not None:
             seen: set[Path] = set()
             for ff in inventory.findings:
-                if ff.path.name != "passwd" or str(ff.path.parent) != "etc":
+                # Locators are root-qualified (``slot_b/etc/passwd``), so the
+                # match is on the trailing components, never on the whole path.
+                parts = ff.path.parts
+                if len(parts) < 2 or parts[-2:] != ("etc", "passwd"):
                     continue
                 root_dir = ff.absolute_path.parent.parent
                 if root_dir in seen:

@@ -5,13 +5,30 @@ output. Renderers read the document, never the live ``ScanContext``, so what is
 written to disk and what is printed can never disagree, and replay renders the
 same facts the original scan recorded.
 
-Schema 2 (this release)
-----------------------
-``schema_version`` is 2. New scans never carry an aggregate security grade.
-Assessment completion, per-stage coverage, named checks and findings are
-separate top-level sections. ``risk_score`` is present only when replaying a v1
-document that actually contained one, in which case it is labelled with its
-legacy method and the assessment completeness is ``UNKNOWN``.
+Schema history
+--------------
+**Schema 2** (milestone A) introduced assessment completion, per-stage coverage,
+named checks and findings as separate top-level sections, and retired the
+aggregate grade for new scans.
+
+**Schema 3** (milestone B) adds the evidence a shipped-image inventory needs:
+
+* ``image_map`` — artifact/parent/digest/format/coordinate system/offset/length
+  and decoder for every container and file the scan opened;
+* ``extraction`` — the worker, its image digest, the helper version and the
+  budgets that were enforced;
+* ``elf`` — one record per ELF file, read from its own header and program
+  headers, with the properties that stayed unknown listed;
+* ``opkg`` — the installed-package database: every record with its complete
+  version string, architecture, held state and byte range in the database;
+* ``input_binding`` — the private snapshot every read was bound to, and whether
+  the original path still matched afterwards;
+* ``tree`` — the deterministic per-entry manifest and any declaration compared
+  against it.
+
+Reading a schema-2 document is supported: :func:`load_document` adds the new
+sections as explicitly unavailable rather than guessing, and
+``docs/MIGRATION-v2.md`` records the change.
 
 Reading an unversioned (v1) document
 ------------------------------------
@@ -41,7 +58,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: Schema versions this reader upgrades. A v2 document keeps every recorded
+#: fact and gains explicit "not recorded" markers for the v3 sections.
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3})
 TOOL_NAME = "iot-hardware-scanner"
 
 _EXTENSIONS = {"json": ".json", "markdown": ".md", "html": ".html", "terminal": ".txt"}
@@ -112,6 +133,12 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "findings": [_finding_to_dict(f) for f in findings],
         "inventory": _inventory_section(context),
         "entropy": _entropy_section(context),
+        "image_map": _image_map_section(context),
+        "extraction": _extraction_section(context),
+        "input_binding": _input_binding_section(context),
+        "elf": _elf_section(context),
+        "opkg": _opkg_section(context),
+        "tree": _tree_section(context),
         "components": _components_section(context),
         "data_sources": _data_sources_section(),
         "risk_score": None,
@@ -177,6 +204,20 @@ def _inventory_section(context: ScanContext) -> dict[str, Any] | None:
         "directories": inventory.total_directories,
         "bytes": inventory.total_size,
         "metadata_source": inventory.metadata_source,
+        "permission_unknown": inventory.permission_unknown_count,
+        "roots": [
+            {
+                "root_id": root.root_id,
+                "locator": root.locator,
+                "files": root.files,
+                "directories": root.directories,
+                "bytes": root.bytes,
+                "metadata_source": root.metadata_source,
+                "artifact_id": root.artifact_id,
+                "omissions": root.omissions,
+            }
+            for root in inventory.roots
+        ],
         "suid_binaries": [str(f.path) for f in inventory.suid_binaries],
         "world_writable_files": [str(f.path) for f in inventory.world_writable_files],
         "boot_evidence": [
@@ -233,9 +274,225 @@ def _components_section(context: ScanContext) -> list[dict[str, Any]]:
             "source_file": str(c.source_file),
             "source_method": c.source_method,
             "architecture": c.architecture,
+            "confidence": c.confidence,
+            "evidence": c.evidence,
+            "digest_sha256": c.digest_sha256,
+            "occurrences": c.occurrences,
         }
         for c in context.software_components
     ]
+
+
+def _input_binding_section(context: ScanContext) -> dict[str, Any] | None:
+    snapshot = context.input_snapshot
+    if snapshot is None:
+        return None
+    return {
+        "original_path": str(snapshot.original_path),
+        "snapshot_path": str(snapshot.snapshot_path),
+        "declared_sha256": snapshot.declared_sha256,
+        "verified_sha256": snapshot.verified_sha256,
+        "size": snapshot.size,
+        "budget_bytes": snapshot.budget_bytes,
+        "immutable": snapshot.immutable,
+        "source_changed": snapshot.source_changed,
+        "source_reverified": snapshot.source_reverified,
+        "digest_matches": snapshot.digest_matches,
+        "note": (
+            "Every analysis read came from this read-only snapshot, whose digest was "
+            "verified against the one recorded at ingest."
+        ),
+    }
+
+
+def _image_map_section(context: ScanContext) -> dict[str, Any] | None:
+    image_map = context.image_map
+    if image_map is None:
+        return None
+    return {
+        "root_artifact_id": image_map.root_artifact_id,
+        "nodes": [
+            {
+                "artifact_id": node.artifact_id,
+                "parent_id": node.parent_id,
+                "digest_sha256": node.digest_sha256,
+                "format": node.format,
+                "coordinate_system": node.coordinate_system,
+                "offset": node.offset,
+                "length": node.length,
+                "decoder": node.decoder,
+                "decoder_version": node.decoder_version,
+                "depth": node.depth,
+                "locator": node.locator,
+                "expanded_bytes": node.expanded_bytes,
+                "extent_bytes": node.extent_bytes,
+                "details": node.details,
+            }
+            for node in image_map.nodes
+        ],
+        "notes": [
+            "Wrapper size, expanded size and filesystem extent are three different "
+            "numbers and are reported separately.",
+            "Offsets belong to the coordinate system named on each node: a byte range "
+            "in a container, or a path inside an extracted filesystem.",
+        ],
+    }
+
+
+def _extraction_section(context: ScanContext) -> dict[str, Any] | None:
+    provenance = context.extraction_provenance
+    result = context.extraction_result
+    if provenance is None and result is None:
+        return None
+    payload: dict[str, Any] = {
+        "state": result.state if result is not None else None,
+        "success": result.success if result is not None else None,
+        "omissions": list(result.omissions) if result is not None else [],
+        "errors": list(result.extraction_errors) if result is not None else [],
+    }
+    if provenance is not None:
+        payload.update(
+            {
+                "worker": provenance.worker,
+                "isolation": provenance.isolation,
+                "worker_image": provenance.worker_image,
+                "worker_digest": provenance.worker_digest,
+                "helper": provenance.helper,
+                "helper_version": provenance.helper_version,
+                "helper_argv": provenance.helper_argv,
+                "limits": provenance.limits,
+                "decoded_bytes": provenance.decoded_bytes,
+                "extracted_bytes": provenance.extracted_bytes,
+                "extracted_entries": provenance.extracted_entries,
+                "durations_seconds": provenance.durations_seconds,
+                "scratch_released": provenance.scratch_released,
+            }
+        )
+    return payload
+
+
+def _elf_section(context: ScanContext) -> dict[str, Any]:
+    return {
+        "eligible": sum(1 for f in context.filesystem_inventory.findings if f.format == "elf")
+        if context.filesystem_inventory
+        else 0,
+        "parsed": len(context.elf_metadata),
+        "records": [
+            {
+                "locator": record.locator,
+                "artifact_id": record.artifact_id,
+                "digest_sha256": record.digest_sha256,
+                "size": record.size,
+                "class": record.elf_class,
+                "byte_order": record.byte_order,
+                "machine": record.machine,
+                "machine_name": record.machine_name,
+                "type": record.elf_type,
+                "os_abi": record.os_abi,
+                "interpreter": record.interpreter,
+                "needed": record.needed,
+                "soname": record.soname,
+                "segments": record.segments,
+                "build_id": record.build_id,
+                "hardening": {
+                    "stack_executable": record.stack_executable,
+                    "pie": record.pie,
+                    "relro": record.relro,
+                    "canary": record.canary,
+                    "fortify": record.fortify,
+                },
+                "unknown": record.unknown,
+                "parser": record.parser,
+                "parser_version": record.parser_version,
+            }
+            for record in context.elf_metadata
+        ],
+        "rejected": (
+            list(context.binary_intelligence.rejected) if context.binary_intelligence else []
+        ),
+    }
+
+
+def _opkg_section(context: ScanContext) -> dict[str, Any] | None:
+    opkg = context.opkg_inventory
+    if opkg is None:
+        return None
+    return {
+        "locator": opkg.locator,
+        "database_sha256": opkg.database_sha256,
+        "byte_length": opkg.byte_length,
+        "installed": opkg.installed_count,
+        "held": opkg.held_count,
+        "unparsed_stanzas": opkg.unparsed_stanzas,
+        "truncated": opkg.truncated,
+        "parser_version": opkg.parser_version,
+        "records": [
+            {
+                "name": record.name,
+                "version": record.version,
+                "architecture": record.architecture,
+                "status": record.status,
+                "installed": record.installed,
+                "held": record.held,
+                "source": record.source,
+                "depends": record.depends,
+                "evidence": {
+                    "start": record.evidence_start,
+                    "end": record.evidence_end,
+                    "line": record.evidence_line,
+                },
+            }
+            for record in opkg.records
+        ],
+        "notes": [
+            "Version strings are recorded verbatim, including the -rN package revision.",
+            "Database membership is not evidence that every package-owned file is present.",
+        ],
+    }
+
+
+def _tree_section(context: ScanContext) -> dict[str, Any] | None:
+    if context.input_kind.value != "tree" and context.declared_manifest is None:
+        return None
+    declared = context.declared_manifest
+    return {
+        "entries": len(context.tree_manifest),
+        "by_kind": _count_kinds(context.tree_manifest),
+        "changes_during_traversal": list(context.tree_changes),
+        "manifest": [
+            {
+                "path": entry.relative_path,
+                "kind": entry.kind,
+                "size": entry.size,
+                "sha256": entry.sha256,
+                "mode": entry.mode,
+                "uid": entry.uid,
+                "gid": entry.gid,
+                "metadata_source": entry.metadata_source,
+                "hardlink_group": entry.hardlink_group,
+                "link_target": entry.link_target,
+            }
+            for entry in context.tree_manifest
+        ],
+        "declared_manifest": (
+            {
+                "path": str(declared.path),
+                "sha256": declared.sha256,
+                "entries": declared.entry_count,
+                "declared_only": declared.declared_only,
+                "observed_only": declared.observed_only,
+            }
+            if declared is not None
+            else None
+        ),
+    }
+
+
+def _count_kinds(entries: list[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in entries:
+        counts[entry.kind] = counts.get(entry.kind, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 # ──────────────────────────────────────────────
@@ -249,7 +506,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("report document must be a JSON object")
 
     raw_version = data.get("schema_version")
-    if raw_version == 2:
+    if raw_version == 3:
         document = dict(data)
         document.setdefault("findings", [])
         document.setdefault("controls", [])
@@ -259,7 +516,48 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("risk_score", None)
         return document
 
+    if raw_version == 2:
+        return _upgrade_v2(data)
+
     return _upgrade_v1(data)
+
+
+#: Sections a schema-2 document never recorded. They are added as explicit
+#: "not recorded" markers so a reader can tell an empty section from an absent
+#: capability.
+_V3_SECTIONS = ("image_map", "extraction", "input_binding", "opkg", "tree")
+
+
+def _upgrade_v2(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-2 document to schema 3 without inventing evidence.
+
+    Every v2 fact is preserved. The v3 sections are set to ``None`` with a
+    migration note, and ``elf`` is added with an empty record list because a v2
+    report never recorded ELF structure.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = "upgraded from schema 2; v3 evidence sections were not recorded"
+    for section in _V3_SECTIONS:
+        document.setdefault(section, None)
+    document.setdefault("elf", {"eligible": 0, "parsed": 0, "records": [], "rejected": []})
+    for key in ("findings", "controls", "stages", "components"):
+        document.setdefault(key, [])
+    document.setdefault("assessment", {})
+    document.setdefault("risk_score", None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 2,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before the image map, ELF records, "
+                "installed-package records and input binding existed. Those sections "
+                "are absent, not empty."
+            ),
+        },
+    )
+    return document
 
 
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
@@ -476,6 +774,63 @@ def render_terminal(document: dict[str, Any]) -> str:
             f"over {entropy.get('bytes_analyzed')} bytes ({scope})"
         )
 
+    image_map = document.get("image_map") or {}
+    nodes = image_map.get("nodes") or []
+    if nodes:
+        lines.append("Image map:")
+        for node in nodes:
+            extent = f", extent {node['extent_bytes']:,}" if node.get("extent_bytes") else ""
+            expanded = (
+                f" -> {node['expanded_bytes']:,} decoded" if node.get("expanded_bytes") else ""
+            )
+            lines.append(
+                f"  [{node.get('artifact_id')}] {node.get('format')} "
+                f"{node.get('coordinate_system')} {node.get('length'):,} bytes{expanded}{extent}"
+                f" (decoder {node.get('decoder')}"
+                + (f" {node['decoder_version']}" if node.get("decoder_version") else "")
+                + ")"
+            )
+
+    extraction = document.get("extraction")
+    if extraction:
+        lines.append(
+            f"Extraction: {extraction.get('state')} via {extraction.get('worker')} "
+            f"({extraction.get('isolation')})"
+            + (
+                f", helper {extraction.get('helper_version')}"
+                if extraction.get("helper_version")
+                else ""
+            )
+            + (
+                f", image {extraction.get('worker_digest')}"
+                if extraction.get("worker_digest")
+                else ""
+            )
+        )
+        for omission in extraction.get("omissions") or []:
+            lines.append(f"  omission: {omission}")
+
+    opkg = document.get("opkg")
+    if opkg:
+        lines.append(
+            f"Packages: {opkg.get('installed')} installed, {opkg.get('held')} held "
+            f"from {opkg.get('locator')} (sha256 {str(opkg.get('database_sha256'))[:16]}…)"
+        )
+
+    elf = document.get("elf") or {}
+    if elf.get("records"):
+        lines.append(
+            f"ELF: {elf.get('parsed')} of {elf.get('eligible')} eligible file(s) parsed from "
+            "their own headers"
+        )
+
+    binding = document.get("input_binding")
+    if binding:
+        lines.append(
+            f"Input binding: snapshot {'verified' if binding.get('digest_matches') else 'MISMATCH'}"
+            f"; source changed after ingest: {'yes' if binding.get('source_changed') else 'no'}"
+        )
+
     return "\n".join(lines)
 
 
@@ -607,13 +962,136 @@ def render_markdown(document: dict[str, Any]) -> str:
             lines.append(f"- {note}")
         lines.append("")
 
+    image_map = document.get("image_map") or {}
+    if image_map.get("nodes"):
+        lines += [
+            "## Image map",
+            "",
+            "| ID | Parent | Format | Coordinates | Offset | Length | Extent | Decoder |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for node in image_map["nodes"]:
+            decoder = str(node.get("decoder") or "")
+            if node.get("decoder_version"):
+                decoder += f" {node['decoder_version']}"
+            lines.append(
+                f"| {node.get('artifact_id')} | {node.get('parent_id') or '—'} | "
+                f"{node.get('format')} | {node.get('coordinate_system')} | "
+                f"{node.get('offset')} | {node.get('length')} | "
+                f"{_count(node.get('extent_bytes'))} | {_md_cell(decoder)} |"
+            )
+        lines.append("")
+
+    extraction = document.get("extraction")
+    if extraction:
+        lines += ["## Extraction", ""]
+        lines.append(f"- State: {extraction.get('state')}")
+        lines.append(f"- Worker: {extraction.get('worker')} ({extraction.get('isolation')})")
+        if extraction.get("worker_image"):
+            lines.append(f"- Worker image: `{extraction.get('worker_image')}`")
+        if extraction.get("worker_digest"):
+            lines.append(f"- Worker image digest: `{extraction.get('worker_digest')}`")
+        if extraction.get("helper_version"):
+            lines.append(f"- Helper: {extraction.get('helper')} {extraction.get('helper_version')}")
+        limits = extraction.get("limits") or {}
+        if limits:
+            lines.append(
+                "- Budgets: " + ", ".join(f"{key}={value}" for key, value in limits.items())
+            )
+        for omission in extraction.get("omissions") or []:
+            lines.append(f"- Omission: {omission}")
+        for error in extraction.get("errors") or []:
+            lines.append(f"- Note: {error}")
+        lines.append("")
+
+    opkg = document.get("opkg")
+    if opkg:
+        lines += [
+            "## Installed packages",
+            "",
+            f"- Database: `{opkg.get('locator')}`",
+            f"- SHA-256: `{opkg.get('database_sha256')}`",
+            f"- Installed records: {opkg.get('installed')} ({opkg.get('held')} held)",
+            "",
+            "| Package | Version | Architecture | Held | Evidence (bytes) |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for record in opkg.get("records") or []:
+            span = record.get("evidence") or {}
+            lines.append(
+                f"| {_md_cell(record.get('name', ''))} | {_md_cell(record.get('version', ''))} | "
+                f"{_md_cell(record.get('architecture', ''))} | "
+                f"{'yes' if record.get('held') else 'no'} | "
+                f"{span.get('start')}-{span.get('end')} (line {span.get('line')}) |"
+            )
+        lines.append("")
+
+    elf = document.get("elf") or {}
+    if elf.get("records"):
+        lines += [
+            "## ELF records",
+            "",
+            "| Locator | SHA-256 | Class | Machine | Type | PIE | RELRO | NX | Canary |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for record in elf["records"]:
+            hardening = record.get("hardening") or {}
+            nx = hardening.get("stack_executable")
+            lines.append(
+                f"| `{_md_cell(record.get('locator', ''))}` | "
+                f"`{record.get('digest_sha256') or 'not recorded'}` | "
+                f"{record.get('class')} | "
+                f"{record.get('machine_name')} ({record.get('machine')}) | {record.get('type')} | "
+                f"{_tri(hardening.get('pie'))} | {hardening.get('relro')} | "
+                f"{'no' if nx is True else ('yes' if nx is False else 'unknown')} | "
+                f"{_tri(hardening.get('canary'))} |"
+            )
+        lines.append("")
+        for record in elf["records"]:
+            for unknown in record.get("unknown") or []:
+                lines.append(f"- {record.get('locator')}: {unknown}")
+        lines.append("")
+
+    binding = document.get("input_binding")
+    if binding:
+        lines += [
+            "## Input binding",
+            "",
+            f"- Snapshot: `{binding.get('snapshot_path')}` (read-only)",
+            f"- Declared SHA-256: `{binding.get('declared_sha256')}`",
+            f"- Verified SHA-256: `{binding.get('verified_sha256')}`",
+            f"- Original path changed after ingest: "
+            f"{'yes' if binding.get('source_changed') else 'no'}",
+            "",
+        ]
+
+    tree = document.get("tree")
+    if tree:
+        lines += ["## Staged tree", ""]
+        lines.append(f"- Entries: {tree.get('entries')} ({tree.get('by_kind')})")
+        for change in tree.get("changes_during_traversal") or []:
+            lines.append(f"- Changed while catalogued: {change}")
+        declared = tree.get("declared_manifest")
+        if declared:
+            lines.append(
+                f"- Declared manifest: `{declared.get('path')}` "
+                f"(sha256 `{declared.get('sha256')}`, {declared.get('entries')} entries)"
+            )
+            if declared.get("declared_only"):
+                lines.append(f"- Declared but not observed: {', '.join(declared['declared_only'])}")
+            if declared.get("observed_only"):
+                lines.append(
+                    f"- Observed but not declared: {len(declared['observed_only'])} file(s)"
+                )
+        lines.append("")
+
     components = document.get("components") or []
     if components:
         lines += [
             "## Components",
             "",
-            "| Vendor | Product | Version | Source | Method |",
-            "| --- | --- | --- | --- | --- |",
+            "| Vendor | Product | Version | Source | Method | Confidence | Evidence |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
         for component in components:
             lines.append(
@@ -621,7 +1099,9 @@ def render_markdown(document: dict[str, Any]) -> str:
                 f"{_md_cell(component.get('product', ''))} | "
                 f"{_md_cell(component.get('version', ''))} | "
                 f"{_md_cell(component.get('source_file', ''))} | "
-                f"{component.get('source_method')} |"
+                f"{component.get('source_method')} | "
+                f"{component.get('confidence')} | "
+                f"{_md_cell(component.get('evidence') or '')} |"
             )
         lines.append("")
 
@@ -644,6 +1124,15 @@ def render_markdown(document: dict[str, Any]) -> str:
 
 def _count(value: Any) -> str:
     return "unknown" if value is None else str(value)
+
+
+def _tri(value: Any) -> str:
+    """Render a tri-state observation without collapsing unknown into false."""
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
 
 
 def _md_cell(value: str) -> str:
@@ -814,6 +1303,116 @@ def render_html(document: dict[str, Any]) -> str:
         parts.append("<ul>")
         parts.extend(f"<li>{html.escape(str(note))}</li>" for note in entropy.get("notes") or [])
         parts.append("</ul>")
+
+    image_map = document.get("image_map") or {}
+    if image_map.get("nodes"):
+        parts.append("<h2>Image map</h2><table>")
+        parts.append(
+            "<tr><th>ID</th><th>Parent</th><th>Format</th><th>Coordinates</th>"
+            "<th>Offset</th><th>Length</th><th>Extent</th><th>Decoder</th></tr>"
+        )
+        for node in image_map["nodes"]:
+            decoder = str(node.get("decoder") or "")
+            if node.get("decoder_version"):
+                decoder += f" {node['decoder_version']}"
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(str(node.get('artifact_id')))}</td>"
+                f"<td>{html.escape(str(node.get('parent_id') or '—'))}</td>"
+                f"<td>{html.escape(str(node.get('format')))}</td>"
+                f"<td>{html.escape(str(node.get('coordinate_system')))}</td>"
+                f"<td>{html.escape(str(node.get('offset')))}</td>"
+                f"<td>{html.escape(str(node.get('length')))}</td>"
+                f"<td>{html.escape(_count(node.get('extent_bytes')))}</td>"
+                f"<td>{html.escape(decoder)}</td>"
+                "</tr>"
+            )
+        parts.append("</table>")
+
+    extraction = document.get("extraction")
+    if extraction:
+        parts.append("<h2>Extraction</h2><table>")
+        for key in (
+            "state",
+            "worker",
+            "isolation",
+            "worker_image",
+            "worker_digest",
+            "helper_version",
+        ):
+            parts.append(
+                f"<tr><th>{html.escape(key)}</th>"
+                f"<td>{html.escape(str(extraction.get(key)))}</td></tr>"
+            )
+        parts.append("</table>")
+        omissions = extraction.get("omissions") or []
+        if omissions:
+            parts.append("<ul>")
+            parts.extend(f"<li>{html.escape(str(item))}</li>" for item in omissions)
+            parts.append("</ul>")
+
+    opkg = document.get("opkg")
+    if opkg:
+        parts.append("<h2>Installed packages</h2>")
+        parts.append(
+            f"<p>{html.escape(str(opkg.get('installed')))} installed, "
+            f"{html.escape(str(opkg.get('held')))} held, from "
+            f"<code>{html.escape(str(opkg.get('locator')))}</code></p>"
+        )
+        parts.append(
+            "<table><tr><th>Package</th><th>Version</th><th>Architecture</th>"
+            "<th>Held</th><th>Evidence</th></tr>"
+        )
+        for record in opkg.get("records") or []:
+            span = record.get("evidence") or {}
+            parts.append(
+                "<tr>"
+                f"<td>{html.escape(str(record.get('name')))}</td>"
+                f"<td>{html.escape(str(record.get('version')))}</td>"
+                f"<td>{html.escape(str(record.get('architecture')))}</td>"
+                f"<td>{'yes' if record.get('held') else 'no'}</td>"
+                f"<td>{html.escape(str(span.get('start')))}-"
+                f"{html.escape(str(span.get('end')))}</td>"
+                "</tr>"
+            )
+        parts.append("</table>")
+
+    elf = document.get("elf") or {}
+    if elf.get("records"):
+        parts.append("<h2>ELF records</h2><table>")
+        parts.append(
+            "<tr><th>Locator</th><th>Class</th><th>Machine</th><th>Type</th>"
+            "<th>PIE</th><th>RELRO</th><th>NX</th><th>Canary</th></tr>"
+        )
+        for record in elf["records"]:
+            hardening = record.get("hardening") or {}
+            stack = hardening.get("stack_executable")
+            parts.append(
+                "<tr>"
+                f"<td><code>{html.escape(str(record.get('locator')))}</code></td>"
+                f"<td>{html.escape(str(record.get('class')))}</td>"
+                f"<td>{html.escape(str(record.get('machine_name')))}</td>"
+                f"<td>{html.escape(str(record.get('type')))}</td>"
+                f"<td>{_tri(hardening.get('pie'))}</td>"
+                f"<td>{html.escape(str(hardening.get('relro')))}</td>"
+                f"<td>{'no' if stack is True else ('yes' if stack is False else 'unknown')}</td>"
+                f"<td>{_tri(hardening.get('canary'))}</td>"
+                "</tr>"
+            )
+        parts.append("</table>")
+
+    binding = document.get("input_binding")
+    if binding:
+        parts.append("<h2>Input binding</h2><table>")
+        parts.append(
+            f"<tr><th>Snapshot</th><td><code>"
+            f"{html.escape(str(binding.get('snapshot_path')))}</code></td></tr>"
+            f"<tr><th>Declared SHA-256</th><td><code>"
+            f"{html.escape(str(binding.get('declared_sha256')))}</code></td></tr>"
+            f"<tr><th>Source changed after ingest</th>"
+            f"<td>{'yes' if binding.get('source_changed') else 'no'}</td></tr>"
+        )
+        parts.append("</table>")
 
     legacy = document.get("legacy_grade") or document.get("risk_score")
     if legacy:

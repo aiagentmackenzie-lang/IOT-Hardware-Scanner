@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 
 from iot_hardware_scanner.config import ScannerConfig
@@ -38,6 +40,7 @@ from iot_hardware_scanner.models import (
     EntropyProfile,
     EntropyRegion,
 )
+from iot_hardware_scanner.scanner.bounded_reader import SampleWindow, open_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +102,12 @@ class EntropyAnalyzer:
         if not data:
             return self._empty_profile(Path(""), block_size)
 
+        blocks = self._blocks_from_windows(
+            [SampleWindow(offset=0, length=len(data), data=data)], block_size
+        )
         return self._profile(
             firmware_path=Path(""),
-            ranges=[(0, data)],
+            blocks=blocks,
             block_size=block_size,
             sampled=False,
             input_size=len(data),
@@ -110,46 +116,57 @@ class EntropyAnalyzer:
     def analyze_file(self, path: Path, block_size: int | None = None) -> EntropyProfile:
         """Measure entropy over a file, sampling only when it exceeds the budget.
 
-        A sampled measurement keeps the original offset of every window and is
-        labelled ``bytes_sampled=True``; it is never presented as whole-input.
+        The pass streams the file through :class:`BoundedReader`, so resident
+        memory depends on the window size, not on the input size. Every window
+        keeps its **original** offset; a sampled pass reads three widely separated
+        spans with a stride, so the gaps stay gaps and no region is joined across
+        one.
         """
-        path = Path(path)
-        size = path.stat().st_size
+        reader = open_bounded(Path(path))
+        size = reader.size
         effective_block = block_size
         if effective_block is None:
             effective_block = self._auto_block_size(size)
         self.validate_block_size(effective_block)
 
         if size == 0:
-            profile = self._empty_profile(path, effective_block)
-            return profile
+            return self._empty_profile(Path(path), effective_block)
 
         max_bytes = self.config.max_entropy_scan_size_mb * 1024 * 1024
-        ranges: list[tuple[int, bytes]] = []
-
-        with path.open("rb") as handle:
-            if size <= max_bytes:
-                ranges.append((0, handle.read()))
-                sampled = False
-            else:
-                window = max_bytes // 3
-                starts = [0, max(0, size // 2 - window // 2), max(0, size - window)]
-                seen: set[int] = set()
-                for start in starts:
-                    if start in seen:
-                        continue
-                    seen.add(start)
-                    handle.seek(start)
-                    ranges.append((start, handle.read(window)))
-                sampled = True
-                logger.warning(
-                    "Entropy sampling: read %d of %d bytes in %d window(s)",
-                    sum(len(chunk) for _start, chunk in ranges),
-                    size,
-                    len(ranges),
+        if size <= max_bytes:
+            blocks = self._blocks_from_windows(
+                reader.iter_windows(effective_block), effective_block
+            )
+            sampled = False
+        else:
+            span = max(max_bytes // 3, effective_block)
+            starts = [0, max(0, size // 2 - span // 2), max(0, size - span)]
+            # Blocks are built as the windows arrive: the windows themselves are
+            # not retained, so a sampled pass over a huge file costs one window of
+            # resident memory rather than the whole sampled span.
+            blocks = []
+            for start in dict.fromkeys(starts):
+                blocks.extend(
+                    self._blocks_from_windows(
+                        reader.iter_windows(effective_block, budget=span, start=start),
+                        effective_block,
+                    )
                 )
+            sampled = True
+            logger.warning(
+                "Entropy sampling: read %d of %d bytes in %d window(s)",
+                sum(block.length for block in blocks),
+                size,
+                len(blocks),
+            )
 
-        return self._profile(path, ranges, effective_block, sampled, size)
+        return self._profile(
+            firmware_path=Path(path),
+            blocks=blocks,
+            block_size=effective_block,
+            sampled=sampled,
+            input_size=size,
+        )
 
     def find_high_entropy_regions(
         self, profile: EntropyProfile, threshold: float = 7.2
@@ -167,34 +184,39 @@ class EntropyAnalyzer:
     # Internals
     # ──────────────────────────────────────────
 
-    def _profile(
-        self,
-        firmware_path: Path,
-        ranges: list[tuple[int, bytes]],
-        block_size: int,
-        sampled: bool,
-        input_size: int,
-    ) -> EntropyProfile:
+    def _blocks_from_windows(
+        self, windows: Iterable[SampleWindow], block_size: int
+    ) -> list[EntropyBlock]:
+        """Turn bounded windows into entropy blocks, keeping their coordinates."""
         blocks: list[EntropyBlock] = []
-        combined: dict[int, int] = {}
-        total_bytes = 0
-
-        for start, data in ranges:
-            offset = start
-            for chunk_start in range(0, len(data), block_size):
-                chunk = data[chunk_start : chunk_start + block_size]
+        for window in windows:
+            for chunk_start in range(0, window.length, block_size):
+                chunk = window.data[chunk_start : chunk_start + block_size]
                 entropy, distribution = self._shannon_entropy(chunk)
                 blocks.append(
                     EntropyBlock(
-                        offset=offset + chunk_start,
+                        offset=window.offset + chunk_start,
                         entropy=round(entropy, 4),
                         byte_distribution=distribution,
                         length=len(chunk),
                     )
                 )
-                total_bytes += len(chunk)
-                for byte, count in distribution.items():
-                    combined[byte] = combined.get(byte, 0) + count
+        return blocks
+
+    def _profile(
+        self,
+        firmware_path: Path,
+        blocks: list[EntropyBlock],
+        block_size: int,
+        sampled: bool,
+        input_size: int,
+    ) -> EntropyProfile:
+        combined: dict[int, int] = {}
+        total_bytes = 0
+        for block in blocks:
+            total_bytes += block.length
+            for byte, count in block.byte_distribution.items():
+                combined[byte] = combined.get(byte, 0) + count
 
         regions = self._classify_regions(blocks)
 
@@ -256,9 +278,9 @@ class EntropyAnalyzer:
         if not data:
             return 0.0, {}
 
-        distribution: dict[int, int] = {}
-        for byte in data:
-            distribution[byte] = distribution.get(byte, 0) + 1
+        # ``Counter`` over the bytes object runs its accumulation loop in C; a
+        # Python byte loop here costs about a minute per gibibyte.
+        distribution: dict[int, int] = dict(Counter(data))
 
         length = len(data)
         entropy = 0.0

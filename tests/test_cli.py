@@ -30,12 +30,22 @@ class TestEntrypointBasics:
     def test_version_is_major_2(self) -> None:
         code, output = _run(["--version"])
         assert code == 0
-        assert "2.0.0" in output
+        assert "2.1.0" in output
 
     def test_scan_help_documents_the_contract(self) -> None:
         code, output = _run(["scan", "--help"])
         assert code == 0
-        for flag in ("--output", "--format", "--out", "--offline", "--profile", "--config"):
+        for flag in (
+            "--output",
+            "--format",
+            "--out",
+            "--offline",
+            "--profile",
+            "--config",
+            "--input-tree",
+            "--build-manifest",
+            "--worker",
+        ):
             assert flag in output
 
 
@@ -75,14 +85,19 @@ class TestOpaqueInput:
             ]
         )
 
-        # A required dependency (an extraction backend) is missing: exit 5.
-        assert code == 5
+        # Unsupported input: 4,096 zero bytes are neither a gzip wrapper nor a
+        # SquashFS filesystem. That is incomplete analysis (exit 4), not a
+        # missing dependency -- no backend would make this image decodable.
+        assert code == 4
         assert destination.is_file()
 
         document = json.loads(destination.read_text())
-        assert document["schema_version"] == 2
+        assert document["schema_version"] == 3
         assert document["assessment"]["completion"] == "INCOMPLETE"
-        assert document["assessment"]["missing_required_dependencies"]
+        assert not document["assessment"]["missing_required_dependencies"]
+        assert any(
+            "not decodable" in reason for reason in document["assessment"]["incomplete_reasons"]
+        )
         assert document["findings"] == []
         # The retired grade must not appear for a new scan.
         assert document["risk_score"] is None
@@ -377,3 +392,19 @@ class TestAmbientRulesDoNotChangeVerdicts:
             os.chdir(previous)
         assert code in (4, 5)
         assert "ambient" not in output
+
+
+class TestExtractCommand:
+    """`extract` decodes an image without analysing it."""
+
+    def test_unsupported_input_is_incomplete_not_a_dependency(self, blank_image: Path) -> None:
+        code, output = _run(["extract", str(blank_image)])
+        assert code == 4
+        assert "not a decodable" in output
+
+    def test_missing_worker_is_exit_5(self, reference_image: Path, tmp_path: Path) -> None:
+        code, output = _run(
+            ["extract", str(reference_image), "--output", str(tmp_path / "out"), "--worker", "none"]
+        )
+        assert code == 5
+        assert "UNAVAILABLE" in output

@@ -41,6 +41,13 @@ class FirmwarePathTraversalError(ScannerError):
     exit_code = 3
 
 
+class InputKindError(ScannerError):
+    """The input is the wrong kind for the selected profile (e.g. a directory
+    handed to the image profile)."""
+
+    exit_code = 3
+
+
 class ExtractionFailedError(ScannerError):
     """Extraction failed: the root filesystem was never reached."""
 

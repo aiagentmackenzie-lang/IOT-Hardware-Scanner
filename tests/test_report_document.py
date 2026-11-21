@@ -43,7 +43,7 @@ def scanned_document(tmp_path: Path, opaque_image: Path) -> dict:
 
 class TestDocumentShape:
     def test_schema_version(self, scanned_document: dict) -> None:
-        assert scanned_document["schema_version"] == 2
+        assert scanned_document["schema_version"] == 3
 
     def test_assessment_findings_and_controls_are_separate(self, scanned_document: dict) -> None:
         assert "assessment" in scanned_document
@@ -147,7 +147,7 @@ class TestWrites:
 class TestLegacyReplay:
     def test_findings_are_lifted_from_v1_sections(self, legacy_v1_document: dict) -> None:
         document = load_document(legacy_v1_document)
-        assert document["schema_version"] == 2
+        assert document["schema_version"] == 3
         assert len(document["findings"]) == 1
         assert document["findings"][0]["severity"] == "HIGH"
 

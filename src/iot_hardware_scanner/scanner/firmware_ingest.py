@@ -10,6 +10,7 @@ SDR §7 — Core Infrastructure & Firmware Ingestion
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import uuid
@@ -25,10 +26,12 @@ from iot_hardware_scanner.exceptions import (
     FirmwareUnreadableError,
 )
 from iot_hardware_scanner.models import (
+    DeclaredManifest,
     FirmwareMetadata,
     FirmwareSizeCategory,
     InputKind,
     ScanContext,
+    TreeManifestEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,16 +186,21 @@ class FirmwareIngest:
         )
         return context
 
-    def ingest_tree(self, tree_path: Path) -> ScanContext:
+    def ingest_tree(self, tree_path: Path, *, build_manifest: Path | None = None) -> ScanContext:
         """Catalog an already-staged directory as the inspected artifact.
 
         The artifact identity is a canonical tree-manifest digest: SHA-256 over
         sorted ``<relative path>\\0<file sha256>\\n`` lines, so the same tree
         yields the same digest on any host regardless of enumeration order.
 
-        Metadata is host-derived. Ownership and permission bits are recorded as
-        they appear on this host, not as the build declared them; callers must
-        treat them as host observations.
+        Ownership and permission bits are recorded as they appear on **this
+        host**, not as the build declared them, unless the operator supplies a
+        build manifest, in which case the declared values are used and the
+        source is recorded as ``declared``. A tree that changes while it is
+        being catalogued is reported, not silently re-washed.
+
+        Returns:
+            ScanContext populated with a deterministic per-entry manifest.
         """
         original_path = Path(tree_path)
         if "\x00" in str(original_path):
@@ -203,27 +211,103 @@ class FirmwareIngest:
             raise FirmwareNotFoundError(f"Not a directory: {original_path}")
 
         resolved = original_path.resolve()
-        entries: list[tuple[str, str]] = []
+        entries: list[TreeManifestEntry] = []
+        changes: list[str] = []
+        inodes: dict[tuple[int, int], str] = {}
         total_size = 0
-        for entry in sorted(resolved.rglob("*")):
-            if entry.is_symlink() or not entry.is_file():
+
+        for entry in sorted(resolved.rglob("*"), key=lambda p: p.relative_to(resolved).as_posix()):
+            relative = entry.relative_to(resolved).as_posix()
+            if entry.is_symlink():
+                entries.append(
+                    TreeManifestEntry(
+                        relative_path=relative,
+                        kind="symlink",
+                        link_target=str(entry.readlink()),
+                        metadata_source="host",
+                    )
+                )
+                continue
+            if not entry.is_file():
                 continue
             try:
+                before = entry.lstat()
                 digest, _md5 = self._compute_hashes(entry)
+                after = entry.lstat()
             except (OSError, PermissionError) as exc:
                 logger.warning("Cannot read %s: %s", entry, exc)
+                changes.append(f"{relative}: could not be read ({exc})")
                 continue
-            entries.append((str(entry.relative_to(resolved)), digest))
-            total_size += entry.stat().st_size
+            if (before.st_size, before.st_mtime_ns, before.st_ino) != (
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ino,
+            ):
+                changes.append(
+                    f"{relative}: changed while being catalogued "
+                    f"({before.st_size} -> {after.st_size} bytes)"
+                )
+            total_size += after.st_size
+            key = (after.st_dev, after.st_ino)
+            group = inodes.get(key)
+            if group is not None and after.st_nlink > 1:
+                entries.append(
+                    TreeManifestEntry(
+                        relative_path=relative,
+                        kind="hardlink",
+                        size=after.st_size,
+                        sha256=digest,
+                        mode=after.st_mode,
+                        uid=after.st_uid,
+                        gid=after.st_gid,
+                        metadata_source="host",
+                        hardlink_group=group,
+                        link_target=group,
+                    )
+                )
+                continue
+            if after.st_nlink > 1:
+                inodes[key] = relative
+            entries.append(
+                TreeManifestEntry(
+                    relative_path=relative,
+                    kind="file",
+                    size=after.st_size,
+                    sha256=digest,
+                    mode=after.st_mode,
+                    uid=after.st_uid,
+                    gid=after.st_gid,
+                    metadata_source="host",
+                    hardlink_group=relative if after.st_nlink > 1 else None,
+                )
+            )
 
         if not entries:
             raise FirmwareEmptyError(f"Tree contains no regular files: {resolved}")
 
-        manifest = "".join(f"{rel}\0{digest}\n" for rel, digest in entries)
+        manifest = "".join(
+            f"{entry.relative_path}\0{entry.sha256}\n"
+            for entry in entries
+            if entry.kind in ("file", "hardlink")
+        )
         tree_digest = hashlib.sha256(manifest.encode("utf-8", "surrogateescape")).hexdigest()
         md5 = hashlib.md5(
             manifest.encode("utf-8", "surrogateescape"), usedforsecurity=False
         ).hexdigest()
+
+        declared = self._load_build_manifest(build_manifest, entries) if build_manifest else None
+        if declared is not None:
+            for record in entries:
+                values = declared.entries.get(record.relative_path)
+                if values is None:
+                    continue
+                if isinstance(values.get("mode"), int):
+                    record.mode = int(values["mode"])
+                if isinstance(values.get("uid"), int):
+                    record.uid = int(values["uid"])
+                if isinstance(values.get("gid"), int):
+                    record.gid = int(values["gid"])
+                record.metadata_source = "declared"
 
         scan_id = str(uuid.uuid4())
         context = ScanContext(
@@ -233,20 +317,68 @@ class FirmwareIngest:
             file_hash_sha256=tree_digest,
             file_hash_md5=md5,
             file_size=total_size,
-            file_type=f"Staged root tree ({len(entries)} files)",
+            file_type=f"Staged root tree ({len(entries)} entries)",
             firmware_name=resolved.name,
             size_category=self._classify_size(total_size),
             started_at=datetime.now(timezone.utc),
             input_kind=InputKind.TREE,
             input_manifest_entries=len(entries),
+            tree_manifest=entries,
+            tree_changes=changes,
+            declared_manifest=declared,
         )
         logger.info(
-            "Tree ingestion complete: %s (%d files, digest %s)",
+            "Tree ingestion complete: %s (%d entries, digest %s, %d change(s))",
             resolved.name,
             len(entries),
             tree_digest,
+            len(changes),
         )
         return context
+
+    def _load_build_manifest(
+        self, manifest_path: Path, entries: list[TreeManifestEntry]
+    ) -> DeclaredManifest:
+        """Read a build manifest of declared ownership/permissions.
+
+        Accepted shape::
+
+            {"entries": {"etc/shadow": {"mode": 416, "uid": 0, "gid": 0}}}
+
+        A flat ``{path: {...}}`` mapping is also accepted. Keys may be written
+        with a leading ``./`` or ``/``. The declaration's own digest is recorded
+        so a report can name the document it compared against.
+        """
+        manifest_path = Path(manifest_path)
+        if not manifest_path.is_file():
+            raise FirmwareNotFoundError(f"Build manifest not found: {manifest_path}")
+        digest, _md5 = self._compute_hashes(manifest_path)
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise FirmwarePathTraversalError(
+                f"Build manifest {manifest_path} is not readable JSON: {exc}"
+            ) from exc
+        raw = payload.get("entries", payload) if isinstance(payload, dict) else None
+        if not isinstance(raw, dict):
+            raise FirmwarePathTraversalError(
+                f"Build manifest {manifest_path} has no entries mapping"
+            )
+        declared: dict[str, dict] = {}
+        for key, values in raw.items():
+            if not isinstance(values, dict):
+                continue
+            declared[_normalise_manifest_path(str(key))] = values
+
+        observed = {entry.relative_path for entry in entries if entry.kind in ("file", "hardlink")}
+        return DeclaredManifest(
+            path=manifest_path.resolve(),
+            sha256=digest,
+            entries=declared,
+            entry_count=len(declared),
+            declared_only=sorted(set(declared) - observed),
+            observed_only=sorted(observed - set(declared)),
+        )
 
     def get_metadata(self, firmware_path: Path) -> FirmwareMetadata:
         """Extract metadata without creating a full ScanContext.
@@ -411,3 +543,10 @@ class FirmwareIngest:
         output_dir = base / f"scan-{timestamp}-{short_id}"
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
+
+
+def _normalise_manifest_path(path: str) -> str:
+    """Strip a leading ``./`` or ``/`` so declared and observed keys match."""
+    while path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")

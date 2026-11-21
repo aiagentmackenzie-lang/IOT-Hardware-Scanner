@@ -343,11 +343,22 @@ class TestControl9AttackSurface:
         assert control.result == "REVIEW"
         assert control.status is CheckStatus.PERFORMED
 
-    def test_clear_tree_passes_with_evidence(self, evaluator, context, tmp_path) -> None:
-        context.filesystem_inventory = inventory(tmp_path)
+    def test_clear_tree_passes_with_image_metadata(self, evaluator, context, tmp_path) -> None:
+        """A clean result requires permission bits that came from the image."""
+        context.filesystem_inventory = inventory(tmp_path, metadata_source="image")
         control = by_id(evaluator.evaluate(context), 9)
         assert control.result == "PASS"
         assert control.evidence
+
+    def test_host_derived_permissions_cannot_pass(self, evaluator, context, tmp_path) -> None:
+        """A staged tree's host metadata cannot establish a clean permission state."""
+        context.filesystem_inventory = inventory(
+            tmp_path, metadata_source="host", permission_unknown_count=3
+        )
+        control = by_id(evaluator.evaluate(context), 9)
+        assert control.result == "UNKNOWN"
+        assert control.status is CheckStatus.INCONCLUSIVE
+        assert any("host-derived" in item for item in control.evidence)
 
 
 class TestControl12Inventory:

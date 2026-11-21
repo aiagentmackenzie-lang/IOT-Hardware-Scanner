@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from iot_hardware_scanner.config import ScannerConfig
+from iot_hardware_scanner.models import FileCategory, FilesystemFinding, FilesystemInventory
 from iot_hardware_scanner.scanner.credential_scanner import CredentialScanner
 from iot_hardware_scanner.scanner.unix_cred_parser import (
     STATE_ABSENT,
@@ -172,3 +173,47 @@ class TestFindingsFromAccounts:
         scanner = self._scanner()
         scanner.scan_unix_accounts(None, root=tmp_path)
         assert scanner.last_account_pairs == 1
+
+
+class TestRootQualifiedLocators:
+    """The scanner's own inventories carry root-qualified locators (slice 2B)."""
+
+    def test_account_database_is_found_behind_a_root_prefix(
+        self, config: ScannerConfig, tmp_path: Path
+    ) -> None:
+        scanner = CredentialScanner(config)
+        root = tmp_path / "rootfs"
+        (root / "etc").mkdir(parents=True)
+        (root / "etc" / "passwd").write_text(
+            "root:x:0:0:root:/root:/bin/ash\nuser::1000:1000:user:/home/user:/bin/ash\n"
+        )
+        (root / "etc" / "shadow").write_text(
+            "root:!$6$salt$hash:19000:0:99999:7:::\nuser::19000:0:99999:7:::\n"
+        )
+        finding = FilesystemFinding(
+            path=Path("rootfs/etc/passwd"),
+            absolute_path=root / "etc" / "passwd",
+            category=FileCategory.CRITICAL_CREDENTIAL,
+            file_type="ASCII text",
+            file_size=40,
+            permissions="rw-r--r--",
+            owner_uid=0,
+            owner_gid=0,
+            is_suid=False,
+            is_world_writable=False,
+            hash_sha256="",
+            root_id="rootfs",
+        )
+        inventory = FilesystemInventory(
+            rootfs_path=root,
+            total_files=1,
+            findings=[finding],
+            categories={FileCategory.CRITICAL_CREDENTIAL: [finding]},
+            shadow_files=[finding],
+        )
+
+        findings = scanner.scan_unix_accounts(inventory)
+
+        assert scanner.last_account_pairs == 1
+        assert any(f.rule_id == "credential.unix.empty_password" for f in findings)
+        assert any("rootfs/etc/shadow" in str(f.file_path) for f in findings)

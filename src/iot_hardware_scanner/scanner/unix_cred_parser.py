@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from iot_hardware_scanner.models import PasswdEntry, Severity, ShadowEntry
+from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 
 logger = logging.getLogger(__name__)
 
@@ -82,18 +83,36 @@ def _classify_password_field(field: str) -> str:
 
 
 class UnixCredentialParser:
-    """Parse /etc/passwd and /etc/shadow, with line provenance."""
+    """Parse /etc/passwd and /etc/shadow, with line provenance.
+
+    Reads are bounded by ``max_bytes``. A database larger than that is reported
+    as unreadable rather than half-parsed, because a partial account list would
+    understate who can log in.
+    """
+
+    def __init__(self, *, max_bytes: int = 8 * 1024 * 1024) -> None:
+        self.max_bytes = max_bytes
+
+    def _read_lines(self, path: Path) -> list[tuple[int, str]] | None:
+        """``(line number, text)`` pairs from a bounded read, or ``None``."""
+        try:
+            reader = open_bounded(Path(path))
+            return [
+                (line.number, line.text)
+                for line in reader.iter_lines(budget=self.max_bytes, encoding="utf-8")
+            ]
+        except (OSError, ValueError):
+            return None
 
     def parse_passwd(self, path: Path) -> list[PasswdEntry]:
         """Parse /etc/passwd format: ``username:x:uid:gid:gecos:home:shell``."""
         entries: list[PasswdEntry] = []
 
-        try:
-            content = path.read_text(errors="ignore")
-        except (OSError, PermissionError):
+        lines = self._read_lines(path)
+        if lines is None:
             return entries
 
-        for line_no, raw in enumerate(content.splitlines(), start=1):
+        for line_no, raw in lines:
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
@@ -131,12 +150,11 @@ class UnixCredentialParser:
         entries: list[ShadowEntry] = []
         now_days = int(time.time() // 86400)
 
-        try:
-            content = path.read_text(errors="ignore")
-        except (OSError, PermissionError):
+        lines = self._read_lines(path)
+        if lines is None:
             return entries
 
-        for line_no, raw in enumerate(content.splitlines(), start=1):
+        for line_no, raw in lines:
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue

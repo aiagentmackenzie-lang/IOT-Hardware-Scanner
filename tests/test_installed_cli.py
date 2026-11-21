@@ -21,65 +21,18 @@ fixtures are generated locally.
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_SRC = REPO_ROOT / "src" / "iot_hardware_scanner"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness import REPO_ROOT, Runner, make_tree
+
 PASSWD = "root:x:0:0:root:/root:/bin/ash\nuser:x:1000:1000:user:/home/user:/bin/ash\n"
 SHADOW_LOCKED = "root:!$6$salt$hash:19000:0:99999:7:::\nuser:$6$salt$hash:19000:0:99999:7:::\n"
-
-
-class Runner:
-    """Invoke the scanner the way a user would, from an unrelated directory."""
-
-    def __init__(self, argv_prefix: list[str], env_extra: dict[str, str], mode: str) -> None:
-        self.argv_prefix = argv_prefix
-        self.env_extra = env_extra
-        self.mode = mode
-
-    def __call__(self, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-        env = {
-            "PATH": f"{os.path.dirname(sys.executable)}:/usr/bin:/bin",
-            "HOME": str(cwd),
-            **self.env_extra,
-        }
-        return subprocess.run(
-            [*self.argv_prefix, *args],
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-
-
-@pytest.fixture(scope="session")
-def runner(tmp_path_factory: pytest.TempPathFactory) -> Runner:
-    installed = os.environ.get("IHS_INSTALLED_CLI")
-    if installed:
-        return Runner([installed], {}, "wheel")
-
-    site = tmp_path_factory.mktemp("relocated-site")
-    shutil.copytree(PACKAGE_SRC, site / "iot_hardware_scanner")
-    env = {
-        "PYTHONPATH": str(site),
-        "PYTHONNOUSERSITE": "1",
-    }
-    return Runner([sys.executable, "-m", "iot_hardware_scanner"], env, "relocated-copy")
-
-
-def make_tree(root: Path, shadow: str) -> Path:
-    (root / "etc").mkdir(parents=True, exist_ok=True)
-    (root / "etc" / "passwd").write_text(PASSWD)
-    (root / "etc" / "shadow").write_text(shadow)
-    return root
 
 
 class TestObservedFailuresStayFixed:
@@ -158,7 +111,7 @@ class TestBothEntrypoints:
     def test_module_entrypoint_prints_version(self, runner: Runner, tmp_path: Path) -> None:
         result = runner(["--version"], cwd=tmp_path)
         assert result.returncode == 0
-        assert "2.0.0" in result.stdout
+        assert "2.1.0" in result.stdout
 
     def test_credentials_profile_runs_end_to_end(self, runner: Runner, tmp_path: Path) -> None:
         tree = make_tree(tmp_path / "rootfs", SHADOW_LOCKED)
@@ -180,12 +133,16 @@ class TestBothEntrypoints:
                 "json",
                 "--out",
                 str(destination),
+                # Turn the worker off explicitly: this is the partial-report case
+                # that must keep working, and it must name the dependency.
+                "--worker",
+                "none",
             ],
             cwd=tmp_path,
         )
 
         assert destination.is_file(), result.stderr
-        assert result.returncode in (4, 5), result.stdout
+        assert result.returncode == 5, result.stdout
         document = json.loads(destination.read_text())
         assert (
             document["artifact"]["sha256"]

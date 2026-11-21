@@ -60,7 +60,7 @@ class TestCollectBootEvidence:
         respawn = [e for e in evidence if e.action == "respawn"]
         assert len(respawn) == 1
         assert respawn[0].configured is True
-        assert respawn[0].source == "etc/inittab"
+        assert respawn[0].source == "rootfs/etc/inittab"
         assert respawn[0].line_number == 2
         assert respawn[0].program == "/usr/sbin/sshd -D"
 
@@ -132,7 +132,7 @@ class TestEvidenceReachesTheControlAndTheReport:
         orchestrator._phase_controls(ctx, advisory_assessed=False)
 
         document = build_document(ctx, version=__version__)
-        assert document["inventory"]["boot_evidence"][0]["source"] == "etc/inittab"
+        assert document["inventory"]["boot_evidence"][0]["source"] == "rootfs/etc/inittab"
 
         markdown = render(document, "markdown")
         assert "etc/inittab" in markdown

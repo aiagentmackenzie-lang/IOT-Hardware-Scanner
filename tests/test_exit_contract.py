@@ -45,7 +45,7 @@ def assessment(
 ) -> Assessment:
     return Assessment(
         profile="firmware-static",
-        profile_version="2.0",
+        profile_version="3.0",
         completion=completion,
         incomplete_reasons=reasons or [],
         missing_required_dependencies=deps or [],

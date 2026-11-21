@@ -18,6 +18,13 @@ concurrency:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  #: Pinned extraction worker. Bump together with worker/Dockerfile and the
+  #: scanner's default `worker_image` setting.
+  IHS_WORKER_IMAGE: ihs-squashfs-worker:4.5.1
+  #: Pinned OpenWrt qualification corpus.
+  IHS_REFERENCE_FILE: openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
+  IHS_REFERENCE_SHA256: 8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02
+  IHS_REFERENCE_URL: https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/
 
 jobs:
   python-gate:
@@ -106,6 +113,10 @@ jobs:
           assert "extraction" not in extras, "the broken extraction extra is back"
           assert "sbom" not in extras, "the sbom extra has no implementation"
           assert {"nvd", "yaml-support"} <= extras
+          # The ELF reader must ship: it is the only path that reads target
+          # structure, and a wheel without it silently inventories nothing.
+          requires = metadata.lower()
+          assert "pyelftools" in requires, "pyelftools is missing from the wheel metadata"
           PY
 
       - name: Acceptance harness against the installed console script
@@ -130,14 +141,15 @@ jobs:
           python -c "
           import json
           d = json.load(open('requested.json'))
-          assert d['schema_version'] == 2
+          assert d['schema_version'] == 3
           assert d['assessment']['completion'] == 'INCOMPLETE'
           assert d['risk_score'] is None
           print('blank image: exit', $status, '->', d['outcome']['exit_reason'])
           "
 
   # ---------------------------------------------------------------------------
-  # Report-contract job: schema, replay and renderer equivalence.
+  # Report-contract job: schema, replay, renderer equivalence and the v2 -> v3
+  # migration.
   # ---------------------------------------------------------------------------
   report-contract:
     name: Report schema and replay
@@ -153,11 +165,13 @@ jobs:
       - name: Exit precedence and document contract
         run: |
           pytest tests/test_exit_contract.py tests/test_report_document.py \
-                 tests/test_cli.py -v
+                 tests/test_report_schema3.py tests/test_cli.py -v
 
   # ---------------------------------------------------------------------------
-  # Reference-image job. Fetches the pinned image in its own step, verifies the
-  # publisher digest, and only then scans it -- the scan itself stays offline.
+  # Reference-image job, backend absent. Fetches the pinned image in its own
+  # step, verifies the publisher digest, and only then scans it -- the scan
+  # itself stays offline. This is Milestone B row 2: the worker is off, the
+  # report is useful, the dependency is named, the exit is 5.
   # Set the repository variable IHS_REFERENCE_IMAGE_ENABLED=false to skip.
   # ---------------------------------------------------------------------------
   reference-image:
@@ -171,12 +185,73 @@ jobs:
           python-version: '3.12'
       - name: Stage the pinned image
         run: |
-          curl -fsSLO https://downloads.openwrt.org/releases/24.10.0/targets/armsr/armv8/openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
-          echo "8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02  openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz" | sha256sum -c -
+          curl -fsSLO "$IHS_REFERENCE_URL$IHS_REFERENCE_FILE"
+          echo "$IHS_REFERENCE_SHA256  $IHS_REFERENCE_FILE" | sha256sum -c -
       - run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      - name: Qualify the reference image
+      - name: Qualify the reference image without a worker
         env:
-          IHS_REFERENCE_IMAGE: ${{ github.workspace }}/openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
-        run: pytest tests/test_installed_cli.py -k openwrt -v
+          IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
+        run: |
+          pytest tests/test_installed_cli.py -k openwrt -v
+          pytest tests/test_installed_image_cli.py -v \
+            -k "WorkerOff or ReplacedBuildOutput or snapshot_stays_in_use"
+
+  # ---------------------------------------------------------------------------
+  # MILESTONE B QUALIFIED GATE. This is the only job with the real extraction
+  # path: a pinned worker image built here, the installed wheel, the pinned
+  # corpus, and every acceptance row of the milestone. A skip in this job means
+  # the capability is unqualified, so the job fails on skips.
+  # ---------------------------------------------------------------------------
+  linux-extractor:
+    name: Linux extractor (worker image, acceptance rows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Build the pinned worker image
+        run: |
+          docker build -t "$IHS_WORKER_IMAGE" worker/
+          echo "worker image id: $(docker image inspect --format '{{.Id}}' "$IHS_WORKER_IMAGE")"
+          docker run --rm --entrypoint unsquashfs "$IHS_WORKER_IMAGE" -version
+
+      - name: Stage the pinned image
+        run: |
+          curl -fsSLO "$IHS_REFERENCE_URL$IHS_REFERENCE_FILE"
+          echo "$IHS_REFERENCE_SHA256  $IHS_REFERENCE_FILE" | sha256sum -c -
+
+      - name: Build the wheel and install it outside the checkout
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+          sha256sum dist/*.whl
+          python -m venv /tmp/ihs-venv
+          /tmp/ihs-venv/bin/pip install --upgrade pip
+          /tmp/ihs-venv/bin/pip install dist/*.whl
+          /tmp/ihs-venv/bin/pip install pytest
+
+      - name: Milestone B acceptance rows (reference image, worker image)
+        env:
+          IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
+          IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
+        run: |
+          # `-rfs` lists every skip reason. In this job a skip means the
+          # capability is unqualified, so the next step fails the gate on it.
+          set -o pipefail
+          /tmp/ihs-venv/bin/python -m pytest \
+            tests/test_installed_image_cli.py tests/test_elf_parser.py \
+            -v -rfs 2>&1 | tee /tmp/gate.log
+
+      - name: No skips in the qualified gate
+        if: always()
+        run: |
+          if grep -qE "[0-9]+ skipped" /tmp/gate.log; then
+            echo "a skip leaves that capability unqualified; the release gate fails"
+            grep -E "SKIPPED|skipped" /tmp/gate.log || true
+            exit 1
+          fi

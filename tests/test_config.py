@@ -60,10 +60,13 @@ class TestConfigValidation:
             ScannerConfig(max_file_size_mb=99999)
 
     def test_extraction_timeout_range(self) -> None:
+        # A short deadline is a legitimate operator choice (the worker is killed
+        # and the analysis reported incomplete); zero or a runaway value is not.
         with pytest.raises(ValueError):
-            ScannerConfig(extraction_timeout_seconds=5)
+            ScannerConfig(extraction_timeout_seconds=4)
         with pytest.raises(ValueError):
             ScannerConfig(extraction_timeout_seconds=9999)
+        assert ScannerConfig(extraction_timeout_seconds=5).extraction_timeout_seconds == 5
 
 
 class TestConfigFromYaml:

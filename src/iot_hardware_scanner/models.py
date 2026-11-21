@@ -250,13 +250,31 @@ class ScanContext:
 
     # Populated by the orchestrator: what ran, what did not, and why
     profile: str = "firmware-static"
-    profile_version: str = "2.0"
+    profile_version: str = "3.0"
     stages: list[StageResult] = field(default_factory=list)
     assessment: Assessment | None = None
+
+    # Populated by Phase 1 (slice 2D): the verified private copy every later
+    # read is bound to, and the deterministic manifest of a staged tree.
+    input_snapshot: InputSnapshot | None = None
+    tree_manifest: list[TreeManifestEntry] = field(default_factory=list)
+    declared_manifest: DeclaredManifest | None = None
+    #: Entries that changed while the tree was being catalogued.
+    tree_changes: list[str] = field(default_factory=list)
+    #: Set when the input could not be bound to a verified snapshot (2D). The
+    #: scan is then reported as incomplete and no further bytes are read.
+    input_binding_error: str | None = None
 
     # Populated by Phase 2
     extracted_rootfs: Path | None = None
     extraction_result: ExtractionResult | None = None
+    extraction_provenance: ExtractionProvenance | None = None
+
+    # Populated by Phase 2a (slice 3A): the ancestry of every container and
+    # file locator the scan actually inspected.
+    image_map: ImageMap | None = None
+    #: Artifact node the extracted root filesystem's file locators hang from.
+    image_rootfs_artifact_id: str | None = None
 
     # Populated by Phase 2b
     filesystem_inventory: FilesystemInventory | None = None
@@ -264,6 +282,11 @@ class ScanContext:
     # Populated by Phase 3
     entropy_profile: EntropyProfile | None = None
     binary_intelligence: BinaryIntelligenceResult | None = None
+
+    # Populated by Phase 3b (slice 3B): one record per ELF file parsed from its
+    # own header, and by Phase 3c (slice 4B): the installed-package database.
+    elf_metadata: list[ElfReport] = field(default_factory=list)
+    opkg_inventory: OpkgInventory | None = None
 
     # Populated by Phase 4
     credential_findings: list[CredentialFinding] = field(default_factory=list)
@@ -287,6 +310,69 @@ class ScanContext:
 # ──────────────────────────────────────────────
 # Phase 1: Ingest Models
 # ──────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────
+# Slice 2D: immutable input binding and staged-tree manifests
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class InputSnapshot:
+    """A verified, read-only copy of the bytes a scan is allowed to read."""
+
+    original_path: Path
+    snapshot_path: Path
+    declared_sha256: str
+    verified_sha256: str
+    size: int
+    budget_bytes: int
+    immutable: bool
+    #: Set after analysis: the original path no longer has the declared digest.
+    source_changed: bool = False
+    #: Set after analysis: the original path was re-hashed successfully.
+    source_reverified: bool = False
+
+    @property
+    def digest_matches(self) -> bool:
+        """Whether the snapshot really holds the bytes that were hashed."""
+        return self.verified_sha256 == self.declared_sha256
+
+
+@dataclass
+class TreeManifestEntry:
+    """One entry of a deterministic staged-tree manifest.
+
+    ``metadata_source`` records where the mode/ownership came from:
+    ``host`` (observed on this machine), ``declared`` (read from a build
+    manifest the operator supplied) or ``image`` (carried out of a container by
+    the extractor). A permission-based conclusion may only rest on ``image`` or
+    ``declared`` evidence.
+    """
+
+    relative_path: str
+    kind: str  # file | dir | symlink | hardlink
+    size: int = 0
+    sha256: str = ""
+    mode: int | None = None
+    uid: int | None = None
+    gid: int | None = None
+    metadata_source: str = "host"
+    hardlink_group: str | None = None
+    link_target: str | None = None
+
+
+@dataclass
+class DeclaredManifest:
+    """A build manifest of declared ownership/permissions, with its digest."""
+
+    path: Path
+    sha256: str
+    entries: dict[str, dict[str, Any]] = field(default_factory=dict)
+    entry_count: int = 0
+    #: Names in the declaration that the tree does not contain, and vice versa.
+    declared_only: list[str] = field(default_factory=list)
+    observed_only: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -320,6 +406,59 @@ class SignatureResult:
     filesystem_type: str | None = None
 
 
+#: Documented extraction outcomes. Each maps to one stage status:
+#: ``OK`` and ``PARTIAL`` complete, ``UNAVAILABLE`` needs an operator-supplied
+#: dependency (exit 5), everything else is incomplete analysis (exit 4).
+EXTRACTION_OK = "OK"
+EXTRACTION_PARTIAL = "PARTIAL"
+EXTRACTION_UNAVAILABLE = "UNAVAILABLE"
+EXTRACTION_CORRUPT = "CORRUPT_INPUT"
+EXTRACTION_TIMEOUT = "TIMEOUT"
+EXTRACTION_QUOTA = "QUOTA_EXCEEDED"
+EXTRACTION_NONZERO = "HELPER_FAILED"
+EXTRACTION_EMPTY = "EMPTY_OUTPUT"
+EXTRACTION_NO_ISOLATION = "NO_ISOLATION"
+EXTRACTION_INTERNAL = "INTERNAL_ERROR"
+
+#: Failures an operator cannot fix by installing more software.
+EXTRACTION_INCOMPLETE_STATES = frozenset(
+    {
+        EXTRACTION_CORRUPT,
+        EXTRACTION_TIMEOUT,
+        EXTRACTION_QUOTA,
+        EXTRACTION_NONZERO,
+        EXTRACTION_EMPTY,
+        EXTRACTION_NO_ISOLATION,
+        EXTRACTION_INTERNAL,
+    }
+)
+
+
+@dataclass
+class ExtractionProvenance:
+    """Who extracted what, with which helper, under which limits.
+
+    ``isolation`` is ``container`` when the helper ran in a container with no
+    network, dropped capabilities and a private size-limited scratch, and
+    ``host-process`` when it ran directly on the analysis host. A qualified
+    result requires ``container``.
+    """
+
+    worker: str = "none"  # podman | docker | host-process | none
+    isolation: str = "none"
+    worker_image: str | None = None
+    worker_digest: str | None = None
+    helper: str = "unsquashfs"
+    helper_version: str | None = None
+    helper_argv: list[str] = field(default_factory=list)
+    limits: dict[str, int | float | str] = field(default_factory=dict)
+    decoded_bytes: int = 0
+    extracted_bytes: int = 0
+    extracted_entries: int = 0
+    durations_seconds: float = 0.0
+    scratch_released: bool = True
+
+
 @dataclass
 class ExtractionResult:
     """Result of firmware extraction.
@@ -339,6 +478,12 @@ class ExtractionResult:
     backend: str = "unknown"
     backend_version: str | None = None
     worker_digest: str | None = None
+    #: One of the ``EXTRACTION_*`` states, so the caller can tell a missing
+    #: backend from a failed one without parsing prose.
+    state: str = EXTRACTION_UNAVAILABLE
+    provenance: ExtractionProvenance | None = None
+    #: Entries the extractor saw but deliberately did not materialise.
+    omissions: list[str] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -347,8 +492,95 @@ class ExtractionResult:
 
 
 @dataclass
+class ArtifactNode:
+    """One container or file in the image map (slice 3A).
+
+    Every node states the coordinate system its ``offset``/``length`` belong
+    to, so a byte range in the gzip wrapper is never confused with a path
+    inside the SquashFS filesystem it expands to. Wrapper size, expanded size
+    and filesystem extent are separate numbers and stay separate.
+    """
+
+    artifact_id: str
+    parent_id: str | None
+    digest_sha256: str
+    format: str  # gzip | squashfs | file | tree
+    coordinate_system: str  # container-bytes | filesystem-path
+    offset: int = 0
+    length: int = 0
+    decoder: str = ""
+    decoder_version: str | None = None
+    depth: int = 0
+    locator: str = ""
+    #: For a container node: the span it expands to inside its child.
+    expanded_bytes: int | None = None
+    #: For a filesystem node: declared extent (what the superblock says is used).
+    extent_bytes: int | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ImageMap:
+    """The ancestry tree of everything the scan opened."""
+
+    root_artifact_id: str
+    nodes: list[ArtifactNode] = field(default_factory=list)
+
+    def add(self, node: ArtifactNode) -> ArtifactNode:
+        """Append a node and return it."""
+        self.nodes.append(node)
+        return node
+
+    def by_id(self, artifact_id: str) -> ArtifactNode | None:
+        """Look up a node by identifier."""
+        return next((n for n in self.nodes if n.artifact_id == artifact_id), None)
+
+    def children(self, artifact_id: str) -> list[ArtifactNode]:
+        """Direct children of a node, in insertion order."""
+        return [n for n in self.nodes if n.parent_id == artifact_id]
+
+
+@dataclass
+class SquashfsSuperblock:
+    """The fields of a SquashFS v4 superblock this scanner validates."""
+
+    offset: int
+    magic: str
+    version_major: int
+    version_minor: int
+    bytes_used: int
+    block_size: int
+    inode_count: int
+    fragment_count: int
+    compression: str
+    mkfs_time: int
+    declared_filesystem_size: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialisable form for the report document."""
+        return {
+            "offset": self.offset,
+            "magic": self.magic,
+            "version": f"{self.version_major}.{self.version_minor}",
+            "bytes_used": self.bytes_used,
+            "block_size": self.block_size,
+            "inode_count": self.inode_count,
+            "fragment_count": self.fragment_count,
+            "compression": self.compression,
+            "mkfs_time": self.mkfs_time,
+        }
+
+
+@dataclass
 class FilesystemFinding:
-    """A single file in the extracted filesystem with security categorization."""
+    """A single file in the extracted filesystem with security categorization.
+
+    ``format`` comes from the file's own first bytes, not from an extension or
+    from a service category, so a renamed ELF is still analysed as ELF.
+    ``metadata_source`` says whether ``permissions``/``owner_uid`` came out of
+    the image (``image``, ``declared``) or from this host (``host``): a
+    permission-based conclusion may only rest on the first two.
+    """
 
     path: Path
     absolute_path: Path
@@ -361,6 +593,32 @@ class FilesystemFinding:
     is_suid: bool
     is_world_writable: bool
     hash_sha256: str
+    format: str = "other"  # elf | pe | macho | other
+    artifact_id: str | None = None
+    root_id: str = "rootfs"
+    mode: int | None = None
+    metadata_source: str = "extracted"
+    hardlink_group: str | None = None
+    hardlink_count: int = 1
+
+
+@dataclass
+class RootIdentity:
+    """One filesystem root the scan enumerated, with its own identity.
+
+    Two roots with the same relative path must stay distinguishable, so every
+    locator is qualified by ``root_id`` (``slot_b/etc/shadow``), never by a bare
+    relative path.
+    """
+
+    root_id: str
+    locator: str
+    files: int = 0
+    directories: int = 0
+    bytes: int = 0
+    metadata_source: str = "extracted"
+    artifact_id: str | None = None
+    omissions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -395,6 +653,11 @@ class FilesystemInventory:
     # Configured-boot evidence carried from each root through risk scoring
     boot_evidence: list[BootEvidence] = field(default_factory=list)
     metadata_source: str = "extracted"  # "extracted" | "host"
+    #: One entry per root the scan enumerated, in enumeration order.
+    roots: list[RootIdentity] = field(default_factory=list)
+    #: Entries whose permission bits could not be determined (host-derived or
+    #: missing), so a permission-based control must answer "unknown".
+    permission_unknown_count: int = 0
 
     # Quick-access indices
     suid_binaries: list[FilesystemFinding] = field(default_factory=list)
@@ -471,6 +734,74 @@ class EntropyProfile:
 
 
 @dataclass
+class ElfReport:
+    """What one ELF file declares about itself (slice 3B).
+
+    Every field is read from a structure that supports it. ``unknown`` lists
+    the properties that could not be decided — a stripped binary has no symbol
+    table, so canary and FORTIFY stay unknown rather than false, and an image
+    cannot earn hardening credit from missing evidence.
+    """
+
+    locator: str  # root-qualified path, e.g. "squashfs-root/bin/busybox"
+    artifact_id: str | None = None
+    digest_sha256: str = ""
+    size: int = 0
+    elf_class: str = ""  # ELF32 | ELF64
+    byte_order: str = ""  # little | big
+    machine: int = -1
+    machine_name: str = ""
+    elf_type: str = ""  # EXEC | DYN | REL
+    os_abi: str = ""
+    interpreter: str | None = None
+    needed: list[str] = field(default_factory=list)
+    soname: str | None = None
+    segments: list[dict[str, Any]] = field(default_factory=list)
+    build_id: str | None = None
+    stack_executable: bool | None = None
+    pie: bool | None = None
+    relro: str | None = None  # full | partial | none | unknown
+    canary: bool | None = None
+    fortify: bool | None = None
+    unknown: list[str] = field(default_factory=list)
+    parser: str = "pyelftools"
+    parser_version: str | None = None
+
+
+@dataclass
+class OpkgPackageRecord:
+    """One installed-package stanza, read verbatim from the image."""
+
+    name: str
+    version: str  # full version string, including the -rN revision
+    architecture: str
+    status: str
+    installed: bool
+    held: bool
+    source: str = ""
+    depends: str = ""
+    #: Byte range of the stanza in the status database, and its first line.
+    evidence_start: int = 0
+    evidence_end: int = 0
+    evidence_line: int = 1
+
+
+@dataclass
+class OpkgInventory:
+    """The installed-package database of one root filesystem."""
+
+    locator: str
+    database_sha256: str
+    byte_length: int
+    records: list[OpkgPackageRecord] = field(default_factory=list)
+    installed_count: int = 0
+    held_count: int = 0
+    unparsed_stanzas: int = 0
+    truncated: bool = False
+    parser_version: str = "1"
+
+
+@dataclass
 class BinaryHardening:
     """Binary hardening check results."""
 
@@ -491,6 +822,8 @@ class BinaryMetadata:
     link_type: str | None = None  # "static" | "dynamic"
     hardening: BinaryHardening = field(default_factory=BinaryHardening)
     version_strings: dict[str, str] = field(default_factory=dict)
+    #: The full structural record, present when the file was parsed as ELF.
+    elf: ElfReport | None = None
 
 
 @dataclass
@@ -501,6 +834,8 @@ class BinaryIntelligenceResult:
     total_binaries: int = 0
     hardened_binaries: int = 0
     unhardened_binaries: int = 0
+    #: Files selected as eligible that could not be parsed, with the reason.
+    rejected: list[dict[str, str]] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -582,15 +917,25 @@ class ShadowEntry:
 
 @dataclass
 class SoftwareComponent:
-    """Detected software component with version."""
+    """Detected software component with version.
+
+    ``occurrences`` keeps every place the component was evidenced, so
+    deduplication never loses a locator: two roots with different revisions of
+    the same package remain two distinguishable records.
+    """
 
     vendor: str
     product: str
     version: str
     cpe_string: str
     source_file: Path
-    source_method: str  # string_extraction | package_manifest
+    source_method: str  # opkg_status | string_extraction | elf_metadata
     architecture: str | None = None
+    #: Exact locator inside the evidence, e.g. the opkg stanza byte range.
+    evidence: str = ""
+    digest_sha256: str = ""
+    confidence: str = "recorded"  # recorded | candidate
+    occurrences: list[str] = field(default_factory=list)
 
 
 @dataclass

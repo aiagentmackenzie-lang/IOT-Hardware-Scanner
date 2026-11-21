@@ -1,11 +1,16 @@
 """Shared test fixtures for IoT Hardware Scanner."""
 
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from harness import PACKAGE_SRC, Runner, build_runner
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
@@ -81,6 +86,23 @@ def sample_scan_context(temp_dir: Path) -> ScanContext:
         size_category=FirmwareSizeCategory.SMALL,
         started_at=datetime.now(timezone.utc),
     )
+
+
+# ──────────────────────────────────────────────
+# Installed-CLI harness (milestone A/B acceptance)
+# ──────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def runner(tmp_path_factory: pytest.TempPathFactory) -> Runner:
+    """Run the scanner from outside the checkout, in wheel mode when available."""
+    import shutil
+
+    if os.environ.get("IHS_INSTALLED_CLI"):
+        return build_runner(Path())
+    site = tmp_path_factory.mktemp("relocated-site")
+    shutil.copytree(PACKAGE_SRC, site / "iot_hardware_scanner")
+    return build_runner(site)
 
 
 # ──────────────────────────────────────────────

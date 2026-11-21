@@ -29,6 +29,7 @@ from iot_hardware_scanner import __version__
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.exceptions import ConfigError, ScannerError
 from iot_hardware_scanner.models import (
+    EXTRACTION_UNAVAILABLE,
     FirmwareSizeCategory,
     ScanContext,
     Severity,
@@ -36,6 +37,7 @@ from iot_hardware_scanner.models import (
 from iot_hardware_scanner.scanner.assessment import (
     PROFILE_CREDENTIALS,
     PROFILE_FIRMWARE,
+    PROFILE_FIRMWARE_TREE,
     collect_findings,
     decide_exit,
 )
@@ -132,11 +134,36 @@ def main(verbose: bool) -> None:
 )
 @click.option(
     "--profile",
-    type=click.Choice([PROFILE_FIRMWARE, PROFILE_CREDENTIALS], case_sensitive=False),
+    type=click.Choice(
+        [PROFILE_FIRMWARE, PROFILE_FIRMWARE_TREE, PROFILE_CREDENTIALS], case_sensitive=False
+    ),
     default=None,
-    help="Assessment profile (default: firmware-static; --creds selects credentials-only)",
+    help=(
+        "Assessment profile (default: firmware-static for an image, firmware-tree for "
+        "--input-tree; --creds selects credentials-only)"
+    ),
 )
 @click.option("--creds", is_flag=True, help="Credential-only profile (narrower required set)")
+@click.option(
+    "--input-tree",
+    "input_tree",
+    is_flag=True,
+    help="Treat the positional input as a staged root tree (selects the firmware-tree profile)",
+)
+@click.option(
+    "--build-manifest",
+    "build_manifest",
+    type=click.Path(),
+    default=None,
+    help="JSON manifest of declared permissions/ownership for a staged tree",
+)
+@click.option(
+    "--worker",
+    "extraction_worker",
+    type=click.Choice(["auto", "podman", "docker", "host-process", "none"]),
+    default=None,
+    help="Image extraction worker (default: auto — podman, then docker)",
+)
 @click.option(
     "--config", "config_file", type=click.Path(), default=None, help="YAML/TOML config file"
 )
@@ -159,6 +186,9 @@ def scan(
     report_file: str | None,
     profile: str | None,
     creds: bool,
+    input_tree: bool,
+    build_manifest: str | None,
+    extraction_worker: str | None,
     config_file: str | None,
     offline: bool | None,
     nvd_api_key: str | None,
@@ -178,6 +208,7 @@ def scan(
             "nvd_api_key": "nvd_api_key",
             "yara_rules": "yara_rules_dirs",
             "max_size": "max_file_size_mb",
+            "extraction_worker": "extraction_worker",
         },
     )
     # Normalise CLI-shaped values after the precedence merge.
@@ -189,12 +220,22 @@ def scan(
         config.yara_rules_dirs = [*config.yara_rules_dirs, Path(yara_rules)]
     if max_size is not None:
         config.max_file_size_mb = max_size
+    if extraction_worker:
+        config.extraction_worker = extraction_worker
 
-    selected_profile = profile or (PROFILE_CREDENTIALS if creds else PROFILE_FIRMWARE)
+    input_path = Path(firmware)
+    selected_profile = profile or (
+        PROFILE_CREDENTIALS if creds else PROFILE_FIRMWARE_TREE if input_tree else PROFILE_FIRMWARE
+    )
 
     try:
-        orchestrator = Orchestrator(config, profile=selected_profile)
-        context = orchestrator.run(Path(firmware))
+        orchestrator = Orchestrator(
+            config,
+            profile=selected_profile,
+            input_tree=input_tree,
+            build_manifest=Path(build_manifest) if build_manifest else None,
+        )
+        context = orchestrator.run(input_path)
     except ScannerError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         sys.exit(exc.exit_code)
@@ -244,6 +285,9 @@ def scan(
         highlight=False,
     )
 
+    from iot_hardware_scanner.orchestrator import cleanup_scratch
+
+    cleanup_scratch(context, keep=config.keep_scratch)
     sys.exit(decision.exit_code)
 
 
@@ -258,15 +302,32 @@ def scan(
 @click.option(
     "--config", "config_file", type=click.Path(), default=None, help="YAML/TOML config file"
 )
+@click.option(
+    "--worker",
+    "extraction_worker",
+    type=click.Choice(["auto", "podman", "docker", "host-process", "none"]),
+    default=None,
+    help="Image extraction worker (default: auto — podman, then docker)",
+)
 @click.pass_context
-def extract(ctx: click.Context, firmware: str, output: str | None, config_file: str | None) -> None:
-    """Extract a firmware image's filesystems (no analysis)."""
-    from iot_hardware_scanner.scanner.firmware_extractor import FirmwareExtractor
+def extract(
+    ctx: click.Context,
+    firmware: str,
+    output: str | None,
+    config_file: str | None,
+    extraction_worker: str | None,
+) -> None:
+    """Decode a gzip/SquashFS image with the pinned worker (no analysis)."""
+    from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+    from iot_hardware_scanner.scanner.extraction_worker import ExtractionError, SquashfsWorker
     from iot_hardware_scanner.scanner.firmware_ingest import FirmwareIngest
+    from iot_hardware_scanner.scanner.image_map import ImageMapBuilder, ImageMapError
 
-    config = _build_config(ctx, {"output": "output_dir"})
+    config = _build_config(ctx, {"output": "output_dir", "extraction_worker": "extraction_worker"})
     if output:
         config.output_dir = Path(output)
+    if extraction_worker:
+        config.extraction_worker = extraction_worker
 
     try:
         context = FirmwareIngest(config).ingest(Path(firmware))
@@ -275,17 +336,54 @@ def extract(ctx: click.Context, firmware: str, output: str | None, config_file: 
         sys.exit(exc.exit_code)
 
     console.print(f"[green]✓[/green] Ingested: {context.firmware_name}")
-    result = FirmwareExtractor(config).extract(context.firmware_path, context.output_dir)
+    builder = ImageMapBuilder()
+    reader = open_bounded(context.firmware_path)
+    try:
+        image_map = builder.start(reader, context.file_hash_sha256, context.firmware_name)
+        if image_map.nodes[0].format == "gzip":
+            decoded = context.output_dir / "scratch" / "decoded" / "root.squashfs"
+            _path, child = builder.decompress_gzip(
+                reader,
+                decoded,
+                max_decoded_bytes=config.max_decoded_bytes_mb * 1024 * 1024,
+            )
+            console.print(
+                f"  gzip wrapper: {reader.size:,} bytes -> {child.expanded_bytes:,} decoded"
+            )
+            console.print(
+                "  superblock: "
+                + ", ".join(f"{k}={v}" for k, v in child.details["superblock"].items())
+            )
+            image = decoded
+        else:
+            superblock = builder.parse_squashfs(reader)
+            console.print(
+                "  superblock: " + ", ".join(f"{k}={v}" for k, v in superblock.as_dict().items())
+            )
+            image = context.firmware_path
+    except ImageMapError as exc:
+        console.print(f"[red]✗[/red] The input is not a decodable gzip/SquashFS v4 image: {exc}")
+        sys.exit(4)
+    finally:
+        del reader
+
+    try:
+        result = SquashfsWorker(config).extract(image, context.output_dir / "scratch" / "extract")
+    except ExtractionError as exc:
+        console.print(f"[red]✗[/red] Extraction {exc.state}: {exc.message}")
+        sys.exit(5 if exc.state == "UNAVAILABLE" else 4)
+
     if result.success:
-        console.print(f"[green]✓[/green] Extracted to: {result.extraction_dir}")
-        console.print(f"  Root filesystems: {len(result.root_filesystems)}")
+        console.print(f"[green]✓[/green] Extracted to: {result.root_filesystems[0]}")
+        console.print(f"  Worker: {result.backend} {result.backend_version or ''}".rstrip())
         console.print(f"  Files: {result.file_count}")
         sys.exit(0)
-
-    console.print(f"[red]✗[/red] Extraction unavailable ({result.backend})")
+    console.print(f"[red]✗[/red] Extraction failed ({result.state})")
     for error in result.extraction_errors:
         console.print(f"  [red]![/red] {error}")
-    sys.exit(4)
+    # A backend the operator could install is a missing dependency (5); a
+    # backend that ran and failed is incomplete analysis (4).
+    sys.exit(5 if result.state == EXTRACTION_UNAVAILABLE else 4)
 
 
 # ──────────────────────────────────────────────

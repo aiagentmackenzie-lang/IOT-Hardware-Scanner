@@ -39,7 +39,7 @@ def _make_component(
         vendor=vendor,
         product=prod,
         version=version,
-        cpe_string=f"cpe:2.3:a:{vendor}:{prod}:{version}",
+        cpe_string=f"cpe:2.3:a:{vendor}:{prod}:{version}:*:*:*:*:*:*:*",
         source_file=Path("/usr/sbin/busybox"),
         source_method="string_extraction",
     )
@@ -55,13 +55,13 @@ class TestCPEBuilder:
         """Build CPE string for a known product."""
         builder = CPEBuilder()
         cpe = builder.build("busybox", "1.28.4")
-        assert cpe == "cpe:2.3:a:busybox:busybox:1.28.4"
+        assert cpe == "cpe:2.3:a:busybox:busybox:1.28.4:*:*:*:*:*:*:*"
 
     def test_build_openssl(self) -> None:
         """Build CPE string for OpenSSL."""
         builder = CPEBuilder()
         cpe = builder.build("openssl", "1.1.1k")
-        assert cpe == "cpe:2.3:a:openssl:openssl:1.1.1k"
+        assert cpe == "cpe:2.3:a:openssl:openssl:1.1.1k:*:*:*:*:*:*:*"
 
     def test_build_unknown_product(self) -> None:
         """Unknown product returns None."""
@@ -73,7 +73,7 @@ class TestCPEBuilder:
         """Build CPE string with explicit vendor and product."""
         builder = CPEBuilder()
         cpe = builder.build_from_component("apache", "log4j", "2.14.1")
-        assert cpe == "cpe:2.3:a:apache:log4j:2.14.1"
+        assert cpe == "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
 
     def test_lookup_product(self) -> None:
         """Lookup returns (vendor, product) tuple for known products."""
