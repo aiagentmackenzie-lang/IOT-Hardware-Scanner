@@ -1,10 +1,13 @@
-# Support matrix and qualification record — release 2.4.0
+# Support matrix and qualification record — release 2.5.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.4.0`, report schema 6, profile version 5.0.
+Measured with `iot-hardware-scanner 2.5.0`, report schema 6, profile version 5.0.
+Release 2.5 is a hardening release: no format, schema or profile changed; the
+adversarial-input rows below are new, and every other row keeps the evidence
+recorded for 2.4.
 Numbers come from runs recorded in [docs/MILESTONE-C.md](MILESTONE-C.md) (the
 2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
 SBOM and inventory work) and [docs/MILESTONE-E.md](MILESTONE-E.md) (the 5C and
@@ -31,6 +34,8 @@ says so.
 | U-Boot FIT (`.itb`, FDT magic) | **analyzed** — configurations, selected default, referenced payloads, digest integrity, signature presence and (with an operator key) verification; board facts from the referenced DTB | in-process parser + RSA/PKCS#1 verification | any host | same, plus `::test_a_supplied_key_verifies_only_the_selected_configuration` |
 | Repeated-work cache (`--cache-dir`) | **measured** — per-file rule matches and text facts; cold/warm reports equal | `ihs-analysis-cache/1` | any host | `tests/test_analysis_cache.py`, `tests/test_installed_cli.py::TestRepeatedWorkCache` |
 | Opaque / unrecognised blob | **recognized** — identified, then reported as unsupported (exit 4) | none | any host | `tests/test_installed_cli.py::TestObservedFailuresStayFixed` |
+| Malformed / adversarial artifact (any format above) | **rejected** — the lie is named (declared size, offset, depth, version), the stage is `FAILED`, exit 4, no traceback | in-process parsers; no helper | any host | `tests/test_hostile_inputs.py`, `tests/test_parser_properties.py` |
+| A saved document that is not a report (`report`, `compare`, `sbom`) | **rejected** — structural validation before any renderer indexes into it, exit 3 | in-process validator | any host | `tests/test_hostile_inputs.py` |
 | Advisory snapshot `ihs-advisory-snapshot/1` | **decoded and applied** offline | none (no network) | any host | `tests/test_advisory.py` |
 | Partitioned images, CPIO, JFFS2/UBIFS, MCU address spaces, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
 
@@ -150,6 +155,7 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.5.0, hardening release, locally qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`, macOS arm64 build; **no schema or profile change**, so 2.4 reports stay readable. Linux CI build and byte-identity check pending the first 2.5 CI run |
 | Wheel (2.4.0, qualified) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44904681133` |
 | Wheel (2.3.0, superseded) | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — byte-identical from the macOS arm64 build and both Linux CI builds |
 | Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44897056652` |
@@ -190,6 +196,14 @@ Qualified run for 2.4: GitHub Actions **`44904681133`** on `main` (`49ce0cb`),
 `bounded-resources` 61 passed with zero skips, and the CI wheel digest equal to
 the local build's. `python-gate` ran 881 passed / 29 skipped on 3.10, 3.12 and
 3.14 (the reference-image and container rows the qualified job runs).
+
+Release 2.5.0 is a **hardening release**: no format, schema or profile changed.
+Locally qualified with the reference corpus and both worker images at
+**955 passed, 0 skipped, 87.04 %**, and the installed wheel at **91 passed,
+0 skipped**; the first 2.5 CI run is still pending, and the workflow now runs the
+hostile-input rows against the installed wheel with a skip-fails gate. The
+adversarial-input rows above are new; the slice record is
+[docs/2E-HOSTILE-INPUT.md](2E-HOSTILE-INPUT.md).
 
 The 2.3 qualification was GitHub Actions **`44897056652`** on `main` (`aa16f7a`),
 **8/8 job instances green**, `linux-extractor` **166 passed with zero skips**

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -264,6 +265,42 @@ class Orchestrator:
     # Profiles
     # ──────────────────────────────────────────
 
+    # ──────────────────────────────────────
+    # Stage isolation
+    # ──────────────────────────────────────
+
+    def _guarded(
+        self,
+        context: ScanContext,
+        label: str,
+        stages: tuple[StageId, ...],
+        phase: Callable[[ScanContext], ScanContext],
+    ) -> ScanContext:
+        """Run one phase so an unexpected parser bug is incomplete work, not a crash.
+
+        Untrusted bytes are parsed in-process. A ``struct.error``, an
+        ``AttributeError`` from an odd member, a decoder bug — none of those is
+        a documented exit status, and a traceback is not a report. The phase's
+        stages are recorded FAILED with the exception type and message, the
+        findings already collected survive, and the assessment becomes
+        INCOMPLETE (exit 4). ``logger.exception`` keeps the traceback in the log
+        for the engineer; it never reaches the operator's terminal or the JSON.
+
+        ``ScannerError`` is re-raised unchanged: those exceptions already carry
+        the documented exit code and must not be flattened into exit 4.
+        """
+        try:
+            return phase(context)
+        except ScannerError:
+            raise
+        except Exception as exc:
+            logger.exception("%s raised an unexpected exception", label)
+            reason = f"{label} hit an unexpected error: {type(exc).__name__}: {exc}"
+            for stage in stages:
+                record_stage(context, stage, StageStatus.FAILED, reason=reason)
+            console.print(f"  [red]✗[/red] {reason}")
+            return context
+
     def _run_credentials_profile(self, context: ScanContext) -> ScanContext:
         if context.input_kind is InputKind.TREE:
             record_stage(
@@ -283,9 +320,18 @@ class Orchestrator:
                 inspected=1,
                 eligible=1,
             )
-        context = self._phase_credentials(context)
-        context = self._phase_unix(context)
-        return self._phase_controls(context, advisory_assessed=False)
+        context = self._guarded(
+            context, "credentials", (StageId.CREDENTIAL_SCAN,), self._phase_credentials
+        )
+        context = self._guarded(
+            context, "account records", (StageId.UNIX_ACCOUNTS,), self._phase_unix
+        )
+        return self._guarded(
+            context,
+            "named checks",
+            (StageId.RISK_CONTROLS,),
+            lambda current: self._phase_controls(current, advisory_assessed=False),
+        )
 
     def _run_firmware_profile(self, context: ScanContext) -> ScanContext:
         if context.input_kind is InputKind.TREE:
@@ -304,7 +350,12 @@ class Orchestrator:
                 StageStatus.NOT_APPLICABLE,
                 reason="the tree root is the filesystem root; no discovery was needed",
             )
-            context = self._phase_tree_filesystem(context)
+            context = self._guarded(
+                context,
+                "filesystem enumeration",
+                (StageId.ENUMERATION, StageId.SERVICE_ANALYSIS),
+                self._phase_tree_filesystem,
+            )
             record_stage(
                 context,
                 StageId.ENTROPY,
@@ -315,17 +366,49 @@ class Orchestrator:
                 ),
             )
         else:
-            context = self._phase_extract(context)
-            context = self._phase_filesystem(context)
-            context = self._phase_entropy(context)
+            context = self._guarded(
+                context,
+                "extraction",
+                (StageId.EXTRACTION, StageId.ROOT_DISCOVERY),
+                self._phase_extract,
+            )
+            context = self._guarded(
+                context,
+                "filesystem enumeration",
+                (StageId.ENUMERATION, StageId.SERVICE_ANALYSIS),
+                self._phase_filesystem,
+            )
+            context = self._guarded(context, "entropy", (StageId.ENTROPY,), self._phase_entropy)
 
-        context = self._phase_binary_intelligence(context)
-        context = self._phase_opkg(context)
-        context = self._phase_credentials(context)
-        context = self._phase_unix(context)
-        context = self._phase_advisory(context)
-        context = self._phase_c2(context)
-        return self._phase_controls(context, advisory_assessed=self._advisory_assessed(context))
+        context = self._guarded(
+            context,
+            "binary inventory",
+            (StageId.BINARY_INVENTORY, StageId.ELF_METADATA),
+            self._phase_binary_intelligence,
+        )
+        context = self._guarded(
+            context, "package database", (StageId.OPKG_INVENTORY,), self._phase_opkg
+        )
+        context = self._guarded(
+            context, "credentials", (StageId.CREDENTIAL_SCAN,), self._phase_credentials
+        )
+        context = self._guarded(
+            context, "account records", (StageId.UNIX_ACCOUNTS,), self._phase_unix
+        )
+        context = self._guarded(
+            context, "advisory snapshot", (StageId.ADVISORY,), self._phase_advisory
+        )
+        context = self._guarded(
+            context, "indicator sweep", (StageId.C2_INDICATORS,), self._phase_c2
+        )
+        return self._guarded(
+            context,
+            "named checks",
+            (StageId.RISK_CONTROLS,),
+            lambda current: self._phase_controls(
+                current, advisory_assessed=self._advisory_assessed(current)
+            ),
+        )
 
     def _run_boot_profile(self, context: ScanContext) -> ScanContext:
         """The boot-manifest profile: nothing here is a root filesystem."""
@@ -385,8 +468,15 @@ class Orchestrator:
                 StageStatus.NOT_APPLICABLE,
                 reason=reason,
             )
-        context = self._phase_boot(context)
-        return self._phase_controls(context, advisory_assessed=False)
+        context = self._guarded(
+            context, "boot manifest", (StageId.BOOT_ANALYSIS,), self._phase_boot
+        )
+        return self._guarded(
+            context,
+            "named checks",
+            (StageId.RISK_CONTROLS,),
+            lambda current: self._phase_controls(current, advisory_assessed=False),
+        )
 
     # ──────────────────────────────────────────
     # Phase 3e: boot manifests and board descriptions (slice 3D)

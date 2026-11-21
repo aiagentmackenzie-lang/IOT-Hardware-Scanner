@@ -121,7 +121,7 @@ def read_json_document(path: Path, *, budget: int = DEFAULT_BUDGET_BYTES) -> dic
         raise ComparisonError(f"{path} is larger than the {budget}-byte budget: {exc}") from exc
     try:
         payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ComparisonError(f"{path} is not a JSON document: {exc}") from exc
     if not isinstance(payload, dict):
         raise ComparisonError(f"{path} does not contain a JSON object")
@@ -907,7 +907,7 @@ def _read_declaration(path: Path, *, budget: int) -> Declaration:
     if stripped == b"{":
         try:
             payload = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ComparisonError(f"{path} is not a readable JSON declaration: {exc}") from exc
         if not isinstance(payload, dict) or payload.get("bomFormat") != "CycloneDX":
             raise ComparisonError(f"{path} is JSON but not a CycloneDX document")

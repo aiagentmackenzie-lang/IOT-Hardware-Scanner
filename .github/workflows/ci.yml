@@ -89,7 +89,7 @@ jobs:
           python -m venv /tmp/ihs-venv
           /tmp/ihs-venv/bin/pip install --upgrade pip
           /tmp/ihs-venv/bin/pip install dist/*.whl
-          /tmp/ihs-venv/bin/pip install pytest
+          /tmp/ihs-venv/bin/pip install pytest hypothesis
 
       - name: Audited extras
         run: |
@@ -138,6 +138,21 @@ jobs:
           # The repository's conftest imports the package, so pytest must run
           # under the interpreter that has it installed -- not the job default.
           /tmp/ihs-venv/bin/python -m pytest tests/test_installed_cli.py -v
+
+      - name: Hostile inputs through the installed wheel
+        env:
+          IHS_INSTALLED_CLI: /tmp/ihs-venv/bin/iot-hardware-scanner
+        run: |
+          # Slice 2E. The hostile rows and the parser properties need no worker,
+          # so a skip here means the capability is unqualified, not unavailable.
+          set -o pipefail
+          /tmp/ihs-venv/bin/python -m pytest \
+            tests/test_hostile_inputs.py tests/test_parser_properties.py \
+            tests/test_stage_isolation.py -v -rfs 2>&1 | tee /tmp/hostile.log
+          if grep -qE "[0-9]+ skipped" /tmp/hostile.log; then
+            echo "a skip leaves the hostile-input gate unqualified"
+            exit 1
+          fi
 
       - name: Blank-image contract
         run: |

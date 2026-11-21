@@ -289,6 +289,14 @@ def scan(
     except ScannerError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         sys.exit(exc.exit_code)
+    except Exception as exc:  # a bug outside every stage guard is an internal error
+        console.print(
+            f"[red]Internal error:[/red] {type(exc).__name__}: {exc}\n"
+            "No report was written. This is a scanner defect, not a finding about the input.",
+            markup=False,
+            highlight=False,
+        )
+        sys.exit(6)
 
     generator = ReportGenerator(config)
     document = generator.document(context)
@@ -527,9 +535,19 @@ def entropy(ctx: click.Context, firmware: str, block_size: int | None, report_fo
 def report(scan_file: str, report_format: str, report_file: str | None) -> None:
     """Render a saved report document again, without re-analysing anything."""
     scan_path = Path(scan_file)
+    from iot_hardware_scanner.scanner.bounded_reader import (
+        BoundedReadLimitError,
+        open_bounded,
+    )
+
+    # A saved document is input like any other: it is read through the bounded
+    # reader, never with one unbounded ``read()``.
     try:
-        data = json.loads(scan_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        data = json.loads(open_bounded(scan_path).read_all_bounded(64 * 1024 * 1024))
+    except BoundedReadLimitError as exc:
+        console.print(f"[red]Error:[/red] {scan_path} is too large to replay: {exc}")
+        sys.exit(3)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         console.print(f"[red]Error:[/red] cannot read {scan_path}: {exc}")
         sys.exit(3)
 
@@ -539,6 +557,13 @@ def report(scan_file: str, report_format: str, report_file: str | None) -> None:
     except (ValueError, KeyError, TypeError) as exc:
         console.print(f"[red]Error:[/red] unrecognised report document: {exc}")
         sys.exit(3)
+    except Exception as exc:  # a renderer defect, not a property of the document
+        console.print(
+            f"[red]Internal error:[/red] rendering failed: {type(exc).__name__}: {exc}",
+            markup=False,
+            highlight=False,
+        )
+        sys.exit(6)
 
     if report_format == "terminal" and not report_file:
         console.print(content, markup=False, highlight=False)
@@ -622,6 +647,13 @@ def compare(
     except ComparisonError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         sys.exit(3)
+    except Exception as exc:  # a comparison defect is internal, never a traceback
+        console.print(
+            f"[red]Internal error:[/red] comparison failed: {type(exc).__name__}: {exc}",
+            markup=False,
+            highlight=False,
+        )
+        sys.exit(6)
 
     try:
         content = render_comparison(document, report_format)
@@ -685,6 +717,13 @@ def sbom(scan_file: str, sbom_file: str | None, validate: bool) -> None:
     except (ComparisonError, SbomExportError) as exc:
         console.print(f"[red]Error:[/red] {exc}")
         sys.exit(3)
+    except Exception as exc:  # an export defect is internal, never a traceback
+        console.print(
+            f"[red]Internal error:[/red] BOM export failed: {type(exc).__name__}: {exc}",
+            markup=False,
+            highlight=False,
+        )
+        sys.exit(6)
 
     if validate:
         try:

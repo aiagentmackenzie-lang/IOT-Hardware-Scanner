@@ -632,12 +632,72 @@ def _count_kinds(entries: list[Any]) -> dict[str, int]:
 # ──────────────────────────────────────────────
 
 
+#: Sections a renderer iterates. Each element must be an object: a document is
+#: untrusted input (it may have been produced by another tool), so a string or a
+#: list where an object belongs is rejected before a renderer indexes into it.
+_LIST_SECTIONS = ("findings", "controls", "stages", "components")
+_OBJECT_SECTIONS = (
+    "artifact",
+    "assessment",
+    "outcome",
+    "entropy",
+    "inventory",
+    "risk_score",
+    "component_bases",
+    "boot",
+    "cache",
+)
+
+
+def _validate_document_shape(document: dict[str, Any]) -> None:
+    """Reject a document whose sections have the wrong shape.
+
+    This is deliberately shallow: it checks the containers the renderers walk,
+    not every field inside them. A hostile or corrupted document must be
+    reported as invalid input (exit 3) instead of reaching a renderer and
+    raising ``AttributeError`` from ``.get`` on a string.
+    """
+    version = document.get("schema_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ValueError(f"schema_version must be an integer, not {type(version).__name__}")
+
+    for section in _OBJECT_SECTIONS:
+        value = document.get(section)
+        if value is not None and not isinstance(value, dict):
+            raise ValueError(
+                f"section {section!r} must be an object or null, not {type(value).__name__}"
+            )
+
+    for section in _LIST_SECTIONS:
+        value = document.get(section)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            raise ValueError(
+                f"section {section!r} must be a list or null, not {type(value).__name__}"
+            )
+        for index, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"section {section!r} entry {index} must be an object, "
+                    f"not {type(entry).__name__}"
+                )
+
+
 def load_document(data: dict[str, Any]) -> dict[str, Any]:
     """Return a schema-2 document, upgrading a v1 document if necessary."""
     if not isinstance(data, dict):
         raise ValueError("report document must be a JSON object")
 
     raw_version = data.get("schema_version")
+    if raw_version is None:
+        # An unversioned document is a v1 report -- but only if it has the shape
+        # of one. Anything else must not be silently relabelled "legacy".
+        if not _looks_like_v1(data):
+            raise ValueError("document has no schema_version and does not describe a v1 report")
+    elif not isinstance(raw_version, int) or isinstance(raw_version, bool):
+        raise ValueError(f"schema_version must be an integer, not {type(raw_version).__name__}")
+
     if raw_version == SCHEMA_VERSION:
         document = dict(data)
         document.setdefault("findings", [])
@@ -649,6 +709,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("risk_score", None)
         document.setdefault("boot", None)
         document.setdefault("cache", None)
+        _validate_document_shape(document)
         return document
 
     if raw_version == 5:
@@ -666,6 +727,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
     # "not recorded" values. An absent section is never read as a negative.
     document.setdefault("boot", None)
     document.setdefault("cache", None)
+    _validate_document_shape(document)
     return document
 
 
@@ -806,6 +868,28 @@ def _upgrade_v2(data: dict[str, Any]) -> dict[str, Any]:
         },
     )
     return document
+
+
+def _looks_like_v1(data: dict[str, Any]) -> bool:
+    """Whether an unversioned document can be read as the historical v1 format.
+
+    v1 had no ``schema_version``. Treating *every* unversioned object as v1 would
+    let an arbitrary JSON file render as a "legacy report"; the historical shape
+    is an artifact record plus at least one of the v1 sections.
+    """
+
+    def _section(name: str) -> dict[str, Any]:
+        value = data.get(name, {})
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError(f"section {name!r} must be an object in a v1 document")
+        return value
+
+    firmware = _section("firmware")
+    for name in ("credentials", "cve", "c2_malware", "risk_score", "sbom"):
+        _section(name)
+    return bool(firmware) or isinstance(data.get("scan_id"), str)
 
 
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:

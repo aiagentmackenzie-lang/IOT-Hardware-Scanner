@@ -12,9 +12,18 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.4.0
+## Status — version 2.5.0
 
-Version 2.4 adds two post-D slices. **Boot manifests** (`firmware-boot`): bounded
+Version 2.5 is a **hardening release with no new format and no schema change**.
+Every parser that consumes untrusted bytes — the gzip/SquashFS headers, FDT/FIT,
+the opkg database, the extraction worker's tar stream and the saved-document
+loaders — now has a committed adversarial corpus and property tests, and a
+malformed artifact becomes a named `FAILED` stage with exit 4 instead of a
+traceback. A saved document that is not a readable report is exit 3; a scanner
+defect outside every stage is exit 6 with one line. Report schema stays 6 and the
+profile version stays 5.0. Record: [docs/2E-HOSTILE-INPUT.md](docs/2E-HOSTILE-INPUT.md).
+
+Version 2.4 added two post-D slices. **Boot manifests** (`firmware-boot`): bounded
 parsers for flattened device trees and U-Boot FIT, with board compatibility,
 memory, partitions, configurations and referenced payloads; digest integrity,
 signature presence and verification against an **operator-supplied** key are
@@ -226,6 +235,12 @@ a documented observation and both a positive and a lookalike-negative fixture. E
 including `LIKELY_C2` indicators, unqualified YARA hits and crypto observations — is a review
 finding and exits 2.
 
+**Hostile input never produces a traceback.** A malformed, truncated or
+out-of-bounds artifact fails the stage that could not read it, is reported with
+the reason, and exits 4; the findings already collected survive. A saved document
+that is not a readable report is invalid input (3) and is rejected before any
+renderer indexes into it.
+
 ---
 
 ## Report document
@@ -244,7 +259,7 @@ document, and neither is a substitute for one.
 ```json
 {
   "schema_version": 6,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.4.0"},
+  "tool": {"name": "iot-hardware-scanner", "version": "2.5.0"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",
