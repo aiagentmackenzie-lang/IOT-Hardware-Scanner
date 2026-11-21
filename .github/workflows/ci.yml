@@ -218,7 +218,10 @@ jobs:
         run: |
           docker build -t "$IHS_WORKER_IMAGE" worker/
           echo "worker image id: $(docker image inspect --format '{{.Id}}' "$IHS_WORKER_IMAGE")"
-          docker run --rm --entrypoint unsquashfs "$IHS_WORKER_IMAGE" -version
+          # `unsquashfs -version` prints its banner and exits 1 by design, so the
+          # status is read through a pipe and the line is what is checked.
+          docker run --rm --entrypoint /usr/bin/unsquashfs "$IHS_WORKER_IMAGE" -version \
+            2>&1 | head -1
 
       - name: Stage the pinned image
         run: |
@@ -250,6 +253,8 @@ jobs:
       - name: No skips in the qualified gate
         if: always()
         run: |
+          test -s /tmp/gate.log || { echo "the acceptance run produced no log"; exit 1; }
+          grep -qE "[0-9]+ passed" /tmp/gate.log || { echo "the acceptance run did not pass"; exit 1; }
           if grep -qE "[0-9]+ skipped" /tmp/gate.log; then
             echo "a skip leaves that capability unqualified; the release gate fails"
             grep -E "SKIPPED|skipped" /tmp/gate.log || true

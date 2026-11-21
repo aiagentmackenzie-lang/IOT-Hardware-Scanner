@@ -180,7 +180,7 @@ def _readelf_output(tool: str, path: Path, spec_name: str, shared: Path) -> str:
                 "-v",
                 f"{shared}:/w:ro",
                 "--entrypoint",
-                "readelf",
+                "/usr/bin/readelf",
                 "ihs-squashfs-worker:4.5.1",
                 "-h",
                 f"/w/{spec_name}",

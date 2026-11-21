@@ -179,7 +179,7 @@ def build_image(tree: Path, destination: Path, runtime: str) -> Path:
             "-v",
             f"{staging / 'out'}:/out",
             "--entrypoint",
-            "mksquashfs",
+            "/usr/bin/mksquashfs",
             WORKER_IMAGE,
             "/src",
             "/out/root.squashfs",

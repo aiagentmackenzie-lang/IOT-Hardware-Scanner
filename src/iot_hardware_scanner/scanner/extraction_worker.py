@@ -770,9 +770,12 @@ class SquashfsWorker:
             )
         except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - runtime dependent
             return None
-        if completed.returncode != 0:  # pragma: no cover - runtime dependent
+        # `unsquashfs -version` prints its banner and exits 1 by design, so the
+        # status is not evidence of failure here: a parsed version line is.
+        lines = [line for line in completed.stdout.splitlines() if "version" in line.lower()]
+        if not lines:  # pragma: no cover - runtime dependent
             return None
-        self._version_cache = completed.stdout.strip().splitlines()[0]
+        self._version_cache = lines[0].strip()
         return self._version_cache
 
     # ──────────────────────────────────────────
