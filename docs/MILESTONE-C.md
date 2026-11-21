@@ -1,7 +1,9 @@
 # Milestone C — “Ship the qualified scanner”
 
-Status: **complete, and qualified in CI.** CI run **`44863590710`** on `main`
-(`c00b0e5`) is **8/8 job instances green**, including the `linux-extractor` gate:
+Status: **complete, and qualified in CI.** Two runs on `main` are **8/8 job
+instances green**: **`44863590710`** (`c00b0e5`, the release commit) and
+**`44864141977`** (`08254bf`, a docs-only re-run). Both include the
+`linux-extractor` gate:
 the pinned worker image built from `worker/Dockerfile`, the wheel installed
 outside the checkout, the reference image digest-verified before the scan, and
 **113 acceptance tests passed with zero skips**. Slices 4A → 4D → 4C → 6A → 6B
