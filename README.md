@@ -12,11 +12,18 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.0
+## Status — version 2.2.0
 
-Version 2 removes the aggregate 0–100 security grade and reports **named checks, findings,
-limitations and completion** instead. See [What changed in 2.0](#what-changed-in-20) and
-[docs/MIGRATION-v2.md](docs/MIGRATION-v2.md).
+Version 2.2 is the first **qualified** release: it names the rule set that
+produced each finding, gives every match a typed destination, calibrates all 12
+named checks, and can apply a local advisory snapshot **offline**. The aggregate
+0–100 grade stays retired. See [what changed](#what-changed-in-20) and
+[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md).
+
+The qualification record — formats, tested level, host requirements, corpus
+descriptions and the measured detector numbers — is
+[docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md). Every capability below links
+to a passing case.
 
 | Capability | State |
 | --- | --- |
@@ -30,7 +37,12 @@ limitations and completion** instead. See [What changed in 2.0](#what-changed-in
 | ELF identity, dependencies and hardening evidence | ✅ read from the file's own headers |
 | Installed-package (opkg) inventory | ✅ read verbatim from the image |
 | Staged root trees (`--input-tree`, declared manifests) | ✅ implemented |
-| Advisory (CVE) applicability | ❌ not implemented; always reported as *unassessed*, never as clean |
+| One compiled rule set, with a published digest | ✅ implemented |
+| Typed match destinations (credential / service / crypto / indicator) | ✅ implemented |
+| 12 named checks, each with a named evidence source | ✅ implemented |
+| Advisory applicability from a **local snapshot**, offline | ✅ implemented; needs `--advisory-snapshot` |
+| Online advisory refresh inside a scan | ❌ never — refresh is a separate operation |
+| Component inventory → CPE coverage | ⚠️ 3 of 196 packages on the reference image map to a CPE |
 | MCU / FIT / RAUC / partitioned images | ❌ later gates, not in this release |
 | CycloneDX SBOM export | ❌ not implemented |
 | Release-to-release comparison | ❌ not implemented |
@@ -50,9 +62,13 @@ pip install iot-hardware-scanner
 | Extra | Provides | Notes |
 | --- | --- | --- |
 | *(none)* | click, pydantic, python-magic, rich, jinja2, yara-python, pyelftools | Everything needed to scan a staged tree, an opaque artifact, or an extracted image |
-| `[nvd]` | nvdlib | Optional online advisory refresh |
+| `[nvd]` | nvdlib | Optional online advisory refresh (outside the scan) |
 | `[yaml_support]` | PyYAML | YAML config files (TOML needs nothing extra on 3.11+) |
 | `[dev]` | pytest, pytest-cov, ruff, mypy, pyyaml | Development and CI |
+
+`yara-python` is a **required** part of the release profile: from version 2.2 the
+`rule_compilation` stage is required, so a wheel without a working rule engine
+reports a missing dependency (exit 5) instead of silently finding nothing.
 
 There is **no `extraction` extra**. Extraction does not run in-process: the gzip wrapper is decoded
 here and the SquashFS filesystem is decoded by upstream `unsquashfs` in a pinned Linux worker, so
@@ -82,6 +98,10 @@ iot-hardware-scanner scan ./staged-root --input-tree --build-manifest declared.j
 # Scan a gzip-wrapped SquashFS image; offline by default
 iot-hardware-scanner scan firmware.img.gz --offline --format json --out report.json
 
+# Apply a local advisory snapshot (still offline: the scan never fetches)
+iot-hardware-scanner scan firmware.img.gz --offline \
+  --advisory-snapshot advisory-2026-11.json --format json --out report.json
+
 # Decode an image without analysing it
 iot-hardware-scanner extract firmware.img.gz --output ./extracted
 
@@ -107,13 +127,16 @@ and never prints a success line. `--offline` remains valid; it is also the defau
 
 | Profile | Selected by | Required stages |
 | --- | --- | --- |
-| `firmware-static` | default for a file | ingest, extraction, root discovery, enumeration, entropy, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks |
-| `firmware-tree` | `--input-tree`, or a directory positional | ingest, enumeration, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks — **no extraction, no entropy** |
-| `credentials-only` | `--creds` / `--profile credentials-only` | ingest, enumeration, credentials, Unix accounts, checks |
+| `firmware-static` | default for a file | ingest, rule compilation, extraction, root discovery, enumeration, entropy, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks |
+| `firmware-tree` | `--input-tree`, or a directory positional | ingest, rule compilation, enumeration, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks — **no extraction, no entropy** |
+| `credentials-only` | `--creds` / `--profile credentials-only` | ingest, rule compilation, enumeration, credentials, Unix accounts, checks |
 
 A profile completes only when every stage it requires either ran or is genuinely inapplicable. A
 staged tree has no container to decode, so it never carries an extraction prerequisite; the
 extraction stage is recorded `NOT_APPLICABLE` with that reason.
+
+Supplying `--advisory-snapshot` promotes the advisory stage to **required** for that run. A missing
+or unreadable snapshot then leaves the assessment incomplete and exits 5 or 4 — never 0.
 
 ---
 
@@ -127,7 +150,7 @@ document and the process status cannot disagree.
 | 3 | Invalid input or configuration |
 | 6 | Internal error, or the requested report could not be written |
 | 1 | A critical finding that meets its **documented evidence rule** (including on an incomplete assessment) |
-| 5 | A required dependency or snapshot is missing (no container runtime or worker image, for an image input) |
+| 5 | A required dependency or snapshot is missing (no container runtime or worker image, for an image input; or a requested advisory snapshot that is absent) |
 | 4 | Analysis incomplete (unsupported input, extraction failed, limit reached, input could not be bound) |
 | 2 | Report delivered, review or non-critical finding |
 | 0 | Report delivered, all required work completed, no findings |
@@ -137,23 +160,26 @@ saved document already carries the scan's own outcome.
 
 Only rules listed in `scanner/assessment.py::CRITICAL_RULE_EVIDENCE` can produce exit 1. Each has
 a documented observation and both a positive and a lookalike-negative fixture. Everything else —
-including `LIKELY_C2` indicators and unqualified YARA hits — is a review finding and exits 2.
+including `LIKELY_C2` indicators, unqualified YARA hits and crypto observations — is a review
+finding and exits 2.
 
 ---
 
 ## Report document
 
-One schema-3 JSON document is the single source for every format. Full details in
-[docs/MIGRATION-v3.md](docs/MIGRATION-v3.md); the schema-2 change is in
+One schema-4 JSON document is the single source for every format. Full details in
+[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md); the schema-3 change is in
+[docs/MIGRATION-v3.md](docs/MIGRATION-v3.md) and the schema-2 change in
 [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md).
 
 ```json
 {
-  "schema_version": 3,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.0.0"},
+  "schema_version": 4,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.2.0"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",
+    "profile_version": "4.0",
     "completion": "COMPLETE",
     "incomplete_reasons": [],
     "check_counts": {"PERFORMED": 3, "INCONCLUSIVE": 3, "NOT_APPLICABLE": 0, "OMITTED": 6}
@@ -161,8 +187,23 @@ One schema-3 JSON document is the single source for every format. Full details i
   "stages":   [{"stage": "credential_scan", "status": "COMPLETE", "required": true,
                 "inspected": 2, "eligible": 2, "reason": "inventory-scoped scan"}],
   "findings": [{"rule_id": "credential.unix.empty_password", "severity": "CRITICAL",
+                "destination": "credential", "namespaces": [], "ruleset_digest": "",
                 "locations": ["slot_a/etc/shadow:2"], "critical_qualified": true}],
-  "controls": [{"control_id": 1, "status": "FAIL", "result": "FAIL", "evidence": ["…"]}],
+  "controls": [{"control_id": 1, "status": "FAIL", "evidence_status": "FAIL",
+                "applicability": "APPLICABLE", "result": "FAIL",
+                "question": "Does the artifact contain a default or hardcoded credential?",
+                "required_source": "the credential rule set and the account databases …",
+                "evidence": ["…"]}],
+  "ruleset": {"digest": "2ca7a94b…", "engine": "yara-python", "engine_version": "4.5.4",
+              "rule_files": [{"namespace": "weak_crypto", "name": "weak_crypto.yar",
+                              "sha256": "…", "rule_count": 3,
+                              "destinations": ["crypto"]}],
+              "compile_errors": []},
+  "advisory": {"state": "ASSESSED", "matched": 1, "kev_matches": 1,
+               "snapshot": {"provider": "nvd", "acquired_at": "…", "digest_sha256": "…",
+                            "age_days": 1.0, "stale": false},
+               "lookups": [{"component": "busybox", "version": "1.36.1-r2",
+                            "state": "MATCHED", "matches": 1}]},
   "image_map": {"root_artifact_id": "a0", "nodes": [
     {"artifact_id": "a0", "format": "gzip", "coordinate_system": "container-bytes",
      "length": 4451127, "decoder": "python-zlib", "decoder_version": "1.2.12"},
@@ -197,7 +238,7 @@ already contained a grade, in which case `legacy_grade` labels it with its metho
 | --- | --- |
 | `COMPLETE` | Ran over its whole eligible population |
 | `PARTIAL` | Ran, but some eligible members were not inspected |
-| `UNAVAILABLE` | Required capability absent (backend, snapshot) |
+| `UNAVAILABLE` | Required capability absent (backend, snapshot, rule engine) |
 | `FAILED` | Ran and errored |
 | `SKIPPED` | Deliberately not requested |
 | `NOT_APPLICABLE` | No eligible population for this input/profile |
@@ -209,36 +250,41 @@ means the population really was enumerated and found empty.
 
 ## Named checks
 
-The 12 control names are kept for continuity. Each is reported with its own evidence status
-(`PERFORMED`, `INCONCLUSIVE`, `NOT_APPLICABLE`, `OMITTED`) and its result; there is no aggregate
-score and no points.
+The 12 control names are kept for continuity. Each is reported with its own
+**question**, the **evidence source** that can answer it, an evidence status
+(`PERFORMED`, `INCONCLUSIVE`, `NOT_APPLICABLE`, `OMITTED`) and its result; there
+is no aggregate score and no points. Every control has a positive, a contrary
+and a missing-evidence case in `tests/test_control_matrix.py`.
 
-| # | Check | Evidence source |
-| --- | --- | --- |
-| 1 | No default/hardcoded credentials | credential scan |
-| 2 | No unnecessary network services | configured startup directives (with source line) |
-| 3 | No outdated/vulnerable components | advisory snapshot — not implemented, so always unassessed |
-| 4 | Encrypted data at rest | format evidence only; entropy can never pass it |
-| 5 | Secure firmware update mechanism | enumerated update paths |
-| 6 | Secure boot/integrity | **always unknown** from a static image |
-| 7 | No backdoor interfaces | indicator sweep |
-| 8 | Strong cryptography used | account hash algorithms and crypto-rule matches |
-| 9 | Minimal attack surface | SUID / world-writable files |
-| 10 | Binary hardening present | ELF program headers — positive evidence only; a stripped file's silence proves nothing |
-| 11 | No C2/malware indicators | indicator sweep |
-| 12 | Accurate component inventory | the image's own opkg records, with banner findings as candidates only |
+| # | Check | Question | Required source |
+| --- | --- | --- | --- |
+| 1 | No default/hardcoded credentials | Does the artifact contain a default or hardcoded credential? | the credential rule set and the account databases, after placeholder, documentation and reachability rules |
+| 2 | No unnecessary network services | Does the artifact configure a service, and is it listening? | startup directives with their source line (configured); a socket table from the device (listening) |
+| 3 | No outdated/vulnerable components | Does an applicable advisory affect a shipped component? | a local advisory snapshot applied to observed product and version |
+| 4 | Encrypted data at rest | Is data stored in the artifact encrypted? | format evidence; byte distribution is an observation, never a verdict |
+| 5 | Secure firmware update mechanism | Does shipped content verify a signature or digest? | the update-path files in the enumerated image |
+| 6 | Secure boot/integrity | Does the board enforce that verification at boot? | boot log, fuse/OTP state — **never** available from an image |
+| 7 | No backdoor interfaces | Does the artifact contain a backdoor interface? | the indicator rule set and sweep, after reachability rules |
+| 8 | Strong cryptography used | Does the artifact use a strong algorithm? | algorithm identifiers in shipped binaries, account hash algorithms, the TLS package record — **not** binary hardening |
+| 9 | Minimal attack surface | Any SUID or world-writable file? | permission bits from the image or a declared manifest |
+| 10 | Binary hardening present | Do binaries carry positive hardening evidence? | program headers: NX, PIE, RELRO; a stripped file's silence proves nothing |
+| 11 | No C2/malware indicators | Does the artifact carry an indicator? | the indicator rule set and heuristic sweep, with typed destinations |
+| 12 | Accurate component inventory | Is the inventory backed by the image's own records? | the installed-package database and read ELF metadata |
 
-Three rules worth stating plainly:
+Rules worth stating plainly:
 
 * **Entropy is a distribution, not an encryption detector.** Constant bytes measure 0 bits/byte,
   two alternating symbols measure 1, 256 equally frequent byte values measure 8. A high-entropy
-  region is reported as `high_entropy` and nothing more.
+  region is reported as `high_entropy` and nothing more. Check 4 can never pass on it.
 * **A configured startup entry is not a listening socket.** Service findings carry the file and
   line that configured them and stay `INCONCLUSIVE`; device evidence is required to go further.
 * **A locked password is one authentication method.** A `root:!…` shadow line is not a critical
   plaintext-password finding; an empty password field on a login account is.
 * **A missing symbol table is not missing hardening.** A section-stripped binary yields `null` for
   canary and FORTIFY, and check 10 reports the property as unknown rather than as absent.
+* **An algorithm being present is not an algorithm being used.** Check 8 reports weak-algorithm
+  code with its file and offset, and reviews rather than failing the image.
+* **Verification in a script is not enforcement at boot.** Check 5 and check 6 are separate.
 * **A host-derived permission bit is not an image permission bit.** A staged tree without a build
   manifest cannot produce a clean attack-surface result; the check answers `INCONCLUSIVE`.
 
@@ -257,6 +303,8 @@ offline_mode = true
 report_formats = ["json", "markdown"]
 c2_suspicion_threshold = 40.0
 c2_likely_threshold = 60.0
+advisory_snapshot = "advisory-2026-11.json"
+advisory_snapshot_max_age_days = 30
 ```
 
 ```bash
@@ -274,15 +322,19 @@ PyYAML fails with a clear message rather than being silently ignored.
 A scan never reaches the network: there is no code path that issues a request unless an operator
 explicitly asks for a refresh, and refresh is a separate operation.
 
-Advisory assessment is **not implemented in this release**. The advisory stage is recorded as
-`SKIPPED` with that reason, check 3 is `OMITTED`, and the report says applicability was **not
-assessed** — never that the image is clean.
+Advisory assessment reads a **local snapshot** (`--advisory-snapshot`, or the
+`advisory_snapshot` setting) and issues zero requests; `tests/test_advisory.py` asserts that with
+`urllib.request.urlopen` replaced by a function that raises. Without a snapshot the advisory stage
+is `SKIPPED` with that reason, check 3 is `OMITTED`, and the report says applicability was **not
+assessed** — never that the image is clean. The snapshot format is documented in
+[docs/MIGRATION-v4.md](docs/MIGRATION-v4.md#4-the-advisory-snapshot-format).
 
 Bundled data ships inside the installed package (nothing is loaded from the current directory or
 your home directory) and each file's digest is recorded in `data_sources`. Files that are examples
 are flagged as samples; conclusions that depend on them are indicative, not current.
 
-Custom YARA rules are opt-in:
+Rules are compiled **once per run** from the package plus any directory the operator names
+explicitly, and the resulting digest is in the report. Custom rules are opt-in:
 
 ```bash
 iot-hardware-scanner scan firmware.img --yara-rules ./my_rules/
@@ -301,8 +353,9 @@ iot-hardware-scanner scan firmware.img --yara-rules ./my_rules/
 | Isolated extraction | Read-only input, no network, no capabilities, size-limited tmpfs, memory/pid/CPU limits, streamed output and a wall-clock deadline |
 | Untrusted names | Every member name from the worker is validated before anything is created; symlinks are metadata only |
 | Report writes | Atomic, to the exact requested path, with failures surfaced |
-| No ambient rule loading | Rules come from the package or an explicit flag |
-| Offline default | No network path is taken unless a snapshot/refresh is requested |
+| No ambient rule loading | Rules come from the package or an explicit flag; a scan's verdict cannot change because of a file next to it |
+| Typed matches | A rule's category decides what a match may become; no detector relabels another's match |
+| Offline default | No network path is taken unless a snapshot/refresh is requested; the snapshot path is asserted to issue zero requests |
 
 ---
 
@@ -315,6 +368,7 @@ pip install -e ".[dev]"
 ruff check src/ tests/
 mypy src/
 pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80
+ruff format --check src/ tests/
 ```
 
 Release-qualification checks that need an external artifact are opt-in:
@@ -324,7 +378,7 @@ Release-qualification checks that need an external artifact are opt-in:
 export IHS_REFERENCE_IMAGE=/path/to/openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz
 pytest tests/test_installed_cli.py -k openwrt
 
-# Milestone B acceptance rows: needs the worker image as well
+# Acceptance rows that need the worker image as well
 docker build -t ihs-squashfs-worker:4.5.1 worker/
 pytest tests/test_installed_image_cli.py -v
 
@@ -333,7 +387,9 @@ uv build && uv pip install dist/*.whl
 IHS_INSTALLED_CLI=$(command -v iot-hardware-scanner) pytest tests/test_installed_cli.py
 ```
 
-The reference image used for qualification is
+The qualified release for 2.2.0 is recorded in
+[docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md): wheel, worker image, rule-set
+and corpus digests, with the platform each was built on. The reference image is
 `openwrt-24.10.0-armsr-armv8-generic-squashfs-rootfs.img.gz`, SHA-256
 `8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02` (4,451,127 bytes on the wire,
 109,051,904 bytes decompressed, SquashFS v4 with 4,348,264 bytes used). Fetch and verify it
@@ -348,17 +404,36 @@ The reference image used for qualification is
   reported as unsupported rather than guessed at.
 * **A worker is required for image extraction.** Without a container runtime the product still
   identifies the image and reports honestly, but it cannot enumerate the filesystem (exit 5).
+* **The rule set is now a hard requirement.** If the packaged rules cannot compile, the assessment
+  is incomplete and the exit is 5 or 4. A rule file that is invalid is listed in
+  `ruleset.compile_errors` and in the `rule_compilation` stage.
+* **Advisory assessment needs a snapshot.** Without one, applicability is unassessed (check 3
+  `OMITTED`) — never clean. A snapshot older than `advisory_snapshot_max_age_days` is reported
+  stale, and a clean result from it cannot pass.
+* **Domain indicators use a bounded suffix list.** `data/domain_suffixes.txt` is shipped and its
+  digest recorded. A name under a suffix that is not listed is missed rather than guessed at; the
+  alternative was reporting `libc.so` and `payload.offset` as C2 infrastructure.
+* **A rule match is not a verdict.** A crypto finding says an implementation is present in a named
+  file at a named offset; it does not say the device uses it.
 * **Installed-package records are not file evidence.** The database says what the package manager
   recorded; it does not prove every package-owned file is present or intact.
-* **Section-stripped binaries** yield `unknown` for canary and FORTIFY: the dynamic symbol table
-  lives in a section these images do not carry.
-* **Advisory applicability is unassessed** — check 3 is `OMITTED`, never a pass.
+* **Component-to-CPE coverage is partial.** On the reference image, 3 of 196 installed records map
+  to a product in the shipped CPE map, so `components[]` is much smaller than `opkg.records[]`.
+  The package records are all there; the mapping is the gap.
+* **Section-stripped binaries** yield `unknown` for canary and FORTIFY.
 * **Static analysis cannot establish** runtime behaviour, exposed network services, physical boot
   enforcement or which A/B slot is running.
 * **Staged-tree metadata is host-derived** unless a build manifest is supplied; a clean
   permission result is then `INCONCLUSIVE`, not a pass.
 * **Banner-derived components are candidates**, ranked below the image's own package records.
 * **Sample data** (`kev_catalog.json`, `threat_intel_sample.jsonl`) is bundled for exercise only.
+* **The reference image exits 1.** Stock OpenWrt 24.10.0 records `root::` in `/etc/shadow` — an
+  empty password field joined to a `/bin/ash` login shell. That meets the documented critical
+  rule, so the scanner reports it and exits 1 while the assessment is `COMPLETE`. It is a true
+  observation about the shipped file; upstream leaves provisioning to first boot (Dropbear is
+  key-only, there is no telnet). The finding carries that applicability note as evidence, and the
+  observation is never suppressed. The decision is written up in
+  [docs/MILESTONE-C.md](docs/MILESTONE-C.md).
 
 ## License
 
