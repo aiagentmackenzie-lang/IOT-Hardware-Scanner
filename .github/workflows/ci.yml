@@ -138,18 +138,22 @@ jobs:
           set -e
           test -f requested.json || { echo "requested report was not written"; exit 1; }
           test "$status" -ne 0 || { echo "an unanalysed image exited 0"; exit 1; }
-          python -c "
-          import json
+          # The expected schema comes from the installed package, not from a
+          # number copied into this workflow: a duplicated constant is how this
+          # gate last went stale.
+          /tmp/ihs-venv/bin/python -c "
+          import json, sys
+          from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
           d = json.load(open('requested.json'))
-          assert d['schema_version'] == 3
+          assert d['schema_version'] == SCHEMA_VERSION, (d['schema_version'], SCHEMA_VERSION)
           assert d['assessment']['completion'] == 'INCOMPLETE'
           assert d['risk_score'] is None
-          print('blank image: exit', $status, '->', d['outcome']['exit_reason'])
-          "
+          print('blank image: exit', sys.argv[1], '->', d['outcome']['exit_reason'])
+          " "$status"
 
   # ---------------------------------------------------------------------------
-  # Report-contract job: schema, replay, renderer equivalence and the v2 -> v3
-  # migration.
+  # Report-contract job: schema, replay, renderer equivalence and the v1/v2/v3
+  # reader migrations.
   # ---------------------------------------------------------------------------
   report-contract:
     name: Report schema and replay
