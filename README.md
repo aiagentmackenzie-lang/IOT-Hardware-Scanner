@@ -22,7 +22,9 @@ separate fields, and physical boot enforcement is always `unknown`.
 **Repeated work** (5C): an opt-in content-addressed cache of deterministic
 parser outputs, measured at 7.73 s → 1.81 s and 205.8 MB → 110.0 MB on the
 pinned corpus, with identical reports. Report schema 6, profile version 5.0.
-The aggregate 0–100 grade stays retired.
+The aggregate 0–100 grade stays retired. Qualified in CI: run `44904681133`,
+8/8 jobs green, 200 acceptance tests with zero skips in the job that runs the
+real extraction path.
 
 Version 2.3 delivered the release comparison, declaration reconciliation and
 CycloneDX export; 2.2 was the first qualified release. See
@@ -55,7 +57,7 @@ to a passing case.
 | 12 named checks, each with a named evidence source | ✅ implemented |
 | Advisory applicability from a **local snapshot**, offline | ✅ implemented; needs `--advisory-snapshot` |
 | Online advisory refresh inside a scan | ❌ never — refresh is a separate operation |
-| Component inventory → CPE coverage | ✅ 196 of 196 records on the reference image carry a component, each with a recorded basis (3 `nist-mapped`, 193 `opkg-package-name`) |
+| Component inventory → CPE coverage | ✅ 196 of 196 records on the reference image carry a component, each with a recorded basis (5 `nist-mapped`, 191 `opkg-package-name`) |
 | Release-to-release comparison (`compare`) | ✅ implemented, offline, on two saved scans |
 | Build-declaration reconciliation (OpenWrt manifest, CycloneDX 1.4) | ✅ implemented, with each declaration's digest, binding and four outcomes |
 | CycloneDX 1.6 BOM export (`sbom --validate`) | ✅ implemented, validated against a vendored schema |
@@ -294,7 +296,7 @@ document, and neither is a substitute for one.
                   "cpe": "cpe:2.3:a:busybox:busybox:1.36.1-r2:*:*:*:*:*:*:*",
                   "cpe_basis": "nist-mapped", "confidence": "recorded",
                   "evidence": "rootfs/usr/lib/opkg/status:2804-3095 (line 102)"}],
-  "component_bases": {"counts": {"nist-mapped": 3, "opkg-package-name": 193, "banner": 0},
+  "component_bases": {"counts": {"nist-mapped": 5, "opkg-package-name": 191, "banner": 0},
                       "total": 196},
   "data_sources": [{"name": "kev_catalog.json", "sample": true, "sha256": "…"}],
   "risk_score": null,

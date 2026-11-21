@@ -138,6 +138,7 @@ Side by side on the generated fixture:
 | Format | `ruff format --check src/ tests/` | clean, run last |
 | Wheel | `uv build && shasum -a 256 dist/*.whl` | `iot_hardware_scanner-2.4.0-py3-none-any.whl`, sha256 `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` (macOS arm64 build) |
 | Installed-CLI acceptance, wheel mode | `IHS_INSTALLED_CLI=… pytest tests/test_installed_image_cli.py tests/test_installed_cli.py` against the 2.4.0 wheel in a clean 3.12.14 venv | **46 passed, 0 skipped** (2.3: 34) |
+| CI | run **`44904681133`** on `main` (`49ce0cb`) | **8/8 job instances green**: `python-gate` 3.10/3.12/3.14 (881 passed, 29 skipped each — the reference-image and container rows the qualified job runs), `linux-extractor` **200 passed, 0 skipped**, `bounded-resources` 61 passed / 0 skipped, installed wheel 22 passed / 1 skipped (allowed there), report contract 88 passed / 1 skipped, backend-absent image rows green |
 
 ## 4. Evidence
 
@@ -150,10 +151,13 @@ Side by side on the generated fixture:
 | Worker package list | `worker/packages-verify.txt` adds `device-tree-compiler=1.6.1-4+b1`, `libfdt1=1.6.1-4+b1`, `libssl3=3.0.17-1~deb12u2`, `libyaml-0-2=0.2.5-1`, `u-boot-tools=2023.01+dfsg-2+deb12u1`; runtime list unchanged |
 | 5C measurement | §1 and [docs/5C-DECISION.md](5C-DECISION.md) |
 
-| Wheel (local build) | `iot_hardware_scanner-2.4.0-py3-none-any.whl`, sha256 `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` |
-| CI run | appended after the qualification run |
-| Worker image ids | appended after the qualification run; the id is **observed, not reproducible** (the image configuration records a build timestamp), while the Dockerfile digest, both package lists and the tool versions are the reproducible facts |
-| Local worker verification image | rebuilt with the added tools; `fdtdump`/`fdtget` report DTC 1.6.1 and `mkimage -V` reports 2023.01 |
+| Wheel | `iot_hardware_scanner-2.4.0-py3-none-any.whl`, sha256 `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — **byte-identical** from the macOS arm64 build and the Linux CI build (`installed-wheel-no-backend`) |
+| CI run | **`44904681133`** on `main` (`49ce0cb`) — 8/8 green; `linux-extractor` **200 passed, 0 skipped** |
+| Worker image, runtime (CI amd64, qualified) | `sha256:ca23e01c3eb1dabdc328dfe63bff8206d759d9a2538860157a2ef07b74ed2532` — **observed, not reproducible** |
+| Worker image, verification stage (CI amd64, qualified) | `sha256:74264ed08e979c274bd34b730e35a3bb5a9753b8d34d1d279e0a49a2731e745c` — observed |
+| Dockerfile / package lists | Dockerfile `2dbcb8f4…ab16`; `worker/packages.txt` `e26f55bd…00c9` (90 packages); `worker/packages-verify.txt` `840887c9…4a44` (103 packages) |
+| Runtime image contents | `unsquashfs` sha256 `2fde9bcb…9243`; package-set digest `2e938beb…2b17`; no `readelf` (checked) |
+| Oracle versions in CI | `unsquashfs 4.5.1 (2022/03/17)`, GNU readelf 2.40, **DTC 1.6.1**, **mkimage 2023.01** |
 
 ---
 

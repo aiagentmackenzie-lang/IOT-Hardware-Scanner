@@ -150,13 +150,15 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
-| Wheel (2.4.0, local macOS arm64 build) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; the CI build is appended after the qualification run |
+| Wheel (2.4.0, qualified) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44904681133` |
 | Wheel (2.3.0, superseded) | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — byte-identical from the macOS arm64 build and both Linux CI builds |
 | Wheel (Linux CI build, qualified artifact) | same digest, built by `linux-extractor` in run `44897056652` |
-| Worker image, runtime (Linux amd64, CI, qualified) | `sha256:8f9818aa4b33aa9c045308fa51d8e5d79dba135d9f7a43b43b7544d37f7e5262` — **observed, not reproducible** |
-| Worker image, verification stage (Linux amd64, CI) | `sha256:a7c206d57ef05a403b7b102edc0cc089daca6495bfc521d0010249231605d11d` — observed |
+| Worker image, runtime (Linux amd64, CI, 2.4 qualified) | `sha256:ca23e01c3eb1dabdc328dfe63bff8206d759d9a2538860157a2ef07b74ed2532` — **observed, not reproducible** |
+| Worker image, verification stage (Linux amd64, CI, 2.4 qualified) | `sha256:74264ed08e979c274bd34b730e35a3bb5a9753b8d34d1d279e0a49a2731e745c` — observed |
+| Worker image, runtime/verification (2.3, superseded) | `sha256:8f9818aa…5262` / `sha256:a7c206d5…d11d` |
 | Worker image, local arm64 | runtime `sha256:91b0ebd4…110`, verification `sha256:fab6e227…840` — observed |
-| Worker 2.3 Dockerfile / package lists | Dockerfile `44e6fb84…981e2`; `packages.txt` `e26f55bd…900c9` (90 exact versions, Debian snapshot); `packages-verify.txt` `7f238099…8eab` (98) |
+| Worker 2.4 Dockerfile / package lists | Dockerfile `2dbcb8f4…ab16`; `packages.txt` `e26f55bd…00c9` (90 exact versions, Debian snapshot); `packages-verify.txt` `840887c9…4a44` (103, adds DTC/u-boot-tools) |
+| Worker 2.3 Dockerfile / package lists (superseded) | Dockerfile `44e6fb84…981e2`; `packages.txt` `e26f55bd…900c9`; `packages-verify.txt` `7f238099…8eab` (98) |
 | Worker content reproducibility | two `--no-cache` builds: `dpkg-query -W` digest `2e938beb…` and `/usr/bin/unsquashfs` sha256 `cb10af7f…` identical; image ids differ (`7970b906…`, `ae64e345…`) |
 | Worker image (2.2, superseded) | runtime `sha256:9ec4ca96…` (CI amd64) / `sha256:3ec87f2d…` (local arm64); carried binutils, which the 2.3 runtime image does not |
 | `unsquashfs` | `unsquashfs version 4.5.1 (2022/03/17)` |
@@ -182,7 +184,14 @@ configuration records a build timestamp. The report records the id it actually
 used; the Dockerfile digest, the package list and `unsquashfs version 4.5.1
 (2022/03/17)` are the reproducible facts.
 
-Qualified run for 2.3: GitHub Actions **`44897056652`** on `main` (`aa16f7a`),
+Qualified run for 2.4: GitHub Actions **`44904681133`** on `main` (`49ce0cb`),
+**8/8 job instances green**, `linux-extractor` **200 passed with zero skips**
+(including the FIT/DTB oracle and the repeated-work cache rows),
+`bounded-resources` 61 passed with zero skips, and the CI wheel digest equal to
+the local build's. `python-gate` ran 881 passed / 29 skipped on 3.10, 3.12 and
+3.14 (the reference-image and container rows the qualified job runs).
+
+The 2.3 qualification was GitHub Actions **`44897056652`** on `main` (`aa16f7a`),
 **8/8 job instances green**, `linux-extractor` **166 passed with zero skips**
 (including the comparison, declaration and SBOM rows), `bounded-resources` 61
 passed with zero skips (2 GiB at 16 MiB windows in 105.06 s, peak RSS
