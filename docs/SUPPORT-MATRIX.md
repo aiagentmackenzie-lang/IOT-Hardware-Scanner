@@ -11,7 +11,8 @@ and checked for a pass when it runs, and every acceptance class in the two
 installed-entrypoint modules must be named by a row here. Release 2.5.0 was the
 hardening release; its adversarial-input rows below are unchanged, and every
 other row keeps the evidence recorded for 2.4.
-Numbers come from runs recorded in [docs/MILESTONE-C.md](MILESTONE-C.md) (the
+Numbers come from runs recorded in [docs/P2-PERFORMANCE.md](P2-PERFORMANCE.md)
+(the performance contract), [docs/MILESTONE-C.md](MILESTONE-C.md) (the
 2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
 SBOM and inventory work) and [docs/MILESTONE-E.md](MILESTONE-E.md) (the 5C and
 3D slices). The repeated-work cache is recorded separately in
@@ -171,6 +172,26 @@ comparison runs. It is not extended to the other detectors.
 | Entropy block size 128 vs 256 | identical bytes read and identical whole-input entropy; regions move only at block boundaries |
 | Same tree scanned twice from two host paths | identical normalised document except recorded paths |
 | Two directories with different ambient `.yar` files | identical rule-set digest and identical findings (no ambient rule loading) |
+
+### Performance contract (slice P2)
+
+Measured on the machine named in [`docs/P2-PERFORMANCE.md`](P2-PERFORMANCE.md):
+Apple M4 Pro arm64, CPython 3.12.14. Generated inputs only; no corpus or worker
+image is needed. Wall is the minimum of the rounds; RSS is the peak of a fresh
+child process per case.
+
+| Case | Input | Wall | Peak RSS | Evidence |
+| --- | --- | --- | --- | --- |
+| Cold `firmware-tree` scan | 357 files / 98.6 MiB | **17.287 s** | 470.8 MiB | `tests/test_perf_contract.py`, `benchmarks/baseline.json` |
+| Warm scan (`--cache-dir`) | same tree | **1.813 s** (90 % saved) | 480.9 MiB | same |
+| Device-tree parse | 1,068,232-byte DTB, 3,001 nodes | **11.057 ms** | 45.1 MiB | same |
+| Windowed entropy | 2 GiB, 16 MiB blocks | **31.101 s** | 76.2 MiB | same |
+
+The envelope (+25 % wall, +15 % RSS) applies only on a host whose fingerprint
+matches the baseline; elsewhere the run is recorded, not judged, and the
+machine-independent invariants are still enforced
+(`tests/test_perf_contract.py::test_a_different_machine_is_recorded_not_passed`,
+`::test_the_cache_invariant_is_enforced_without_an_applicable_baseline`).
 
 ---
 
