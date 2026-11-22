@@ -1,0 +1,87 @@
+{
+  "cases": {
+    "cold-scan": {
+      "peak_rss_bytes": 493682688,
+      "result": {
+        "assessment": "COMPLETE",
+        "cache": null,
+        "elf": 200,
+        "files": 357,
+        "findings": 357,
+        "packages": 400
+      },
+      "wall_seconds": 17.286847,
+      "wall_source": "pytest-benchmark min"
+    },
+    "entropy-2gib": {
+      "peak_rss_bytes": 79888384,
+      "result": {
+        "blocks": 128,
+        "bytes": 2147483648,
+        "sampled": false
+      },
+      "wall_seconds": 31.101243,
+      "wall_source": "pytest-benchmark min"
+    },
+    "fit-parse": {
+      "peak_rss_bytes": 47300608,
+      "result": {
+        "compatible": 2,
+        "nodes": 3001
+      },
+      "wall_seconds": 0.011057,
+      "wall_source": "pytest-benchmark min"
+    },
+    "warm-scan": {
+      "peak_rss_bytes": 504266752,
+      "result": {
+        "assessment": "COMPLETE",
+        "cache": {
+          "bytes": 1025972,
+          "enabled": true,
+          "entries": 174,
+          "evicted": 0,
+          "format": "ihs-analysis-cache/1",
+          "hits": 1396,
+          "invalid": 0,
+          "max_bytes": 268435456,
+          "max_entries": 20000,
+          "misses": 0,
+          "note": "Cache entries hold deterministic parser outputs keyed by content digest and the rule-set/extractor identity; artifact paths are never stored. A hit is still an observation of the same bytes and the same parser.",
+          "path": "/Users/agentmackenzie/.cache/ihs-perf/cache",
+          "skipped": 0,
+          "writes": 0
+        },
+        "elf": 200,
+        "files": 357,
+        "findings": 357,
+        "packages": 400
+      },
+      "wall_seconds": 1.812545,
+      "wall_source": "pytest-benchmark min"
+    }
+  },
+  "envelope": {
+    "rss": 0.15,
+    "wall": 0.25
+  },
+  "fingerprint": {
+    "cpu_count": 14,
+    "engine": "2.5.1",
+    "fixtures": "56504e3d7ad111313e0e7ded698871762c946af0d11a2df81dde084309a23392",
+    "machine": "arm64",
+    "python": "3.12.14",
+    "system": "Darwin",
+    "yara": "4.5.4"
+  },
+  "fixtures": {
+    "dtb_bytes": 1068232,
+    "entropy_bytes": 2147483648,
+    "plan": "56504e3d7ad111313e0e7ded698871762c946af0d11a2df81dde084309a23392",
+    "tree_bytes": 103360793,
+    "tree_files": 357
+  },
+  "format": "ihs-perf-baseline/1",
+  "note": "Wall is the minimum of the pytest-benchmark rounds; RSS is the child-process peak. The envelope applies only when the fingerprint matches.",
+  "recorded_at": "2026-11-22T11:13:40+00:00"
+}

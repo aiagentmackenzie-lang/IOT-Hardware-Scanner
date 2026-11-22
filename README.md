@@ -101,7 +101,7 @@ pip install iot-hardware-scanner
 | *(none)* | click, pydantic, python-magic, rich, jinja2, yara-python, pyelftools | Everything needed to scan a staged tree, an opaque artifact, or an extracted image |
 | `[nvd]` | nvdlib | Optional online advisory refresh (outside the scan) |
 | `[yaml_support]` | PyYAML | YAML config files (TOML needs nothing extra on 3.11+) |
-| `[dev]` | pytest, pytest-cov, ruff, mypy, pyyaml | Development and CI |
+| `[dev]` | pytest, pytest-cov, pytest-benchmark, hypothesis, jsonschema, ruff, mypy, pyyaml | Development, CI and the performance contract |
 
 `yara-python` is a **required** part of the release profile: from version 2.2 the
 `rule_compilation` stage is required, so a wheel without a working rule engine
@@ -465,11 +465,29 @@ iot-hardware-scanner scan firmware.img --yara-rules ./my_rules/
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-ruff check src/ tests/
+ruff check src/ tests/ benchmarks/
 mypy src/
 pytest --cov=src/iot_hardware_scanner --cov-report=term --cov-fail-under=80
-ruff format --check src/ tests/
+ruff format --check src/ tests/ benchmarks/
 ```
+
+### Performance
+
+Four measured paths (cold tree scan, warm scan with `--cache-dir`, device-tree
+parse, 2 GiB windowed entropy) run on generated inputs -- no corpus and no
+worker image. They are **not** part of a bare `pytest` (`testpaths` is `tests`):
+
+```bash
+pytest benchmarks/ --benchmark-json=bench.json        # wall time
+python benchmarks/measure.py --out measure.json       # peak RSS, one child per case
+python benchmarks/perf_contract.py --measure measure.json --bench bench.json
+```
+
+The recorded baseline and the envelope (+25 % wall, +15 % RSS, applied only on a
+host whose fingerprint matches) are in [docs/P2-PERFORMANCE.md](docs/P2-PERFORMANCE.md).
+The machine-independent invariants (warm faster than cold, 2 GiB pass under
+256 MiB) are enforced everywhere, including CI, where the numbers are recorded as
+an artifact rather than judged.
 
 Release-qualification checks that need an external artifact are opt-in:
 

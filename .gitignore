@@ -30,6 +30,11 @@ report.json
 report.md
 report.html
 
+# Benchmark run outputs (benchmarks/baseline.json is committed; these are not)
+bench.json
+measure.json
+.benchmarks/
+
 # Test artifacts
 tests/fixtures/*.bin
 tests/fixtures/*.img

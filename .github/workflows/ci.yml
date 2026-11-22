@@ -53,8 +53,8 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check src/ tests/
-          ruff format --check src/ tests/
+          ruff check src/ tests/ benchmarks/
+          ruff format --check src/ tests/ benchmarks/
 
       - name: Type check with mypy
         run: mypy src/
@@ -284,6 +284,45 @@ jobs:
           PY
       - name: Publish the measurement
         run: echo "measurement recorded in the job log; the release notes quote it"
+
+  # ---------------------------------------------------------------------------
+  # PERFORMANCE CONTRACT (slice P2). The recorded baseline in
+  # benchmarks/baseline.json was measured on a Mac mini (Darwin arm64). A shared
+  # runner is a different instrument, so this job RECORDS wall time and peak RSS
+  # and enforces only the machine-independent invariants (warm faster than cold,
+  # 2 GiB pass under 256 MiB, every case returns a semantic result). The envelope
+  # is enforced on the machine the baseline names, with the same three commands.
+  # See docs/P2-PERFORMANCE.md.
+  # ---------------------------------------------------------------------------
+  performance-contract:
+    name: Performance contract (recorded; envelope on a matching host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: The contract's own tests
+        run: pytest tests/test_perf_contract.py -q --fail-on-skips
+      - name: Wall time (pytest-benchmark, generated inputs)
+        run: pytest benchmarks/ --benchmark-json=bench.json
+      - name: Peak RSS (one child process per case)
+        run: python benchmarks/measure.py --out measure.json
+      - name: Contract (envelope if the fingerprint matches, invariants always)
+        run: python benchmarks/perf_contract.py --measure measure.json --bench bench.json
+      - name: Upload the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-measurement
+          path: |
+            bench.json
+            measure.json
+          retention-days: 90
 
   # ---------------------------------------------------------------------------
   # MILESTONE C QUALIFIED GATE (was milestone B). This is the only job with the real extraction
