@@ -221,6 +221,16 @@ Qualified run for 2.4: GitHub Actions **`44904681133`** on `main` (`49ce0cb`),
 the local build's. `python-gate` ran 881 passed / 29 skipped on 3.10, 3.12 and
 3.14 (the reference-image and container rows the qualified job runs).
 
+Release 2.5.1 is a **claim-surface release**: no format, schema or profile
+changed. Qualified in GitHub Actions **`44972264882`** on `main` (`0226fd3`),
+**8/8 jobs green**: `python-gate` **947 passed / 29 skipped** on 3.10, 3.12 and
+3.14 (2.5.0: 926 / 29), `linux-extractor` **221 passed with zero skips** (200) —
+now including the claim-matrix and schema-compat rows — `installed-wheel-no-backend`
+22 acceptance rows plus **45 hostile rows with zero skips**, `bounded-resources`
+61 / 0, `report-contract` 109 / 1, and the Linux wheel digest equal to the macOS
+build's. The claim surface and the v1-replay null fix are recorded in
+[docs/P1-CLAIM-MATRIX.md](P1-CLAIM-MATRIX.md).
+
 Release 2.5.0 is a **hardening release**: no format, schema or profile changed.
 Qualified in GitHub Actions **`44911766646`** on `main` (`9d4f3dc`), **8/8 jobs
 green**: `python-gate` **926 passed / 29 skipped** on 3.10, 3.12 and 3.14,

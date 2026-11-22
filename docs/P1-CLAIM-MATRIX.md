@@ -206,11 +206,27 @@ worker images:
 | Item | Value |
 | --- | --- |
 | Installed-wheel acceptance | **112 passed, 0 skipped** — `test_installed_cli`, `test_installed_image_cli`, the 45 2E hostile/property/isolation rows, plus the 21 new claim/schema rows, with `--fail-on-skips` (2.5.0 wheel mode: 91) |
-| CI | recorded below once the run finishes: see §8.2 |
+| CI | run `44972264882` on `main` (`0226fd3`), 8/8 jobs green |
 
 ### 8.2 CI run
 
-Filled in after the push.
+Run **`44972264882`** on `main` (`0226fd3`): **8/8 jobs green**.
+
+| Job | Result |
+| --- | --- |
+| `python-gate` (3.10 / 3.12 / 3.14) | **947 passed, 29 skipped** on each; coverage 87.02 / 87.00 / 87.00 % (2.5.0: 926 / 29). The skips are the corpus, container and `readelf` rows this job does not install. |
+| `linux-extractor` | **221 passed, 0 skipped** (2.5.0: 200), with `--fail-on-skips`, including the claim-matrix and schema-compat modules |
+| `installed-wheel-no-backend` | 22 acceptance passed / 1 declared skip; **45 hostile/property/isolation rows, 0 skipped**; the Linux wheel digest equals the macOS build's |
+| `bounded-resources` | **61 passed, 0 skipped** |
+| `report-contract` | **109 passed, 1 declared skip** (2.5.0: 88 / 1) |
+| `reference-image` | 3 passed, 1 declared skip |
+
+The first run, **`44971850978`** on `9e04c4a`, was **5/8**, and both failures were
+the new gate doing its job: `ruff` found an unused variable in the rewritten
+report test, and `linux-extractor` could not import `hypothesis` because the
+claim check collects the whole suite while that job's venv carried only the
+`sbom` extra. `0226fd3` fixed both — the venv now installs the wheel with
+`[sbom,dev]` — and no gate was loosened.
 
 ---
 
