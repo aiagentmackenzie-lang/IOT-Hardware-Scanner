@@ -12,9 +12,17 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.5.0
+## Status — version 2.5.1
 
-Version 2.5 is a **hardening release with no new format and no schema change**.
+Version 2.5.1 makes the published claims **executable**. Every test reference in the
+support matrix must resolve to a collected test and pass when it runs; the report-schema
+reader is tested against one fixture per version 1 to 6; and the qualified CI jobs fail on a
+skip through `--fail-on-skips` instead of grepping the log. The one report change is that a
+replayed v1 document now carries the explicit `null` "not recorded" sections every other
+upgrade path already had. No format, schema or profile changed: schema 6, profile 5.0.
+Record: [docs/P1-CLAIM-MATRIX.md](docs/P1-CLAIM-MATRIX.md).
+
+Version 2.5.0 is the **hardening release with no new format and no schema change**.
 Every parser that consumes untrusted bytes — the gzip/SquashFS headers, FDT/FIT,
 the opkg database, the extraction worker's tar stream and the saved-document
 loaders — now has a committed adversarial corpus and property tests, and a
@@ -261,7 +269,7 @@ document, and neither is a substitute for one.
 ```json
 {
   "schema_version": 6,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.5.0"},
+  "tool": {"name": "iot-hardware-scanner", "version": "2.5.1"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",

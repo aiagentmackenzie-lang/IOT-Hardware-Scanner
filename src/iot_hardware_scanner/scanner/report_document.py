@@ -893,7 +893,19 @@ def _looks_like_v1(data: dict[str, Any]) -> bool:
 
 
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
-    """Convert an unversioned v1 document without inventing facts."""
+    """Convert an unversioned v1 document without inventing facts.
+
+    Every section the schema-6 document defines from 2.1 onward is present as
+    ``None`` ("not recorded"), matching what a v2 upgrade produces. Before P1 a
+    v1 replay simply omitted them, so a consumer reading
+    ``document["image_map"]`` got ``KeyError`` for v1 and ``None`` for v2 for the
+    same absence. The v1 format never had these concepts, and ``None`` is the
+    marker for that; no fact is invented, and no empty list stands in for an
+    unknown.
+
+    ``outcome`` and ``data_sources`` are not added: they are schema-2 fields a v1
+    document never recorded, and the renderers treat their absence as unknown.
+    """
     firmware = data.get("firmware") or {}
     findings: list[dict[str, Any]] = []
 
@@ -993,7 +1005,16 @@ def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
         "findings": findings,
         "inventory": None,
         "entropy": data.get("entropy"),
+        "image_map": None,
+        "extraction": None,
+        "input_binding": None,
+        "elf": None,
+        "opkg": None,
+        "tree": None,
+        "ruleset": None,
+        "advisory": None,
         "components": (data.get("sbom") or {}).get("components", []),
+        "component_bases": None,
         "risk_score": legacy_grade,
         "legacy_grade": legacy_grade,
     }

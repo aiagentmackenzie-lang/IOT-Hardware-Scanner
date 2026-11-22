@@ -10,10 +10,104 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from claims import claimed_outcomes
 from harness import PACKAGE_SRC, Runner, build_runner
+from run_recorder import RECORDER
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.models import FirmwareSizeCategory, ScanContext
+
+# ──────────────────────────────────────────────
+# Run-wide outcome record and the skip gate
+# ──────────────────────────────────────────────
+#
+# ``--fail-on-skips`` is the enforcement for a qualified CI job. It replaces
+# grepping the pytest log for "N skipped", which was a proxy that could drift
+# from the run: the flag sees every skip pytest itself saw, and prints the node
+# id with the reason that made the capability unqualified.
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--fail-on-skips",
+        action="store_true",
+        default=False,
+        dest="fail_on_skips",
+        help=(
+            "fail the process if any test skips, naming the node id and the "
+            "reason (used by every qualified CI job)"
+        ),
+    )
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Feed the shared recorder used by the claim-matrix check."""
+    RECORDER.record(report)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Decide the run's claim verdict, then the skip gate.
+
+    This runs after every module, which is the only place a claim can be checked
+    against what actually ran: pytest executes modules in file order, so a test
+    inside the claim module cannot see a failure in a module it has not reached.
+
+    * A claimed test that failed leaves its row unqualified -- the process fails.
+    * A claimed test that skipped is reported; with ``--fail-on-skips`` it also
+      fails the process.
+    * ``--fail-on-skips`` fails on any skip, claimed or not, naming node and
+      reason.
+    """
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    write = reporter.write_line if reporter is not None else print
+    strict = bool(session.config.getoption("fail_on_skips"))
+    unqualified = False
+
+    try:
+        failed_claims, skipped_claims = claimed_outcomes(RECORDER.outcomes)
+    except Exception as exc:  # a broken matrix is reported by its own test
+        write(
+            f"CLAIM MATRIX: docs/SUPPORT-MATRIX.md could not be read: {type(exc).__name__}: {exc}"
+        )
+        failed_claims, skipped_claims = [], []
+
+    if failed_claims:
+        write("")
+        write("CLAIM MATRIX: a claimed test did not pass; its row is unqualified")
+        for claim, outcome in failed_claims:
+            write(
+                f"  CLAIM line {claim.line}: `{claim.text}` -> {outcome.nodeid}: "
+                f"{outcome.reason or 'failed'}"
+            )
+        unqualified = True
+
+    if skipped_claims:
+        write("")
+        write(
+            "CLAIM MATRIX: claimed node(s) did not run to completion, so the row is unverified here"
+        )
+        for claim, outcome in skipped_claims:
+            write(
+                f"  UNVERIFIED line {claim.line}: `{claim.text}` -> {outcome.nodeid}: "
+                f"{outcome.reason or 'skipped'}"
+            )
+        unqualified = unqualified or strict
+
+    if strict and RECORDER.skipped:
+        write("")
+        write(
+            "FAIL-ON-SKIPS: a skip leaves the capability claimed for that node "
+            "unqualified; the run fails"
+        )
+        for outcome in RECORDER.skipped:
+            write(f"  SKIPPED {outcome.nodeid}")
+            write(f"          reason: {outcome.reason}")
+        unqualified = True
+
+    if unqualified:
+        # The exit status is the process result: automation must not be able to
+        # read an unqualified claim or a skip as a pass.
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture

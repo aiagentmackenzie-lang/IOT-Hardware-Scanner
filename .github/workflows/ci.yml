@@ -145,14 +145,13 @@ jobs:
         run: |
           # Slice 2E. The hostile rows and the parser properties need no worker,
           # so a skip here means the capability is unqualified, not unavailable.
+          # `--fail-on-skips` is the enforcement: the process exits non-zero and
+          # names the node id and reason. The log is kept for humans, not parsed.
           set -o pipefail
           /tmp/ihs-venv/bin/python -m pytest \
             tests/test_hostile_inputs.py tests/test_parser_properties.py \
-            tests/test_stage_isolation.py -v -rfs 2>&1 | tee /tmp/hostile.log
-          if grep -qE "[0-9]+ skipped" /tmp/hostile.log; then
-            echo "a skip leaves the hostile-input gate unqualified"
-            exit 1
-          fi
+            tests/test_stage_isolation.py -v -rfs --fail-on-skips \
+            2>&1 | tee /tmp/hostile.log
 
       - name: Blank-image contract
         run: |
@@ -196,7 +195,8 @@ jobs:
       - name: Exit precedence and document contract
         run: |
           pytest tests/test_exit_contract.py tests/test_report_document.py \
-                 tests/test_report_schema3.py tests/test_cli.py -v
+                 tests/test_report_schema3.py tests/test_schema_compat.py \
+                 tests/test_claim_matrix.py tests/test_cli.py -v
 
   # ---------------------------------------------------------------------------
   # Reference-image job, backend absent. Fetches the pinned image in its own
@@ -247,17 +247,12 @@ jobs:
           pip install -e ".[dev]"
       - name: Reader and budget contracts
         run: |
+          # A skip leaves a resource-limit case unexercised. `--fail-on-skips`
+          # fails the process on one, naming the node and the reason; the log is
+          # for humans.
           set -o pipefail
           pytest tests/test_bounded_reader.py tests/test_entropy.py \
-            -v -rfs 2>&1 | tee /tmp/resources.log
-      - name: No skips in the resource gate
-        run: |
-          test -s /tmp/resources.log || { echo "the resource run produced no log"; exit 1; }
-          grep -qE "[0-9]+ passed" /tmp/resources.log || { echo "the resource run did not pass"; exit 1; }
-          if grep -qE "[0-9]+ skipped" /tmp/resources.log; then
-            echo "a skip leaves the resource limit case unexercised"
-            exit 1
-          fi
+            -v -rfs --fail-on-skips 2>&1 | tee /tmp/resources.log
       - name: Sparse 2 GiB measurement
         run: |
           cd "$RUNNER_TEMP"
@@ -375,11 +370,12 @@ jobs:
           IHS_REFERENCE_IMAGE: ${{ github.workspace }}/${{ env.IHS_REFERENCE_FILE }}
         run: |
           # `-rfs` lists every skip reason. In this job a skip means the
-          # capability is unqualified, so the next step fails the gate on it.
+          # capability is unqualified, so `--fail-on-skips` fails the process on
+          # it -- no log grepping, and no way for a skip to look like a pass.
           set -o pipefail
           # Every module that carries a release-gate row runs here, against the
-          # wheel installed outside the checkout. A skip in this job leaves that
-          # capability unqualified, and the next step fails on it.
+          # wheel installed outside the checkout, plus the claim-matrix and
+          # schema-compatibility checks that keep the published claims honest.
           /tmp/ihs-venv/bin/python -m pytest \
             tests/test_installed_image_cli.py \
             tests/test_fit_dtb.py \
@@ -391,7 +387,9 @@ jobs:
             tests/test_control_matrix.py \
             tests/test_advisory.py \
             tests/test_invariance.py \
-            -v -rfs 2>&1 | tee /tmp/gate.log
+            tests/test_claim_matrix.py \
+            tests/test_schema_compat.py \
+            -v -rfs --fail-on-skips 2>&1 | tee /tmp/gate.log
 
       - name: Document types, from the installed wheel
         env:
@@ -458,14 +456,3 @@ jobs:
               f"compare exit {compared.returncode}"
           )
           PY
-
-      - name: No skips in the qualified gate
-        if: always()
-        run: |
-          test -s /tmp/gate.log || { echo "the acceptance run produced no log"; exit 1; }
-          grep -qE "[0-9]+ passed" /tmp/gate.log || { echo "the acceptance run did not pass"; exit 1; }
-          if grep -qE "[0-9]+ skipped" /tmp/gate.log; then
-            echo "a skip leaves that capability unqualified; the release gate fails"
-            grep -E "SKIPPED|skipped" /tmp/gate.log || true
-            exit 1
-          fi

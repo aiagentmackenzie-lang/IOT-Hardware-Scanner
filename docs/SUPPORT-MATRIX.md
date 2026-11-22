@@ -1,13 +1,16 @@
-# Support matrix and qualification record — release 2.5.0
+# Support matrix and qualification record — release 2.5.1
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.5.0`, report schema 6, profile version 5.0.
-Release 2.5 is a hardening release: no format, schema or profile changed; the
-adversarial-input rows below are new, and every other row keeps the evidence
-recorded for 2.4.
+Measured with `iot-hardware-scanner 2.5.1`, report schema 6, profile version 5.0.
+Release 2.5.1 changes no format, schema or profile. It makes **this file**
+executable: every backticked test reference is resolved against a collected test
+and checked for a pass when it runs, and every acceptance class in the two
+installed-entrypoint modules must be named by a row here. Release 2.5.0 was the
+hardening release; its adversarial-input rows below are unchanged, and every
+other row keeps the evidence recorded for 2.4.
 Numbers come from runs recorded in [docs/MILESTONE-C.md](MILESTONE-C.md) (the
 2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
 SBOM and inventory work) and [docs/MILESTONE-E.md](MILESTONE-E.md) (the 5C and
@@ -43,6 +46,26 @@ A level means exactly this: **recognized** — the bytes were identified;
 **decoded** — a container was opened; **extracted** — files were materialised;
 **analyzed** — every stage the selected profile requires ran to completion and
 the report says so.
+
+### Failure, artifact and compatibility rows
+
+These are claims too, and they are the ones a reader needs when a scan does not
+produce a clean result. Each Evidence cell names a passing case; this table is
+executable — `tests/test_claim_matrix.py` fails if a row names a test that does
+not exist or did not pass, and it fails if an acceptance class in the two
+installed-entrypoint modules is named by no row at all.
+
+| Case | Tested level | Evidence |
+| --- | --- | --- |
+| Console script and `python -m` entrypoints | **analyzed** — both run the same product from outside the checkout | `tests/test_installed_cli.py::TestBothEntrypoints` |
+| Installed-wheel contents: rules, mappings and catalogs | **verified** — every shipped resource loads with no source tree, and no unresolvable extra is advertised | `tests/test_installed_cli.py::TestResourcesComeFromThePackage`, `::TestWheelContents` |
+| Reference image with the extraction worker absent | **reported** — image identified, dependency named, exit 5, useful partial report | `tests/test_installed_image_cli.py::TestWorkerOff` |
+| Extraction backend failing: corrupt payload, nonzero helper exit, quota breach, timeout | **rejected** — exit 4 in each case, scratch released, a retry succeeds | `::TestFailingBackend` |
+| Build output replaced between ingest and analysis | **snapshot-bound** — new bytes are never attributed to the old digest; the snapshot stays in use when the source moves | `::TestReplacedBuildOutput` |
+| Sparse 2 GiB input under the resource budgets | **bounded** — peak RSS, elapsed time and scratch measured, not assumed | `::TestBudgets` |
+| Generated declaration set: one match, one version mismatch, one declared-only, one observed-only | **analyzed** — four distinguishable outcomes; a revision-less supplier row stays unresolved; another image's declaration resolves nothing | `::TestDeclarationReconciliation` |
+| Saved report schemas 1–6 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
+| The support matrix itself | **executable** — every claimed node resolves to a collected test and passes when it runs; unclaimed tests are reported, not hidden | `tests/test_claim_matrix.py::test_every_matrix_reference_resolves` |
 
 ### Comparison level per input format
 
@@ -155,6 +178,7 @@ comparison runs. It is not extended to the other detectors.
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.5.1, qualified) | `4f7fa23e1141cfe251894358b8b557de8f268fe8800666f285c6cb4a6f185add` — `iot_hardware_scanner-2.5.1-py3-none-any.whl`; two consecutive local builds are byte-identical. **No schema or profile change**, so 2.5.0 and 2.4 reports stay readable; a v1 replay gains explicit `null` "not recorded" sections (see [docs/P1-CLAIM-MATRIX.md](P1-CLAIM-MATRIX.md)) |
 | Wheel (2.5.0, qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44911766646`. **No schema or profile change**, so 2.4 reports stay readable |
 | Wheel (2.4.0, qualified) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44904681133` |
 | Wheel (2.3.0, superseded) | `2f3a0bf6246de4e1fafc4b089425ce318afb2f1a1055f5ce9be723bd2b0e1505` — byte-identical from the macOS arm64 build and both Linux CI builds |
