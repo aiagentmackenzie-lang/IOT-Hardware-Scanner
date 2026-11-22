@@ -90,10 +90,17 @@ def collected_nodeids() -> frozenset[str]:
         check=False,
     )
     if completed.returncode != 0:
+        # A failed collection prints every node id it reached before the error.
+        # The cause is the part that does not look like a node id.
+        detail = [
+            line
+            for line in (completed.stdout + completed.stderr).splitlines()
+            if not line.startswith("tests/")
+        ]
         raise AssertionError(
-            "test collection failed while checking the claims:\n"
-            + completed.stdout
-            + completed.stderr
+            "test collection failed while checking the claims; the venv must be "
+            "able to import every test module (install the wheel with its dev "
+            "extra):\n" + "\n".join(detail)[-4000:]
         )
     nodes = {line.strip() for line in completed.stdout.splitlines() if "::" in line}
     if not nodes:
@@ -234,7 +241,6 @@ def test_unclaimed_tests_are_reported(pytestconfig: pytest.Config) -> None:
     claimed_modules = {claim.module for claim in claims}
     nodes = sorted(collected_nodeids())
     claimed_nodes = {nodeid for nodeid in nodes if any(claim.matches(nodeid) for claim in claims)}
-    unclaimed_nodes = [nodeid for nodeid in nodes if nodeid not in claimed_nodes]
     modules = sorted({nodeid.split("::", 1)[0] for nodeid in nodes})
     unclaimed_modules = [
         module

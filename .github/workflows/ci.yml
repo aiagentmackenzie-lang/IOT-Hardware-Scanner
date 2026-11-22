@@ -360,9 +360,11 @@ jobs:
           /tmp/ihs-venv/bin/pip install --upgrade pip
           # The sbom extra is installed so the export validates offline in this
           # job, and so a missing dependency would fail here rather than skip.
+          # The dev extra is installed because the claim-matrix check collects
+          # the whole suite: every test module must be importable from this venv
+          # (hypothesis, jsonschema, pyyaml), even though only some of them run.
           WHEEL=$(ls dist/*.whl)
-          /tmp/ihs-venv/bin/pip install "${WHEEL}[sbom]"
-          /tmp/ihs-venv/bin/pip install pytest
+          /tmp/ihs-venv/bin/pip install "${WHEEL}[sbom,dev]"
 
       - name: Milestone C and D acceptance rows (reference image, worker image)
         env:
