@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -54,9 +55,13 @@ def run_one(name: str) -> dict[str, Any]:
 
 
 def child(name: str) -> int:
-    # A child may be invoked on its own (an operator reproducing one number);
-    # building the fixtures first keeps the measured region identical either way.
-    cases.prepare_all()
+    # A child may be invoked on its own (an operator reproducing one number), in
+    # which case it prepares the fixtures itself. When the parent spawns it, the
+    # fixtures are already built and preparation is skipped: rule compilation and
+    # the warm-up scan are setup cost, and including them would charge ~16 MiB of
+    # compiled rules to every case's peak RSS.
+    if os.environ.get("IHS_PERF_FIXTURES_READY") != "1":
+        cases.prepare_all()
     record = run_one(name)
     print(json.dumps(record))
     return 0
@@ -71,6 +76,7 @@ def parent(names: list[str], out: Path) -> int:
             capture_output=True,
             text=True,
             check=False,
+            env=dict(os.environ, IHS_PERF_FIXTURES_READY="1"),
         )
         if completed.returncode != 0:
             sys.stderr.write(completed.stdout)

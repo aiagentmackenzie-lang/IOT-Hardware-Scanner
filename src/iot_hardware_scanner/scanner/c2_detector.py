@@ -12,6 +12,7 @@ import hashlib
 import ipaddress
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 
 from iot_hardware_scanner.config import ScannerConfig
@@ -43,7 +44,7 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 
 #: Identity of the text-fact extractor. Bump when the regexes or the
 #: derivation change: a cache entry made by an older extractor is then ignored.
-TEXT_FACTS_VERSION = "1"
+TEXT_FACTS_VERSION = "2"
 #: The bounded text budget the extractor uses; part of the cache key.
 TEXT_FACTS_MAX_BYTES = 8 * 1024 * 1024
 
@@ -801,11 +802,18 @@ def _text_facts_from_content(content: str) -> dict[str, list[str]]:
 
     emails = _EMAIL_RE.findall(content)
     if emails:
-        lowered = content.lower()
+        # One pass over the content, then one subtraction. The previous version
+        # ran ``content.lower().count(domain)`` once per unique domain, so its
+        # cost was ``domains x bytes`` with both factors under the attacker's
+        # control (slice 2.6): 1,028 domains over 4 MiB was 4.3 GB of scanning
+        # for one file. Counting domain *tokens* also stops a domain that only
+        # appears inside a longer domain (``foo.com`` in ``foo.com.br``) from
+        # being counted as a standalone occurrence.
+        token_totals = Counter(match.lower() for match in _DOMAIN_RE.findall(content))
+        email_totals = Counter(email.rsplit("@", 1)[-1].lower() for email in emails if "@" in email)
         for domain in domains:
-            standalone = lowered.count(domain)
-            in_email = sum(1 for email in emails if domain in email.lower())
-            if standalone == in_email and standalone > 0:
+            total = token_totals.get(domain, 0)
+            if total and total == email_totals.get(domain, 0):
                 email_only.add(domain)
 
     return {
@@ -828,20 +836,15 @@ def _extract_ips_text(path: Path) -> set[str]:
 def _is_email_domain_text(domain: str, path: Path) -> bool:
     """Check if a domain appears only as part of an email address.
 
-    Quick heuristic: if the file contains the domain with an @ prefix,
-    it's likely just an email, not a C2 domain.
+    Uses the same pass as the per-file facts rather than re-scanning the content
+    once per domain; the two answers cannot disagree.
     """
     content = _read_text_bounded(path)
     if not content:
         return False
-
-    email_count = len(_EMAIL_RE.findall(content))
-    if email_count == 0:
+    if not _EMAIL_RE.search(content):
         return False
-
-    standalone = content.lower().count(domain)
-    in_email = sum(1 for e in _EMAIL_RE.findall(content) if domain in e.lower())
-    return standalone == in_email and standalone > 0
+    return domain.lower() in set(_text_facts_from_content(content)["email_only_domains"])
 
 
 # ── Module-level helper ──

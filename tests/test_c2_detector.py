@@ -8,6 +8,7 @@ DomainScorer and ThreatIntelManager.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from iot_hardware_scanner.scanner.c2_detector import (
     _extract_domains_text,
     _extract_ips_text,
     _is_email_domain_text,
+    _text_facts_from_content,
 )
 
 # ──────────────────────────────────────────────
@@ -546,6 +548,41 @@ class TestHelperMethods:
         f.write_text("server example.com\n")
         result = _is_email_domain_text("example.com", f)
         assert result is False
+
+    def test_a_subdomain_does_not_make_its_prefix_standalone(self) -> None:
+        """Slice 2.6: occurrences are domain tokens, not substring hits.
+
+        ``foo.com`` appears only inside an email and inside ``foo.com.br``. The
+        old per-domain ``content.count("foo.com")`` counted the ``.br`` name as a
+        standalone occurrence of ``foo.com`` and cleared it as a C2 candidate.
+        """
+        facts = _text_facts_from_content("Contact a@foo.com or visit foo.com.br\n")
+        assert "foo.com" in facts["email_only_domains"]
+        assert "foo.com.br" not in facts["email_only_domains"]
+
+    def test_a_domain_also_used_standalone_is_not_email_only(self) -> None:
+        facts = _text_facts_from_content("admin@example.com\nGET http://example.com/x\n")
+        assert "example.com" not in facts["email_only_domains"]
+
+    def test_fact_extraction_cost_follows_bytes_not_domains(self) -> None:
+        """Slice 2.6: the email-only pass used to run once per domain.
+
+        Twenty thousand unique domains over 4 MiB was ``20,000 x 4 MiB`` of
+        scanning (about 3 s here, more on a CI runner). One pass is a fraction of
+        a second, so the bound below separates the shapes rather than timing a
+        machine.
+        """
+        lines = [
+            f"http://host{index}.example{index % 97}.com/api user{index % 500}@mail.example.org"
+            for index in range(20_000)
+        ]
+        content = "\n".join(lines)[: 4 * 1024 * 1024]
+        started = time.perf_counter()
+        facts = _text_facts_from_content(content)
+        elapsed = time.perf_counter() - started
+
+        assert len(facts["domains"]) > 15_000, len(facts["domains"])
+        assert elapsed < 2.0, f"text facts took {elapsed:.2f} s: the pass is not linear in bytes"
 
     def test_macho_binary_detection(self, tmp_path: Path) -> None:
         """Mach-O binaries should be correctly identified."""

@@ -350,6 +350,79 @@ def test_control_5_positive_contrary_and_missing(evaluator, tmp_path) -> None:
     assert missing.status is CheckStatus.OMITTED
 
 
+def _binary_update_file(tmp_path: Path, name: str, marker: bytes) -> FilesystemFinding:
+    """A binary artifact whose path says "updater" and whose bytes say "verify"."""
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(marker + b"\x00\x01\x02" * 4096)
+    return FilesystemFinding(
+        path=Path(name),
+        absolute_path=path,
+        category=FileCategory.CRITICAL_CONFIG,
+        file_type="other",
+        file_size=path.stat().st_size,
+        permissions="rw-r--r--",
+        owner_uid=0,
+        owner_gid=0,
+        is_suid=False,
+        is_world_writable=False,
+        hash_sha256="e" * 64,
+    )
+
+
+def test_a_binary_updater_is_not_read_as_text_and_proves_nothing(evaluator, tmp_path) -> None:
+    """Slice 2.6: a path keyword selects a candidate; the content decides.
+
+    The bytes below contain ``verify_signature`` and would satisfy a naive
+    keyword search, which is how the pre-2.6 control reported "a verification step
+    is present" in a random firmware blob. A binary is not evidence either way, so
+    the honest answer is UNKNOWN, not REVIEW and not FAIL.
+    """
+    context = make_context(tmp_path)
+    finding = _binary_update_file(tmp_path, "usr/share/firmware/blob-00.bin", b"verify_signature")
+    context.filesystem_inventory = inventory(tmp_path, findings=[finding])
+
+    result = control(evaluator, context, 5)
+    assert (result.status, result.result) == (CheckStatus.INCONCLUSIVE, "UNKNOWN")
+    assert any("binary file(s) not read as text" in item for item in result.evidence)
+    assert any("not evidence either way" in item for item in result.evidence)
+    assert not any("verification step is present" in item for item in result.evidence)
+
+
+def test_control_5_names_the_file_the_line_and_the_keyword(evaluator, tmp_path) -> None:
+    context = make_context(tmp_path)
+    body = "# updater\nset -e\nsha256sum -c /etc/checksums\n"
+    context.filesystem_inventory = inventory(
+        tmp_path, findings=[_update_file(tmp_path, "sbin/sysupgrade", body)]
+    )
+    result = control(evaluator, context, 5)
+    assert (result.status, result.result) == (CheckStatus.PERFORMED, "REVIEW")
+    named = " ".join(result.evidence)
+    assert "sbin/sysupgrade" in named
+    assert "line 3" in named
+    assert "sha256sum" in named
+    assert "1 text file(s) inspected" in named
+
+
+def test_control_5_reads_a_bounded_prefix_and_says_so(evaluator, tmp_path) -> None:
+    """A verification keyword beyond the per-file budget is not claimed.
+
+    The bound is the point: without it, a 50 MiB binary blob costs the scan
+    hundreds of MiB of resident memory (slice P2 §3.2).
+    """
+    from iot_hardware_scanner.scanner.risk_scorer import UPDATE_SCAN_BYTES
+
+    context = make_context(tmp_path)
+    filler = "# filler\n" * (UPDATE_SCAN_BYTES // 9 + 64)
+    beyond = _update_file(tmp_path, "sbin/sysupgrade", filler + "sha256sum -c /etc/checksums\n")
+    context.filesystem_inventory = inventory(tmp_path, findings=[beyond])
+    assert control(evaluator, context, 5).result == "FAIL"
+
+    inside = _update_file(tmp_path, "sbin/sysupgrade", "sha256sum -c /etc/checksums\n" + filler)
+    context.filesystem_inventory = inventory(tmp_path, findings=[inside])
+    assert control(evaluator, context, 5).result == "REVIEW"
+
+
 def test_control_6_is_never_answered_by_the_image(evaluator, tmp_path) -> None:
     context = make_context(tmp_path)
     finding = _update_file(tmp_path, "sbin/sysupgrade", "verify_signature\n")

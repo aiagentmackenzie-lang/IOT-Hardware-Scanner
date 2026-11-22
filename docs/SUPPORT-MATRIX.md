@@ -1,16 +1,17 @@
-# Support matrix and qualification record — release 2.5.1
+# Support matrix and qualification record — release 2.6.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.5.1`, report schema 6, profile version 5.0.
-Release 2.5.1 changes no format, schema or profile. It makes **this file**
-executable: every backticked test reference is resolved against a collected test
-and checked for a pass when it runs, and every acceptance class in the two
-installed-entrypoint modules must be named by a row here. Release 2.5.0 was the
-hardening release; its adversarial-input rows below are unchanged, and every
-other row keeps the evidence recorded for 2.4.
+Measured with `iot-hardware-scanner 2.6.0`, report schema 6, profile version 5.0.
+Release 2.6.0 changes no format, schema or profile: it bounds what a control
+reads and what a text-fact pass costs, and it stops a binary artifact from
+supplying "verification" evidence ([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)).
+Release 2.5.1 made **this file** executable: every backticked test reference is
+resolved against a collected test and checked for a pass when it runs, and every
+acceptance class in the two installed-entrypoint modules must be named by a row
+here. Every other row keeps the evidence recorded for 2.4 and 2.5.
 Numbers come from runs recorded in [docs/P2-PERFORMANCE.md](P2-PERFORMANCE.md)
 (the performance contract), [docs/MILESTONE-C.md](MILESTONE-C.md) (the
 2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
@@ -173,6 +174,16 @@ comparison runs. It is not extended to the other detectors.
 | Same tree scanned twice from two host paths | identical normalised document except recorded paths |
 | Two directories with different ambient `.yar` files | identical rule-set digest and identical findings (no ambient rule loading) |
 
+### Control evidence and input cost (release 2.6.0)
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| A binary artifact named like an updater is never decoded as text, and proves nothing | `INCONCLUSIVE / UNKNOWN`; the evidence states that binaries were skipped | `tests/test_control_matrix.py::test_a_binary_updater_is_not_read_as_text_and_proves_nothing` |
+| A verification step is named by file, line and keyword | `sbin/sysupgrade`, line 3, `sha256sum` | `tests/test_control_matrix.py::test_control_5_names_the_file_the_line_and_the_keyword` |
+| The per-file read is bounded (256 KiB) and the bound is visible | a keyword beyond the budget is not claimed; one inside it is | `tests/test_control_matrix.py::test_control_5_reads_a_bounded_prefix_and_says_so` |
+| Text-fact cost follows bytes, not domain count | 20,000 domains in 4 MiB in well under 2 s | `tests/test_c2_detector.py::TestHelperMethods::test_fact_extraction_cost_follows_bytes_not_domains` |
+| A domain inside a longer domain is not a standalone occurrence | `foo.com` email-only when it appears only in `a@foo.com` and `foo.com.br` | `tests/test_c2_detector.py::TestHelperMethods::test_a_subdomain_does_not_make_its_prefix_standalone` |
+
 ### Performance contract (slice P2)
 
 Measured on the machine named in [`docs/P2-PERFORMANCE.md`](P2-PERFORMANCE.md):
@@ -182,10 +193,15 @@ child process per case.
 
 | Case | Input | Wall | Peak RSS | Evidence |
 | --- | --- | --- | --- | --- |
-| Cold `firmware-tree` scan | 357 files / 98.6 MiB | **17.287 s** | 470.8 MiB | `tests/test_perf_contract.py`, `benchmarks/baseline.json` |
-| Warm scan (`--cache-dir`) | same tree | **1.813 s** (90 % saved) | 480.9 MiB | same |
-| Device-tree parse | 1,068,232-byte DTB, 3,001 nodes | **11.057 ms** | 45.1 MiB | same |
-| Windowed entropy | 2 GiB, 16 MiB blocks | **31.101 s** | 76.2 MiB | same |
+| Cold `firmware-tree` scan | 357 files / 98.6 MiB | **9.762 s** | 73.5 MiB | `tests/test_perf_contract.py`, `benchmarks/baseline.json` |
+| Warm scan (`--cache-dir`) | same tree | **0.843 s** (91 % saved) | 65.0 MiB | same |
+| Device-tree parse | 1,068,232-byte DTB, 3,001 nodes | **10.982 ms** | 41.8 MiB | same |
+| Windowed entropy | 2 GiB, 16 MiB blocks | **31.008 s** | 68.8 MiB | same |
+
+Release 2.5.1's record for the same cases was cold 17.287 s / 470.8 MiB, warm
+1.813 s / 480.9 MiB, DTB 11.057 ms / 45.1 MiB and entropy 31.101 s / 76.2 MiB;
+the cold scan's memory fell 6.4× with the 2.6.0 fix, and the baseline was
+re-recorded rather than edited.
 
 The envelope (+25 % wall, +15 % RSS) applies only on a host whose fingerprint
 matches the baseline; elsewhere the run is recorded, not judged, and the
@@ -199,6 +215,7 @@ machine-independent invariants are still enforced
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.6.0, local) | `389a1555ecdfb9ec488865c19f276675964d7e27d6545cc992afa0358f54d931` — `iot_hardware_scanner-2.6.0-py3-none-any.whl`; two consecutive local builds are byte-identical. Linux CI byte-identity is recorded by the run that ships it. **No schema or profile change**, so 2.4/2.5 reports stay readable; cached text facts from 2.5 (`ihs-analysis-cache/1`, extractor version 1) are ignored and recomputed |
 | Wheel (2.5.1, qualified) | `4f7fa23e1141cfe251894358b8b557de8f268fe8800666f285c6cb4a6f185add` — `iot_hardware_scanner-2.5.1-py3-none-any.whl`; two consecutive local builds are byte-identical. **No schema or profile change**, so 2.5.0 and 2.4 reports stay readable; a v1 replay gains explicit `null` "not recorded" sections (see [docs/P1-CLAIM-MATRIX.md](P1-CLAIM-MATRIX.md)) |
 | Wheel (2.5.0, qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44911766646`. **No schema or profile change**, so 2.4 reports stay readable |
 | Wheel (2.4.0, qualified) | `ccec88c63eedab9a16a389c6978ac778e06642c1c0040995b59f4d0ac3665f7c` — `iot_hardware_scanner-2.4.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44904681133` |

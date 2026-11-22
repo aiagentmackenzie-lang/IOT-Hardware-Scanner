@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "iot-hardware-scanner"
-version = "2.5.1"
+version = "2.6.0"
 description = "Defensive firmware security analysis platform for IoT/embedded/OT devices"
 readme = "README.md"
 license = "MIT"

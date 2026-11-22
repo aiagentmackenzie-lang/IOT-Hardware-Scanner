@@ -71,6 +71,24 @@ OWASP_IOT_MAP: dict[str, list[int]] = {
 #: Programs whose configured startup is a genuine exposure concern.
 DANGEROUS_SERVICES = frozenset({"telnetd", "ftpd", "rshd", "rlogind", "tftpd"})
 
+#: Path substrings that make a file worth inspecting for an update mechanism.
+#: A substring is only a *candidate*: slice 2.6 found that a directory named
+#: "firmware" selected 25 binary blobs, which were then decoded as text.
+UPDATE_PATH_KEYWORDS = ("update", "upgrade", "firmware", "ota", "sysupgrade")
+
+#: What a verification step looks like in shipped content.
+VERIFICATION_KEYWORDS = ("verify", "signature", "gpg", "sha256sum", "checksum", "ed25519")
+
+#: Slice 2.6 cost bounds. The screen decides whether a file may be read as text
+#: at all; the budget bounds what is read after that. Both are per file, and the
+#: number of files examined is capped, so a hostile tree cannot turn one control
+#: into an unbounded read.
+TEXT_SCREEN_BYTES = 8 * 1024
+TEXT_SCREEN_MIN_PRINTABLE = 0.95
+UPDATE_SCAN_BYTES = 256 * 1024
+UPDATE_SCAN_MAX_LINE = 12 * 1024
+UPDATE_SCAN_MAX_FILES = 50
+
 #: Packages whose presence and version identify the shipped TLS implementation.
 TLS_PACKAGE_NAMES = frozenset(
     {
@@ -505,15 +523,10 @@ class ControlEvaluator:
                 StageId.ENUMERATION,
             )
 
-        update_files = [
-            finding
-            for finding in inventory.findings
-            if any(
-                keyword in str(finding.path).lower()
-                for keyword in ("update", "upgrade", "firmware", "ota", "sysupgrade")
-            )
+        candidates = [
+            finding for finding in inventory.findings if _is_update_candidate(finding.path)
         ]
-        if not update_files:
+        if not candidates:
             return ControlResult(
                 control_id=5,
                 control_name="",
@@ -529,27 +542,41 @@ class ControlEvaluator:
                 source_stage=StageId.ENUMERATION,
             )
 
-        verifiers: list[str] = []
-        for entry in update_files:
-            text = _read_text_bounded(entry.absolute_path, self.config)
-            if not text:
+        # A path keyword is not evidence that a file is readable text: a directory
+        # named "firmware" can hold arbitrary blobs. Screen first, then stream a
+        # bounded number of lines; never materialise a file to search it.
+        inspected = 0
+        not_text = 0
+        verifiers: list[tuple[str, int, str]] = []
+        for entry in candidates:
+            if inspected >= UPDATE_SCAN_MAX_FILES:
+                break
+            if not _looks_textual(_read_head(entry.absolute_path, TEXT_SCREEN_BYTES)):
+                not_text += 1
                 continue
-            lowered = text.lower()
-            if any(
-                keyword in lowered
-                for keyword in ("verify", "signature", "gpg", "sha256sum", "checksum", "ed25519")
-            ):
-                verifiers.append(str(entry.path))
+            inspected += 1
+            step = _first_verification_step(entry.absolute_path)
+            if step is not None:
+                verifiers.append((str(entry.path), step[0], step[1]))
+
+        scanned = (
+            f"{len(candidates)} update-related path(s): {inspected} text file(s) inspected"
+            f" (first {UPDATE_SCAN_BYTES // 1024} KiB of each, line by line), "
+            f"{not_text} binary file(s) not read as text"
+        )
 
         if verifiers:
+            named = ", ".join(
+                f"{path} (line {line}, `{keyword}`)"
+                for path, line, keyword in sorted(verifiers)[:3]
+            )
             return ControlResult(
                 control_id=5,
                 control_name="",
                 status=CheckStatus.PERFORMED,
                 result="REVIEW",
                 evidence=[
-                    f"{len(update_files)} update-related file(s); a verification step is "
-                    f"present in {', '.join(sorted(verifiers)[:3])}",
+                    f"{scanned}; a verification step is present in {named}",
                     "Content verification in a shipped script is not proof that the device "
                     "runs it, or that the public key is pinned. Board enforcement is check 6.",
                 ],
@@ -560,14 +587,35 @@ class ControlEvaluator:
                 source_stage=StageId.ENUMERATION,
             )
 
+        if inspected == 0:
+            # Nothing readable was found to judge. That is not evidence that the
+            # update path is unsigned, so it is UNKNOWN rather than FAIL.
+            return ControlResult(
+                control_id=5,
+                control_name="",
+                status=CheckStatus.INCONCLUSIVE,
+                result="UNKNOWN",
+                evidence=[
+                    scanned,
+                    "None of the update-related paths is a readable text file, so no "
+                    "verification step could be inspected. A binary artifact named like "
+                    "an updater is not evidence either way.",
+                ],
+                remediation=(
+                    "Provide the update scripts or a boot manifest that declares the "
+                    "verification step."
+                ),
+                source_stage=StageId.ENUMERATION,
+            )
+
         return ControlResult(
             control_id=5,
             control_name="",
             status=CheckStatus.PERFORMED,
             result="FAIL",
             evidence=[
-                f"{len(update_files)} update-related file(s), and none of them contains a "
-                "signature, digest or checksum verification step"
+                f"{scanned}; none of the inspected files contains a signature, digest or "
+                "checksum verification step"
             ],
             remediation="Implement signed firmware updates and verify the signature on the device.",
             source_stage=StageId.ENUMERATION,
@@ -1128,16 +1176,66 @@ def _tls_libraries(context: ScanContext) -> list:
     ]
 
 
-def _read_text_bounded(path: Path, config: ScannerConfig, budget_bytes: int | None = None) -> str:
-    """Read a file for inspection without ever reading an arbitrary amount."""
+def _is_update_candidate(path: Path) -> bool:
+    """Whether a path name suggests the update mechanism. Content decides later."""
+    lowered = str(path).lower()
+    return any(keyword in lowered for keyword in UPDATE_PATH_KEYWORDS)
+
+
+def _read_head(path: Path, length: int) -> bytes:
+    """Read at most ``length`` bytes of a file, or nothing if it cannot be read."""
     from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 
-    budget = budget_bytes or config.max_scan_file_size_mb * 1024 * 1024
     try:
-        text, _truncated = open_bounded(path).read_text_bounded(budget, encoding="utf-8")
+        return open_bounded(path).read_head(length)
     except (OSError, ValueError):
-        return ""
-    return text
+        return b""
+
+
+def _looks_textual(head: bytes) -> bool:
+    """Whether a file's first bytes look like text a person could have written.
+
+    This is a *screen*, not a classification. It exists so that a control never
+    decodes an attacker-supplied binary as text: the decoded form of random bytes
+    is several times their size, and a 50 MiB blob was measured to cost the scan
+    15 MiB of resident memory per file (slice P2 §3.2).
+    """
+    if not head:
+        return False
+    if b"\x00" in head:
+        return False
+    printable = sum(
+        1 for byte in head if byte >= 0x80 or byte in (0x09, 0x0A, 0x0D) or 0x20 <= byte < 0x7F
+    )
+    return printable / len(head) >= TEXT_SCREEN_MIN_PRINTABLE
+
+
+def _first_verification_step(path: Path) -> tuple[int, str] | None:
+    """Stream a bounded, line-by-line scan for one verification keyword.
+
+    Latin-1 is deliberate: the keywords are ASCII, and decoding byte-to-char
+    keeps the cost at one byte per character regardless of what the file holds.
+    A line longer than ``UPDATE_SCAN_MAX_LINE`` is yielded with empty text by the
+    reader, so a single unterminated line cannot become the whole budget.
+    """
+    from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+
+    try:
+        reader = open_bounded(path)
+        for line in reader.iter_lines(
+            budget=UPDATE_SCAN_BYTES,
+            max_line=UPDATE_SCAN_MAX_LINE,
+            encoding="latin-1",
+        ):
+            if not line.text:
+                continue
+            lowered = line.text.lower()
+            for keyword in VERIFICATION_KEYWORDS:
+                if keyword in lowered:
+                    return line.number, keyword
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def _stage_completed(context: ScanContext, stage_id: StageId) -> bool:

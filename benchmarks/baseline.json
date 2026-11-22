@@ -1,7 +1,7 @@
 {
   "cases": {
     "cold-scan": {
-      "peak_rss_bytes": 493682688,
+      "peak_rss_bytes": 77103104,
       "result": {
         "assessment": "COMPLETE",
         "cache": null,
@@ -10,36 +10,36 @@
         "findings": 357,
         "packages": 400
       },
-      "wall_seconds": 17.286847,
+      "wall_seconds": 9.761943,
       "wall_source": "pytest-benchmark min"
     },
     "entropy-2gib": {
-      "peak_rss_bytes": 79888384,
+      "peak_rss_bytes": 72187904,
       "result": {
         "blocks": 128,
         "bytes": 2147483648,
         "sampled": false
       },
-      "wall_seconds": 31.101243,
+      "wall_seconds": 31.007538,
       "wall_source": "pytest-benchmark min"
     },
     "fit-parse": {
-      "peak_rss_bytes": 47300608,
+      "peak_rss_bytes": 43827200,
       "result": {
         "compatible": 2,
         "nodes": 3001
       },
-      "wall_seconds": 0.011057,
+      "wall_seconds": 0.010982,
       "wall_source": "pytest-benchmark min"
     },
     "warm-scan": {
-      "peak_rss_bytes": 504266752,
+      "peak_rss_bytes": 68141056,
       "result": {
         "assessment": "COMPLETE",
         "cache": {
-          "bytes": 1025972,
+          "bytes": 2039404,
           "enabled": true,
-          "entries": 174,
+          "entries": 304,
           "evicted": 0,
           "format": "ihs-analysis-cache/1",
           "hits": 1396,
@@ -57,7 +57,7 @@
         "findings": 357,
         "packages": 400
       },
-      "wall_seconds": 1.812545,
+      "wall_seconds": 0.842964,
       "wall_source": "pytest-benchmark min"
     }
   },
@@ -67,7 +67,7 @@
   },
   "fingerprint": {
     "cpu_count": 14,
-    "engine": "2.5.1",
+    "engine": "2.6.0",
     "fixtures": "56504e3d7ad111313e0e7ded698871762c946af0d11a2df81dde084309a23392",
     "machine": "arm64",
     "python": "3.12.14",
@@ -83,5 +83,5 @@
   },
   "format": "ihs-perf-baseline/1",
   "note": "Wall is the minimum of the pytest-benchmark rounds; RSS is the child-process peak. The envelope applies only when the fingerprint matches.",
-  "recorded_at": "2026-11-22T11:13:40+00:00"
+  "recorded_at": "2026-11-22T13:45:34+00:00"
 }

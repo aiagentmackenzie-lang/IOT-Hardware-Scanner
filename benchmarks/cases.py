@@ -354,6 +354,23 @@ def build_dtb(path: Path) -> Path:
     return path
 
 
+def cache_identity() -> str:
+    """What a populated cache depends on, so a stale one cannot be measured warm.
+
+    The fixture plan alone is not enough: the per-file facts carry an extractor
+    version and the match sets carry a rule-set digest. When either moves, every
+    entry misses, and a "warm" benchmark would silently time a cold run (2.6
+    changed the facts extractor and did exactly that until this was keyed).
+    """
+    from iot_hardware_scanner.scanner.c2_detector import TEXT_FACTS_VERSION
+    from iot_hardware_scanner.yara.yara_engine import YaraEngine
+
+    engine = YaraEngine(ScannerConfig())
+    engine.load_rules()
+    payload = f"{iot_hardware_scanner.__version__}:{TEXT_FACTS_VERSION}:{engine.digest}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def ensure_entropy_file(path: Path) -> Path:
     """A sparse 2 GiB file: the size the resource ceiling is stated in."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,9 +475,16 @@ def prepare_all() -> None:
     # cannot be measured against entries for the old one.
     marker = base / "cache-populated.json"
     cache = base / "cache"
-    if not marker.exists() or json.loads(marker.read_text()).get("plan") != plan_fingerprint():
+    identity = {"plan": plan_fingerprint(), "cache": cache_identity()}
+    stale = True
+    if marker.exists():
+        try:
+            stale = json.loads(marker.read_text()) != identity
+        except ValueError:
+            stale = True
+    if stale:
         scan_tree(tree, cache)
-        marker.write_text(json.dumps({"plan": plan_fingerprint()}))
+        marker.write_text(json.dumps(identity, sort_keys=True))
 
 
 def environment_fingerprint() -> dict[str, Any]:

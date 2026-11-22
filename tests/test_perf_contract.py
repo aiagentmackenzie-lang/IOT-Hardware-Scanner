@@ -43,7 +43,7 @@ FINGERPRINT = {
     "python": "3.12",
     "cpu_count": 8,
     "yara": "4.5.1",
-    "engine": "2.5.1",
+    "engine": "2.6.0",
     "fixtures": "plan-digest",
 }
 

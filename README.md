@@ -12,7 +12,19 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.5.1
+## Status — version 2.6.0
+
+Version 2.6.0 bounds what the scanner will read in order to answer a question, and
+stops a binary artifact from answering one. Control 5 used to select "update" files by
+path keyword and decode up to 50 MiB of them as UTF-8, so a directory named
+`firmware/` turned 24 blobs into 373 MiB of resident memory and 7 of them supplied a
+"verification step" out of random bytes. Candidates are now screened for text content,
+the keyword test streams bounded lines instead of materialising the file, and the
+evidence names the file, line and keyword — or says that nothing readable was found.
+The per-file text-fact pass is linear in bytes rather than linear in `domains × bytes`.
+On the recorded performance fixture the cold tree scan moved from 17.3 s / 470.8 MiB
+to 9.8 s / 73.5 MiB. No format, schema or profile changed: schema 6, profile 5.0.
+Record: [docs/2.6-INPUT-COST.md](docs/2.6-INPUT-COST.md).
 
 Version 2.5.1 makes the published claims **executable**. Every test reference in the
 support matrix must resolve to a collected test and pass when it runs; the report-schema
@@ -269,7 +281,7 @@ document, and neither is a substitute for one.
 ```json
 {
   "schema_version": 6,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.5.1"},
+  "tool": {"name": "iot-hardware-scanner", "version": "2.6.0"},
   "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
   "assessment": {
     "profile": "credentials-only",
