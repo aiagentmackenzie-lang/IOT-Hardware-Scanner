@@ -101,16 +101,87 @@ Derived, and reported by the contract on every run:
 ### 3.1 Two observations a lead should not paper over
 
 1. **Peak RSS is ~4.8× the input on the tree case**, and the cache does not
-   reduce it (470.8 → 480.9 MiB). The cache removes repeated *computation*, not
-   the in-memory findings, text facts and rule-match objects it produces. The
-   memory cost therefore scales with the amount of *matched content*, not with
-   the bytes read. This is now pinned by the baseline; it is not fixed by this
-   slice, and it is the first thing to look at if a customer scans a 2 GiB rootfs.
+   reduce it (470.8 → 480.9 MiB). Traced after the baseline was recorded; see
+   §3.2 for the cause and for a second defect it exposed. This is not fixed by
+   this slice, and it is the first thing to look at if a customer scans a 2 GiB
+   rootfs.
 2. **Cold time grew 25 % (13.85 s → 17.29 s) when the fixture grew 19 % in bytes**
    (86.6 → 103.4 MB). The added bytes were high-entropy 4 MiB blobs, which is the
    most expensive per-byte content in the mix. The contract pins the absolute
    number; the superlinearity itself is a property of the content mix and is
    recorded here so nobody reads "25 % more bytes, 25 % more time" into it.
+
+### 3.2 Where the memory goes: a measured diagnosis, and a defect it exposed
+
+Found by sampling RSS and the main-thread stack during a scan, then isolating the
+operation. The peak is **not** in YARA (52 MiB after compiling the rule set and
+56 MiB after scanning all 25 blobs), and not in the Python heap the scan retains
+(`tracemalloc` peak 99.9 MiB, 6.9 MiB live at the end). It is one control.
+
+| Experiment | Peak RSS |
+| --- | --- |
+| cold scan as shipped | **470 MiB** |
+| the same scan with control 5's file read decoded as `latin-1` instead of `utf-8` | **97 MiB** |
+| the same scan with control 5's file read removed | **89 MiB** |
+
+**Mechanism.** Control 5 (`_eval_update`, "secure firmware update mechanism")
+selects update-related files **by path keyword** (`update`, `upgrade`,
+`firmware`, `ota`, `sysupgrade`), so a directory named `.../firmware/` selects 25
+binary blobs. For each one it calls `_read_text_bounded`, which decodes up to
+`max_scan_file_size_mb` (**50 MiB** by default) as **UTF-8 with
+`errors="replace"`**. Arbitrary bytes produce code points above U+FFFF, so the
+result is a 4-byte-per-character string: a 50 MiB file can become a ~200 MiB
+string, and `.lower()` makes a second one.
+
+Isolated, the discarded strings are not returned on this interpreter (CPython
+3.12.14, macOS arm64): decoding a 4 MiB blob to a UCS-4 string and dropping it
+grows RSS by **15.3 MiB per iteration, linearly, after `gc.collect()`**. Controls
+that rule out the obvious explanations:
+
+| Variant | RSS over 20 iterations |
+| --- | --- |
+| `b"\xff" * 4 MiB` → UCS-2 string (2 bytes/char) | flat at 48 MiB |
+| `b"a" * 4 MiB` → UCS-1 string | flat at 44 MiB |
+| `b"\xf0\x9f\x98\x80" * 1 MiB` → UCS-4, 4 MiB string | **+4 MiB per iteration** |
+| the real 4 MiB blob → UCS-4, 15.2 MiB string | **+15.3 MiB per iteration** |
+| allocating the same 16 MiB string directly (`"\U0001F600" * n`) | flat at 34 MiB |
+| as above with `PYTHONMALLOC=malloc` | same growth (not pymalloc) |
+| the same decode with `errors="ignore"` | same growth (not the error handler) |
+| a 1 MiB UCS-4 input, 40 iterations | flat at 21 MiB |
+
+So the growth is proportional to the decoded string and appears above a size
+threshold; it is not the error handler, not pymalloc, and not plain allocation.
+**The scanner's exposure does not depend on which of those is "the bug": the
+read budget bounds the bytes, not the decoded form, and nothing bounds the total
+across a corpus.** A hostile rootfs of 50 MiB blobs named `firmware-*` is a
+memory-amplification denial of service, and 2.5.0's hostile-input slice did not
+catch it because it measured crashes and time, not resident cost.
+
+**The second defect, and the worse one.** The same control reports
+`PERFORMED / REVIEW` on this fixture with the evidence *"24 update-related
+file(s); a verification step is present in tree/usr/share/firmware/blob-00.bin,
+…"*. The "verification step" was found by searching **random binary bytes** for
+`verify`, `signature`, `gpg`, `sha256sum`, `checksum` or `ed25519`; seven of the
+25 blobs contain one of those strings by chance. A binary blob is not an update
+script, and a coincidental string is not evidence that the device verifies
+anything. That is the same failure this project's control rules exist to prevent
+("no PASS without positive evidence"), reached through a file-selection rule
+rather than through a scoring rule.
+
+**Not fixed here.** Both live in `risk_scorer._eval_update` (selection by path
+keyword, unbounded decoded form, evidence from any file) and the second is a
+correctness claim, not just a cost. The fix is one slice: select update files by
+what they are (text, size-capped, not a binary), stream the keyword test over
+bounded lines instead of materialising the file, cap the decoded form, and make
+the evidence name a script. It will change the recorded baseline (for the
+better), so `benchmarks/baseline.json` must be re-recorded with it — which is the
+contract working as intended, not a reason to avoid the change.
+
+A third, smaller observation from the same walk: `c2_detector._text_facts_from_content`
+runs `lowered.count(domain)` **per unique domain** over the whole 4 MiB content
+(1,028 domains × 4 MiB ≈ 4.3 GB of scanning per file, 0.16 s), so its cost is
+`domains × bytes` with both factors attacker-controlled. It is not the dominant
+cost at this fixture size, but it is the same shape of unbounded work.
 
 ## 4. The contract: two rules with different scopes
 
@@ -233,6 +304,9 @@ badge; a recorded artifact is evidence a human can compare across releases.
 * **No benchmark of the 64 MiB artifact cap or the hostile-input corpus.** Those
   are correctness bounds with their own tests; the 2 GiB case covers the reader's
   memory behaviour.
+* **The defect in §3.2 is diagnosed, not fixed.** This slice produced the
+  instrument and the baseline; changing a control's evidence rule is its own
+  slice with its own fixtures, and it must re-record the baseline.
 * **The reported wall time excludes the report renderers.** The case is
   `Orchestrator.run`, the product's analysis path; JSON/HTML rendering is
   exercised by its own contract job.
