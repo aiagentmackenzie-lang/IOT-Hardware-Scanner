@@ -85,26 +85,32 @@ process per case.
 
 | Case | Rounds | Wall min | Wall mean ± sd | Peak RSS |
 | --- | --- | --- | --- | --- |
-| `cold-scan` | 3 | **17.287 s** | 17.339 s ± 0.214 s | **470.8 MiB** |
-| `warm-scan` | 3 | **1.813 s** | 1.817 s ± 0.013 s | **480.9 MiB** |
-| `fit-parse` | 10 | **11.057 ms** | 12.093 ms ± 1.736 ms | **45.1 MiB** |
-| `entropy-2gib` | 2 | **31.101 s** | 31.112 s ± 0.012 s | **76.2 MiB** |
+| `cold-scan` | 3 | **9.762 s** | 9.763 s ± 0.001 s | **73.5 MiB** |
+| `warm-scan` | 3 | **0.843 s** | 0.849 s ± 0.006 s | **65.0 MiB** |
+| `fit-parse` | 10 | **10.982 ms** | 12.128 ms ± 1.7 ms | **41.8 MiB** |
+| `entropy-2gib` | 2 | **31.008 s** | 31.019 s ± 0.011 s | **68.8 MiB** |
+
+These are the **2.6.0** numbers; the baseline was re-recorded with the slice that
+fixed the defect in §3.2. The 2.5.1 record, kept for comparison, was cold
+**17.287 s / 470.8 MiB**, warm **1.813 s / 480.9 MiB**, DTB **11.057 ms /
+45.1 MiB**, entropy **31.101 s / 76.2 MiB** — see
+[docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md) §4.
 
 Derived, and reported by the contract on every run:
 
-* the cache saves **90 %** of the wall time on this tree (17.287 s → 1.813 s),
+* the cache saves **91 %** of the wall time on this tree (9.762 s → 0.843 s),
   consistent with the 5C finding that per-file rule matches and text facts are
   the dominant repeated work;
-* the 2 GiB windowed pass peaks at **76.2 MiB**, i.e. it holds roughly five
+* the 2 GiB windowed pass peaks at **68.8 MiB**, i.e. it holds roughly four
   16 MiB windows and never the file.
 
 ### 3.1 Two observations a lead should not paper over
 
-1. **Peak RSS is ~4.8× the input on the tree case**, and the cache does not
-   reduce it (470.8 → 480.9 MiB). Traced after the baseline was recorded; see
-   §3.2 for the cause and for a second defect it exposed. This is not fixed by
-   this slice, and it is the first thing to look at if a customer scans a 2 GiB
-   rootfs.
+1. **Peak RSS was ~4.8× the input on the tree case**, and the cache did not
+   reduce it. Traced after the baseline was recorded; §3.2 has the cause and a
+   second defect it exposed. **Fixed in 2.6.0**: the same scan is now
+   **9.762 s / 73.5 MiB** (0.75× the input). The 2.5.1 numbers are kept in §3 for
+   comparison, and the diagnosis below is left as it was written.
 2. **Cold time grew 25 % (13.85 s → 17.29 s) when the fixture grew 19 % in bytes**
    (86.6 → 103.4 MB). The added bytes were high-entropy 4 MiB blobs, which is the
    most expensive per-byte content in the mix. The contract pins the absolute
@@ -168,14 +174,12 @@ anything. That is the same failure this project's control rules exist to prevent
 ("no PASS without positive evidence"), reached through a file-selection rule
 rather than through a scoring rule.
 
-**Not fixed here.** Both live in `risk_scorer._eval_update` (selection by path
-keyword, unbounded decoded form, evidence from any file) and the second is a
-correctness claim, not just a cost. The fix is one slice: select update files by
-what they are (text, size-capped, not a binary), stream the keyword test over
-bounded lines instead of materialising the file, cap the decoded form, and make
-the evidence name a script. It will change the recorded baseline (for the
-better), so `benchmarks/baseline.json` must be re-recorded with it — which is the
-contract working as intended, not a reason to avoid the change.
+**Fixed in 2.6.0** ([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)): candidates are
+screened for text content, the keyword test streams bounded lines instead of
+materialising the file, the evidence names the file, line and keyword, and "no
+readable text file" is `INCONCLUSIVE` rather than a `FAIL` no operator should
+have trusted. The baseline was re-recorded, which is the contract working as
+intended — the cold scan moved from 17.287 s / 470.8 MiB to 9.762 s / 73.5 MiB.
 
 A third, smaller observation from the same walk: `c2_detector._text_facts_from_content`
 runs `lowered.count(domain)` **per unique domain** over the whole 4 MiB content
@@ -232,7 +236,7 @@ Run against the recorded baseline, then restored:
 
 | Control | Observed |
 | --- | --- |
-| `cold-scan` wall reported **+30 %** | `FAIL cold-scan: wall 22.473 s vs 17.287 s baseline (+30.0 %, envelope +25 %)`, exit **1** |
+| `cold-scan` wall reported **+30 %** (against the 2.5.1 baseline) | `FAIL cold-scan: wall 22.473 s vs 17.287 s baseline (+30.0 %, envelope +25 %)`, exit **1** |
 | Fingerprint machine/system changed to `x86_64`/`Linux` | `NOT APPLICABLE ... differs in: system, machine`, `RESULT recorded only`, exit **0**, no envelope printed |
 | the same with `--require-applicable` | exit **1** |
 | `warm-scan` wall set equal to `cold-scan` (cache stops helping) | `FAIL ... the cache is not earning its place` |
@@ -304,9 +308,9 @@ badge; a recorded artifact is evidence a human can compare across releases.
 * **No benchmark of the 64 MiB artifact cap or the hostile-input corpus.** Those
   are correctness bounds with their own tests; the 2 GiB case covers the reader's
   memory behaviour.
-* **The defect in §3.2 is diagnosed, not fixed.** This slice produced the
-  instrument and the baseline; changing a control's evidence rule is its own
-  slice with its own fixtures, and it must re-record the baseline.
+* **The defect in §3.2 was diagnosed here and fixed in 2.6.0.** This slice
+  produced the instrument; the fix has its own record and its own fixtures
+  ([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)).
 * **The reported wall time excludes the report renderers.** The case is
   `Orchestrator.run`, the product's analysis path; JSON/HTML rendering is
   exercised by its own contract job.
@@ -334,7 +338,7 @@ python benchmarks/record_baseline.py --bench bench.json --measure measure.json
 | --- | --- |
 | Added | `benchmarks/` (cases, harness, baseline, contract, baseline recorder), `tests/test_perf_contract.py`, CI job `performance-contract` |
 | Changed | nothing in `src/`; no schema, profile, format, exit code or report field |
-| Baseline | 2026-11-22, Apple M4 Pro arm64, CPython 3.12.14 — cold **17.287 s / 470.8 MiB**, warm **1.813 s / 480.9 MiB**, DTB **11.057 ms / 45.1 MiB**, 2 GiB entropy **31.101 s / 76.2 MiB** |
+| Baseline (2.6.0) | 2026-11-22, Apple M4 Pro arm64, CPython 3.12.14 — cold **9.762 s / 73.5 MiB**, warm **0.843 s / 65.0 MiB**, DTB **10.982 ms / 41.8 MiB**, 2 GiB entropy **31.008 s / 68.8 MiB** |
 | Envelope | +25 % wall, +15 % RSS, applied only on a matching fingerprint |
 | Invariants | warm < cold, 2 GiB RSS < 256 MiB, every case runs and returns a semantic result |
 | Decision | extraction is not cached (measured 8 %, key and failure modes worse than the win) |
