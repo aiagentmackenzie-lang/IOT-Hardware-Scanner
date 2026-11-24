@@ -35,6 +35,7 @@ from iot_hardware_scanner.models import (
 )
 from iot_hardware_scanner.scanner.bounded_reader import open_bounded
 from iot_hardware_scanner.scanner.fit_dtb import looks_like_fdt
+from iot_hardware_scanner.scanner.mcu_image import identify_mcu_format
 
 logger = logging.getLogger(__name__)
 
@@ -499,12 +500,22 @@ class FirmwareIngest:
             or :data:`FILE_TYPE_SOURCE_EXTENSION`.
         """
         try:
-            head = open_bounded(path).read_head(4)
+            head = open_bounded(path).read_head(4096)
         except OSError:
             head = b""
         if looks_like_fdt(head):
             return (
                 "Flattened device tree or U-Boot FIT (FDT magic 0xd00dfeed)",
+                FILE_TYPE_SOURCE_MAGIC_BYTES,
+            )
+        mcu_format = identify_mcu_format(head)
+        if mcu_format:
+            # A bare-metal encoding is recognised from its own records: the
+            # colon-delimited Intel HEX line, the S-record type digit, or UF2's
+            # two magic words. The label says which one, because "MCU image"
+            # without the encoding is not actionable.
+            return (
+                f"Bare-metal firmware ({mcu_format} records)",
                 FILE_TYPE_SOURCE_MAGIC_BYTES,
             )
 

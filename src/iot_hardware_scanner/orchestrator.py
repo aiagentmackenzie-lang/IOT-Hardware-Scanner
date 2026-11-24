@@ -42,6 +42,7 @@ from iot_hardware_scanner.models import (
     FilesystemInventory,
     ImageMap,
     InputKind,
+    McuAnalysis,
     ScanContext,
     StageId,
     StageStatus,
@@ -52,6 +53,7 @@ from iot_hardware_scanner.scanner.assessment import (
     PROFILE_CREDENTIALS,
     PROFILE_FIRMWARE,
     PROFILE_FIRMWARE_TREE,
+    PROFILE_MCU,
     PROFILE_VERSION,
     build_assessment,
     record_stage,
@@ -71,6 +73,12 @@ from iot_hardware_scanner.scanner.input_snapshot import (
     bind_input,
     release_snapshot,
     reverify_source,
+)
+from iot_hardware_scanner.scanner.mcu_image import (
+    McuFormatError,
+    analyse_mcu,
+    format_hint,
+    identify_mcu_format,
 )
 from iot_hardware_scanner.yara.yara_engine import YaraEngine
 
@@ -158,18 +166,29 @@ class Orchestrator:
         # running the firmware profile and failing at extraction.
         if self.profile == PROFILE_BOOT and context.input_kind is InputKind.FILE:
             context.input_kind = InputKind.BOOT
+        elif self.profile == PROFILE_MCU and context.input_kind is InputKind.FILE:
+            context.input_kind = InputKind.MCU
         elif (
             self.profile == PROFILE_FIRMWARE
             and context.input_kind is InputKind.FILE
             and context.input_binding_error is None
         ):
-            head = open_bounded(self._read_path(context)).read_head(4)
+            head = open_bounded(self._read_path(context)).read_head(4096)
             if looks_like_fdt(head):
                 self.profile = PROFILE_BOOT
                 context.input_kind = InputKind.BOOT
                 console.print(
                     "  [green]✓[/green] Recognised a flattened device tree or FIT; "
                     "selected the firmware-boot profile"
+                )
+            elif identify_mcu_format(head):
+                # A bare-metal encoding is not a SquashFS image: selecting the
+                # profile that means what it says beats failing at extraction.
+                self.profile = PROFILE_MCU
+                context.input_kind = InputKind.MCU
+                console.print(
+                    "  [green]✓[/green] Recognised a bare-metal image "
+                    f"({identify_mcu_format(head)}); selected the firmware-mcu profile"
                 )
 
         context.profile = self.profile
@@ -181,6 +200,8 @@ class Orchestrator:
             context = self._run_credentials_profile(context)
         elif self.profile == PROFILE_BOOT:
             context = self._run_boot_profile(context)
+        elif self.profile == PROFILE_MCU:
+            context = self._run_mcu_profile(context)
         else:
             context = self._run_firmware_profile(context)
 
@@ -409,6 +430,239 @@ class Orchestrator:
                 current, advisory_assessed=self._advisory_assessed(current)
             ),
         )
+
+    def _run_mcu_profile(self, context: ScanContext) -> ScanContext:
+        """The bare-metal profile: an address map, not a filesystem."""
+        for stage_id, reason in (
+            (
+                StageId.EXTRACTION,
+                "a bare-metal encoding is a flat record stream; there is no container to decode",
+            ),
+            (
+                StageId.ROOT_DISCOVERY,
+                "a bare-metal image has no filesystem root; its bytes are addressed directly",
+            ),
+            (
+                StageId.ENUMERATION,
+                "there is no directory tree to enumerate; the address map is the coordinate system",
+            ),
+            (
+                StageId.ENTROPY,
+                "byte distribution is measured per decoded range inside mcu_analysis "
+                "and is not a second pass over the file",
+            ),
+            (
+                StageId.BINARY_INVENTORY,
+                "a bare-metal payload has no ELF inventory; it is decoded as an address "
+                "map instead",
+            ),
+            (
+                StageId.ELF_METADATA,
+                "no ELF structure is claimed for a bare-metal payload",
+            ),
+            (
+                StageId.OPKG_INVENTORY,
+                "a bare-metal image carries no package database",
+            ),
+            (
+                StageId.CREDENTIAL_SCAN,
+                "the compiled rule set is swept over the decoded payload in "
+                "mcu_analysis; there are no files to read and no account databases to join",
+            ),
+            (
+                StageId.UNIX_ACCOUNTS,
+                "a bare-metal image carries no /etc/passwd or /etc/shadow",
+            ),
+            (
+                StageId.SERVICE_ANALYSIS,
+                "there is no init system to read; a start address is a declared "
+                "intention, not a configured service",
+            ),
+            (
+                StageId.C2_INDICATORS,
+                "the indicator sweep runs over the decoded payload inside mcu_analysis, "
+                "not over a filesystem",
+            ),
+            (
+                StageId.ADVISORY,
+                "a bare-metal image names no installed component to look up",
+            ),
+        ):
+            record_stage(
+                context,
+                stage_id,
+                StageStatus.NOT_APPLICABLE,
+                reason=reason,
+            )
+        context = self._guarded(
+            context, "MCU address space", (StageId.MCU_ANALYSIS,), self._phase_mcu
+        )
+        return self._guarded(
+            context,
+            "named checks",
+            (StageId.RISK_CONTROLS,),
+            lambda current: self._phase_controls(current, advisory_assessed=False),
+        )
+
+    # ──────────────────────────────────────────
+    # Phase 3c: bare-metal address spaces (slice 3C)
+    # ──────────────────────────────────────────
+
+    def _phase_mcu(self, context: ScanContext) -> ScanContext:
+        """Decode one bare-metal image and sweep the decoded bytes once."""
+        console.print("[bold]═══ Phase 3c: MCU address space ═══[/bold]")
+        reader = open_bounded(self._read_path(context))
+        head = reader.read_head(4096)
+        mcu_format = identify_mcu_format(head) or format_hint(context.firmware_path.suffix)
+        if mcu_format is None:
+            record_stage(
+                context,
+                StageId.MCU_ANALYSIS,
+                StageStatus.FAILED,
+                reason=(
+                    "the artifact is neither an Intel HEX, S-record nor UF2 encoding, and "
+                    "the filename does not name one; nothing was decoded"
+                ),
+                inspected=0,
+                eligible=1,
+                omissions=["no address map could be derived from these bytes"],
+            )
+            console.print("  [red]✗[/red] Not a recognised bare-metal encoding")
+            return context
+
+        try:
+            analysis = analyse_mcu(
+                reader,
+                format=mcu_format,
+                locator=context.firmware_name,
+                digest=context.file_hash_sha256,
+                max_payload_bytes=self.config.max_mcu_payload_mb * 1024 * 1024,
+                max_records=self.config.max_mcu_records,
+            )
+        except McuFormatError as exc:
+            record_stage(
+                context,
+                StageId.MCU_ANALYSIS,
+                StageStatus.FAILED,
+                reason=f"malformed or truncated {mcu_format} encoding: {exc}",
+                inspected=0,
+                eligible=1,
+                omissions=[
+                    "no address map was recorded: a partial map would present "
+                    "unobserved bytes as absent ones"
+                ],
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+        except Exception as exc:  # a decoder bug must be incomplete, not empty
+            record_stage(
+                context,
+                StageId.MCU_ANALYSIS,
+                StageStatus.FAILED,
+                reason=f"the bare-metal image could not be decoded: {exc}",
+                inspected=0,
+                eligible=1,
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+
+        context.mcu = analysis
+        context.mcu_matches = self._sweep_mcu_payload(context, analysis)
+        context.image_map = ImageMap(
+            root_artifact_id="a0",
+            nodes=[
+                ArtifactNode(
+                    artifact_id="a0",
+                    parent_id=None,
+                    digest_sha256=analysis.digest,
+                    format=analysis.format,
+                    coordinate_system="device-address",
+                    offset=analysis.ranges[0].start if analysis.ranges else 0,
+                    length=analysis.payload_bytes,
+                    decoder=analysis.decoder,
+                    decoder_version=analysis.decoder_version,
+                    depth=0,
+                    locator=analysis.locator,
+                    details={
+                        "ranges": len(analysis.ranges),
+                        "gaps": len(analysis.gaps),
+                        "records": analysis.records,
+                    },
+                )
+            ],
+        )
+
+        omissions = [
+            f"{item.kind}: {item.detail}"
+            for item in analysis.diagnostics
+            if item.kind
+            in {
+                "conflict",
+                "missing-eof",
+                "missing-block",
+                "record-count-mismatch",
+                "unknown-record-type",
+            }
+        ]
+        first = analysis.ranges[0]
+        last = analysis.ranges[-1]
+        record_stage(
+            context,
+            StageId.MCU_ANALYSIS,
+            StageStatus.PARTIAL if omissions else StageStatus.COMPLETE,
+            reason=(
+                f"{analysis.format} decoded: {len(analysis.ranges)} range(s) over "
+                f"{analysis.payload_bytes:,} byte(s), {analysis.records:,} record(s), "
+                f"{first.start:#010x}-{last.end:#010x}"
+                + (f", {len(analysis.gaps)} unobserved gap(s)" if analysis.gaps else "")
+            ),
+            inspected=len(analysis.ranges),
+            eligible=len(analysis.ranges),
+            omissions=omissions,
+        )
+        console.print(
+            f"  [green]✓[/green] {analysis.format}: {len(analysis.ranges)} range(s), "
+            f"{analysis.payload_bytes:,} byte(s) at {first.start:#010x}-{last.end:#010x}, "
+            f"{analysis.records:,} record(s)"
+        )
+        console.print(
+            f"  [green]✓[/green] payload digest {analysis.payload_sha256[:16]}… "
+            "(over the addressed bytes only, never over a gap)"
+        )
+        if analysis.gaps:
+            console.print(
+                f"  [yellow]![/yellow] {len(analysis.gaps)} address gap(s) stay "
+                "unobserved and were not zero-filled"
+            )
+        if context.mcu_matches:
+            console.print(
+                f"  [yellow]![/yellow] {len(context.mcu_matches)} rule match(es) in the "
+                "decoded payload (review findings, with addresses)"
+            )
+        for omission in omissions:
+            console.print(f"  [yellow]![/yellow] {omission}")
+        return context
+
+    def _sweep_mcu_payload(self, context: ScanContext, analysis: McuAnalysis) -> list:
+        """One compiled rule set, swept once over the decoded payload.
+
+        The sweep is over the bytes that were **addressed**, not over the file:
+        a hex record's ASCII is not firmware. Matches keep their destination from
+        the rule's own category and carry the device address they were found at,
+        so nothing here can be relabelled by a detector that saw it first.
+        """
+        engine = self.rule_engine()
+        matches: list = []
+        for start, payload in analysis.payload_ranges:
+            for match in engine.scan_data(payload):
+                # A YARA offset is relative to the range that was scanned, and
+                # the range begins at a device address: the two are added once,
+                # here, so every later reader sees an address it can look up.
+                addresses = [start + offset for offset in match.offsets] or [start]
+                match.meta["mcu_addresses"] = addresses
+                match.file_path = Path(f"{analysis.locator}@{addresses[0]:#010x}")
+                matches.append(match)
+        return matches
 
     def _run_boot_profile(self, context: ScanContext) -> ScanContext:
         """The boot-manifest profile: nothing here is a root filesystem."""
@@ -1519,6 +1773,17 @@ class Orchestrator:
                 "is unknown by construction, and no signature is trusted without an "
                 "operator-supplied key."
             )
+        if context.profile == PROFILE_MCU:
+            limitations.append(
+                "A bare-metal image is addressed bytes, not a filesystem: the report "
+                "answers what the payload contains and where, and no named check is "
+                "settled from it. Address gaps stay unobserved and are never zero-filled."
+            )
+            if context.mcu is not None and context.mcu.diagnostics:
+                limitations.append(
+                    f"{len(context.mcu.diagnostics)} structural diagnostic(s) were recorded "
+                    "for the encoding; they describe the records, not the device."
+                )
         if context.input_kind is InputKind.TREE:
             metadata_source = (
                 context.filesystem_inventory.metadata_source

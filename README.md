@@ -12,7 +12,23 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.7.0
+## Status — version 2.8.0
+
+Version 2.8.0 delivers slice **3C: bare-metal address spaces**. Intel HEX,
+Motorola S-record and UF2 images are no longer rejected as opaque blobs: each is
+decoded into **one sparse representation**, and the same payload yields the same
+`payload_sha256` whichever of the three carried it — the digest is framed over
+the addressed bytes in ascending address order, so record boundaries, chunking
+and the encoding itself do not enter it. Addresses are device addresses, never
+file offsets; the address space is never allocated (a record naming
+`0xFFFF_FFF0` costs a dictionary entry, not four gigabytes). Gaps stay
+**unobserved** and are never zero-filled, conflicting rewrites are named rather
+than resolved silently, and a truncated encoding is a `FAILED` stage with exit 4
+instead of a traceback. New profile `firmware-mcu`: the payload is swept once by
+the compiled rule set — matches become review findings carrying the device
+address they were found at — and no named check is settled from a bare-metal
+payload. Report schema 8, profile version 6.0. Record:
+[docs/MIGRATION-v8.md](docs/MIGRATION-v8.md).
 
 Version 2.7.0 records two facts the document was missing, and deletes one claim
 it never supported. `artifact.file_type_source` says **how** the type label was
@@ -106,8 +122,9 @@ to a passing case.
 | Build-declaration reconciliation (OpenWrt manifest, CycloneDX 1.4) | ✅ implemented, with each declaration's digest, binding and four outcomes |
 | CycloneDX 1.6 BOM export (`sbom --validate`) | ✅ implemented, validated against a vendored schema |
 | Flattened device trees and U-Boot FIT (`firmware-boot`) | ✅ bounded parse; configuration, payload integrity, signature presence/verification |
+| Bare-metal address spaces (`firmware-mcu`) | ✅ Intel HEX, S-record and UF2 decoded to one sparse map; one payload digest across encodings; gaps unobserved; conflicts named |
 | Repeated-work cache (`--cache-dir`) | ✅ opt-in, bounded, atomic; measured cold/warm equivalence |
-| MCU / RAUC / partitioned images / raw NAND | ❌ later gates, not in this release |
+| RAUC bundles / partitioned images / CPIO / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -169,6 +186,11 @@ iot-hardware-scanner scan firmware.img.gz --offline \
 iot-hardware-scanner scan board.itb --profile firmware-boot --format json --out board.json
 iot-hardware-scanner scan board.itb --trust-anchor operator-key.pem --format json --out board.json
 
+# Decode a bare-metal image: Intel HEX, S-record or UF2, selected from the
+# content itself. The address map, the payload digest and every gap are recorded.
+iot-hardware-scanner scan firmware.hex --format json --out mcu.json
+iot-hardware-scanner scan firmware.uf2 --profile firmware-mcu --format markdown
+
 # Reuse deterministic parser output across runs (opt-in, bounded, offline)
 iot-hardware-scanner scan firmware.img.gz --cache-dir ~/.cache/ihs-analysis \
   --format json --out report.json
@@ -219,6 +241,7 @@ and never prints a success line. `--offline` remains valid; it is also the defau
 | `firmware-tree` | `--input-tree`, or a directory positional | ingest, rule compilation, enumeration, binary inventory, ELF metadata, opkg inventory, credentials, Unix accounts, services, C2, checks — **no extraction, no entropy** |
 | `credentials-only` | `--creds` / `--profile credentials-only` | ingest, rule compilation, enumeration, credentials, Unix accounts, checks |
 | `firmware-boot` | `--profile firmware-boot`, or an FDT/FIT magic | ingest, rule compilation, boot analysis, checks (5 and 6); every filesystem stage is `NOT_APPLICABLE` |
+| `firmware-mcu` | `--profile firmware-mcu`, or Intel HEX / S-record / UF2 records | ingest, rule compilation, MCU analysis, checks (all 12 `NOT_APPLICABLE`); every filesystem stage is `NOT_APPLICABLE` with its reason |
 
 A profile completes only when every stage it requires either ran or is genuinely inapplicable. A
 staged tree has no container to decode, so it never carries an extraction prerequisite; the
@@ -280,7 +303,8 @@ renderer indexes into it.
 
 ## Report document
 
-One schema-7 JSON document is the single source for every format. Full details in
+One schema-8 JSON document is the single source for every format. Full details in
+[docs/MIGRATION-v8.md](docs/MIGRATION-v8.md) for the bare-metal address map;
 [docs/MIGRATION-v7.md](docs/MIGRATION-v7.md) for the type-label provenance and the
 recorded host capabilities; [docs/MIGRATION-v6.md](docs/MIGRATION-v6.md) for `boot` and `cache`;
 [docs/MIGRATION-v5.md](docs/MIGRATION-v5.md) is the schema-5 change, the schema-4 change in
@@ -294,8 +318,8 @@ document, and neither is a substitute for one.
 
 ```json
 {
-  "schema_version": 7,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.7.0",
+  "schema_version": 8,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.8.0",
            "capabilities": {
              "libmagic": {"available": true, "version": "540", "detail": null},
              "pyelftools": {"available": true, "version": "0.33", "detail": null},
@@ -356,6 +380,13 @@ document, and neither is a substitute for one.
                   "evidence": "rootfs/usr/lib/opkg/status:2804-3095 (line 102)"}],
   "component_bases": {"counts": {"nist-mapped": 5, "opkg-package-name": 191, "banner": 0},
                       "total": 196},
+  "mcu": {"format": "intel-hex", "decoder": "ihs-mcu", "decoder_version": "1",
+          "payload_bytes": 500, "declared_bytes": 500, "payload_sha256": "…",
+          "ranges": [{"start_hex": "0x08000000", "end_hex": "0x0800012c",
+                      "length": 300, "sha256": "…", "source_records": "1-10"}],
+          "gaps": [{"start_hex": "0x0800012c", "end_hex": "0x08000200",
+                    "length": 212, "observed": false}],
+          "diagnostics": [], "notes": []},
   "data_sources": [{"name": "kev_catalog.json", "sample": true, "sha256": "…"}],
   "risk_score": null,
   "outcome": {"exit_code": 2, "exit_reason": "REPORTABLE_FINDING"}
@@ -553,6 +584,10 @@ and corpus digests, with the platform each was built on. The reference image is
 * **One container path.** gzip-wrapped SquashFS v4 only. Partitioned images, CPIO, JFFS2/UBIFS,
   MCU address spaces and RAUC bundles are later gates with their own fixtures; each is reported as
   unsupported rather than guessed at.
+* **A bare-metal image is bytes, not a system.** The `firmware-mcu` profile reports an address
+  map, one payload digest and a single rule-set sweep over the decoded bytes; each match is a
+  review finding at a device address, never a control verdict. An address gap is unobserved, not
+  zeros, and a start address is what the producer intended, not what the device runs.
 * **Boot manifests declare intent.** The `firmware-boot` profile reads what an FIT or DTB declares.
   Physical boot enforcement is always `unknown`; only an operator-supplied PEM key can set
   `signature.verified` to true, and no in-artifact key is trusted.

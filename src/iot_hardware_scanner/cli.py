@@ -41,6 +41,7 @@ from iot_hardware_scanner.scanner.assessment import (
     PROFILE_CREDENTIALS,
     PROFILE_FIRMWARE,
     PROFILE_FIRMWARE_TREE,
+    PROFILE_MCU,
     collect_findings,
     decide_exit,
 )
@@ -143,13 +144,15 @@ def main(verbose: bool) -> None:
             PROFILE_FIRMWARE_TREE,
             PROFILE_CREDENTIALS,
             PROFILE_BOOT,
+            PROFILE_MCU,
         ],
         case_sensitive=False,
     ),
     default=None,
     help=(
         "Assessment profile (default: firmware-static for an image, firmware-tree for "
-        "--input-tree, firmware-boot for an FDT/FIT; --creds selects credentials-only)"
+        "--input-tree, firmware-boot for an FDT/FIT, firmware-mcu for an Intel HEX, "
+        "S-record or UF2 image; --creds selects credentials-only)"
     ),
 )
 @click.option("--creds", is_flag=True, help="Credential-only profile (narrower required set)")

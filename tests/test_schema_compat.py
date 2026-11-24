@@ -1,6 +1,6 @@
-"""P1/P3 — the schema-7 reader is tested against every report version it claims.
+"""P1/P3 — the schema-8 reader is tested against every report version it claims.
 
-One fixture per report schema 1 to 7, each carrying only the fields that version
+One fixture per report schema 1 to 8, each carrying only the fields that version
 actually recorded, and the *exact* upgrade result asserted:
 
 * the version lands on :data:`SCHEMA_VERSION`;
@@ -13,8 +13,9 @@ actually recorded, and the *exact* upgrade result asserted:
   section without a migration decision fails here.
 
 Schema 7 is the only version where a null ``artifact.file_type_source`` or
-tool ``capabilities`` means "this scan did not establish it". For an upgrade the
-same null means "that version never recorded it", and the ``migration`` note
+tool ``capabilities`` means "this scan did not establish it"; schema 8 is the only
+one where a null ``mcu`` means "no bare-metal image was decoded". For an upgrade
+the same null means "that version never recorded it", and the ``migration`` note
 says so.
 """
 
@@ -282,6 +283,42 @@ def schema_6() -> dict[str, Any]:
     return document
 
 
+def schema_8() -> dict[str, Any]:
+    """v8 adds the decoded bare-metal address map."""
+    document = schema_7()
+    document["schema_version"] = 8
+    document["mcu"] = {
+        "format": "intel-hex",
+        "decoder": "ihs-mcu",
+        "decoder_version": "1",
+        "locator": "board.hex",
+        "digest": "c" * 64,
+        "ranges": [
+            {
+                "start": 0x08000000,
+                "start_hex": "0x08000000",
+                "end": 0x08000020,
+                "end_hex": "0x08000020",
+                "length": 32,
+                "sha256": "d" * 64,
+                "source_records": "1-4",
+            }
+        ],
+        "gaps": [],
+        "payload_bytes": 32,
+        "declared_bytes": 32,
+        "payload_sha256": "e" * 64,
+        "records": 4,
+        "start_address": None,
+        "target_address": None,
+        "family": None,
+        "header": None,
+        "diagnostics": [],
+        "notes": [],
+    }
+    return document
+
+
 def schema_7() -> dict[str, Any]:
     """v7 adds the source of the type label and the host's capabilities."""
     document = schema_6()
@@ -304,6 +341,7 @@ CASES = {
     5: (schema_5, 5),
     6: (schema_6, None),
     7: (schema_7, None),
+    8: (schema_8, None),
 }
 
 
@@ -445,8 +483,22 @@ def test_schema_6_does_not_invent_a_capability_record() -> None:
     assert document["tool"]["version"] == source["tool"]["version"]
 
 
-def test_schema_7_round_trips_without_a_migration_record() -> None:
+def test_schema_7_does_not_invent_an_address_map() -> None:
     source = schema_7()
+    document = load_document(source)
+
+    assert document["schema_version"] == SCHEMA_VERSION
+    assert document["migration"]["from"] == 7
+    assert document["mcu"] is None
+    assert document["artifact"]["file_type_source"] == source["artifact"]["file_type_source"]
+
+    # An upgraded document says nothing about a bare-metal image.
+    assert "Bare-metal" not in render(document, "terminal")
+    assert "Bare-metal" not in render(document, "markdown")
+
+
+def test_schema_8_round_trips_without_a_migration_record() -> None:
+    source = schema_8()
     document = load_document(source)
 
     assert document == source
@@ -459,13 +511,16 @@ def test_schema_7_round_trips_without_a_migration_record() -> None:
     assert document["cache"]["entries_read"] == 3
     assert document["artifact"]["file_type_source"] == "libmagic"
     assert document["tool"]["capabilities"]["pyelftools"]["version"] == "0.33"
+    assert document["mcu"]["format"] == "intel-hex"
 
-    # It renders with the provenance visible and the absences silent.
+    # It renders with the provenance and the address map visible.
     markdown = render(document, "markdown")
     assert "identified by libmagic" in markdown
     assert "Host capabilities" in markdown
+    assert "0x08000000" in markdown
     terminal = render(document, "terminal")
     assert "identified by libmagic" in terminal
+    assert "Bare-metal image" in terminal
 
 
 # ──────────────────────────────────────────────
@@ -505,6 +560,7 @@ ABSENT_BY_VERSION: dict[int, tuple[str, ...]] = {
     5: ("boot", "cache"),
     6: (),
     7: (),
+    8: (),
 }
 
 
@@ -526,9 +582,13 @@ def test_no_upgrade_invents_a_capability_record(
 ) -> None:
     """Before schema 7, the two nested facts are null rather than empty."""
     version, document = upgraded
-    if version == 7:
+    if version in (7, 8):
+        # Recorded by that version, so not an absence.
         assert document["artifact"]["file_type_source"] == "libmagic"
         assert document["tool"]["capabilities"] is not None
+        if version == 7:
+            # ... but a v7 document never recorded an address map.
+            assert document["mcu"] is None
         return
     assert document["artifact"]["file_type_source"] is None, (
         f"schema {version}: the type source was invented"
@@ -549,19 +609,19 @@ def test_no_upgrade_invents_a_field(upgraded: tuple[int, dict[str, Any]]) -> Non
     never gains the schema-2 ``outcome``/``data_sources`` it never wrote.
     """
     version, document = upgraded
-    schema_seven = set(schema_7())
-    if version == 7:
-        expected = schema_seven
+    schema_eight = set(schema_8())
+    if version == 8:
+        expected = schema_eight
     elif version == 1:
-        expected = (schema_seven - {"outcome", "data_sources"}) | {
+        expected = (schema_eight - {"outcome", "data_sources"}) | {
             "schema_note",
             "legacy_grade",
         }
     else:
-        expected = schema_seven | {"schema_note", "migration"}
+        expected = schema_eight | {"schema_note", "migration"}
     assert set(document) == expected, (
         f"schema {version}: unexpected keys {sorted(set(document) - expected)};"
         f" missing {sorted(expected - set(document))}"
     )
-    if version in (2, 3, 4, 5, 6):
+    if version in (2, 3, 4, 5, 6, 7):
         assert document["migration"]["to"] == SCHEMA_VERSION

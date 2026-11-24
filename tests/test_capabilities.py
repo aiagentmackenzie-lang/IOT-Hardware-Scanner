@@ -114,8 +114,11 @@ def test_libmagic_is_recorded_when_it_answers(
 def test_a_missing_library_falls_back_and_names_the_real_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # Content that is *not* a record stream: this exercises the extension
+    # fallback. A valid Intel HEX line would be recognised from its own magic
+    # bytes before libmagic is consulted at all (slice 3C).
     firmware = tmp_path / "board.hex"
-    firmware.write_bytes(b":00000001FF\n")
+    firmware.write_bytes(b"\x00" * 16)
     # `None` in sys.modules is how the interpreter models "this import raises":
     # the binding is present and the library is not, which is the real fault.
     monkeypatch.setitem(sys.modules, "magic", None)

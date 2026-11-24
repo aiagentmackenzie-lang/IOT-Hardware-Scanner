@@ -199,6 +199,11 @@ class ControlEvaluator:
         # A boot manifest is asked exactly two questions: does the shipped
         # content carry a verification step, and does the board enforce it?
         "firmware-boot": frozenset({5, 6}),
+        # A bare-metal payload answers none of the twelve. Its report carries
+        # rule matches at device addresses; turning those into a control verdict
+        # would be inventing one, so every check is NOT_APPLICABLE with a reason
+        # rather than guessed at.
+        "firmware-mcu": frozenset(),
     }
 
     def evaluate(

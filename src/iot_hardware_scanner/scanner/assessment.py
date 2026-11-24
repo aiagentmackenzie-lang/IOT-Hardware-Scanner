@@ -54,10 +54,11 @@ PROFILE_FIRMWARE = "firmware-static"
 PROFILE_FIRMWARE_TREE = "firmware-tree"
 PROFILE_CREDENTIALS = "credentials-only"
 PROFILE_BOOT = "firmware-boot"
-#: Profile semantics. 5.0 adds ``firmware-boot`` and the ``boot_analysis``
-#: stage. **No existing profile's required set changed**; the bump records that
-#: a new profile and a new stage id exist.
-PROFILE_VERSION = "5.0"
+PROFILE_MCU = "firmware-mcu"
+#: Profile semantics. 6.0 adds ``firmware-mcu`` and the ``mcu_analysis`` stage.
+#: **No existing profile's required set changed**; the bump records that a new
+#: profile and a new stage id exist. 5.0 added ``firmware-boot``.
+PROFILE_VERSION = "6.0"
 
 #: Stages a profile must finish before it may report a complete assessment.
 #:
@@ -121,6 +122,17 @@ REQUIRED_STAGES: dict[str, tuple[StageId, ...]] = {
         StageId.BOOT_ANALYSIS,
         StageId.RISK_CONTROLS,
     ),
+    #: A bare-metal image is not a filesystem either. What it *can* answer is
+    #: what the bytes carry: the sparse address map, its payload digest, and one
+    #: pass of the compiled rule set over the decoded bytes. Everything that
+    #: needs a directory tree, a package database or a login database is
+    #: NOT_APPLICABLE with a reason.
+    PROFILE_MCU: (
+        StageId.INGEST,
+        StageId.RULE_COMPILATION,
+        StageId.MCU_ANALYSIS,
+        StageId.RISK_CONTROLS,
+    ),
 }
 
 #: Stages that never block completion, with the reason they are not requested.
@@ -137,6 +149,20 @@ OPTIONAL_STAGES: dict[str, tuple[StageId, ...]] = {
         StageId.ADVISORY,
     ),
     PROFILE_BOOT: (
+        StageId.EXTRACTION,
+        StageId.ROOT_DISCOVERY,
+        StageId.ENUMERATION,
+        StageId.ENTROPY,
+        StageId.BINARY_INVENTORY,
+        StageId.ELF_METADATA,
+        StageId.OPKG_INVENTORY,
+        StageId.CREDENTIAL_SCAN,
+        StageId.UNIX_ACCOUNTS,
+        StageId.SERVICE_ANALYSIS,
+        StageId.C2_INDICATORS,
+        StageId.ADVISORY,
+    ),
+    PROFILE_MCU: (
         StageId.EXTRACTION,
         StageId.ROOT_DISCOVERY,
         StageId.ENUMERATION,
@@ -297,6 +323,79 @@ def _advisory_to_finding(finding: CVEFinding) -> ReportFinding:
     )
 
 
+_MCU_DESTINATION_CATEGORY = {
+    "credential": "credential",
+    "service": "configured_service",
+    "crypto": "crypto_algorithm",
+    "indicator": "indicator",
+}
+
+
+def _mcu_to_findings(context: ScanContext) -> list[ReportFinding]:
+    """Rule matches in a decoded bare-metal payload, at the address they hit.
+
+    The location is a **device address**, not a file offset and not a line: the
+    payload the rule matched does not exist in the file in that form, it exists
+    at that address once the encoding is decoded. ``critical_qualified`` stays
+    false for every one of them — a documented critical-evidence rule states the
+    observation that is sufficient, and none of them is satisfied by "a rule
+    matched somewhere in flash".
+    """
+    if context.mcu is None or not context.mcu_matches:
+        return []
+    findings: list[ReportFinding] = []
+    for match in context.mcu_matches:
+        destination = match.destination or "indicator"
+        category = _MCU_DESTINATION_CATEGORY.get(destination, "indicator")
+        addresses = match.meta.get("mcu_addresses") or [0]
+        locations = [f"{context.mcu.locator}@{int(value):#010x}" for value in addresses]
+        matched_strings = sorted({identifier for _offset, identifier, _data in match.strings})
+        findings.append(
+            ReportFinding(
+                rule_id=f"mcu.rule.{match.rule_name}",
+                severity=_yara_severity(match),
+                title=f"{destination.title()} rule match in a decoded payload",
+                description=(
+                    f"Rule {match.rule_name} ({match.namespace}) matched the bytes decoded "
+                    f"from {context.mcu.format}; this is a review finding, not a verdict "
+                    "about the device."
+                ),
+                category=category,
+                locations=locations,
+                evidence=[
+                    f"rule namespace {match.namespace}",
+                    *(f"matched string {name}" for name in matched_strings),
+                    f"ruleset digest {match.ruleset_digest}" if match.ruleset_digest else "",
+                ],
+                remediation=(
+                    "Review the matched bytes at the recorded address; a rule match does "
+                    "not by itself establish runtime behaviour or intent."
+                ),
+                destination=destination,
+                namespaces=[match.namespace],
+                ruleset_digest=match.ruleset_digest,
+                critical_qualified=False,
+            )
+        )
+    # Evidence entries that came out empty are dropped rather than rendered.
+    for finding in findings:
+        finding.evidence = [item for item in finding.evidence if item]
+    return findings
+
+
+def _yara_severity(match: object) -> Severity:
+    """The rule's own severity label, clamped to a review finding."""
+    raw = str(getattr(match, "meta", {}).get("severity", "") or "").upper()
+    by_name = {
+        "CRITICAL": Severity.HIGH,  # a match alone never reaches CRITICAL
+        "HIGH": Severity.HIGH,
+        "MEDIUM": Severity.MEDIUM,
+        "LOW": Severity.LOW,
+        "INFO": Severity.INFO,
+    }
+    return by_name.get(raw, Severity.MEDIUM)
+
+
 def _boot_to_findings(context: ScanContext) -> list[ReportFinding]:
     """A payload whose bytes do not match its declared digest is reportable.
 
@@ -351,6 +450,7 @@ def collect_findings(context: ScanContext) -> list[ReportFinding]:
     findings.extend(_crypto_to_finding(f) for f in context.crypto_findings)
     findings.extend(_advisory_to_finding(f) for f in context.cve_findings)
     findings.extend(_boot_to_findings(context))
+    findings.extend(_mcu_to_findings(context))
 
     findings.sort(key=lambda f: (f.category, f.rule_id, tuple(f.locations), f.severity.value))
     return findings

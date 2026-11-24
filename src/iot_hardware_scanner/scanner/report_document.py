@@ -68,11 +68,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
 
 #: Component bases, in report order. Every count is present even when zero.
 COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
@@ -226,6 +226,7 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "component_bases": _component_bases_section(context),
         "boot": _boot_section(context),
         "cache": _cache_section(context),
+        "mcu": _mcu_section(context),
         "data_sources": _data_sources_section(),
         "risk_score": None,
     }
@@ -240,6 +241,15 @@ def _cache_section(context: ScanContext) -> dict[str, Any] | None:
 def _boot_section(context: ScanContext) -> dict[str, Any] | None:
     """The boot artifacts, or ``None`` when this profile read no boot manifest."""
     return context.boot.as_dict() if context.boot is not None else None
+
+
+def _mcu_section(context: ScanContext) -> dict[str, Any] | None:
+    """The decoded address map, or ``None`` when no bare-metal image was decoded.
+
+    The decoded bytes themselves are never serialised: a report carries
+    addresses, digests and diagnostics, not a second copy of the firmware.
+    """
+    return context.mcu.as_dict() if context.mcu is not None else None
 
 
 def _data_sources_section() -> list[dict[str, Any]]:
@@ -712,6 +722,7 @@ _OBJECT_SECTIONS = (
     "component_bases",
     "boot",
     "cache",
+    "mcu",
 )
 
 
@@ -775,11 +786,14 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("risk_score", None)
         document.setdefault("boot", None)
         document.setdefault("cache", None)
+        document.setdefault("mcu", None)
         _mark_unrecorded_capabilities(document)
         _validate_document_shape(document)
         return document
 
-    if raw_version == 6:
+    if raw_version == 7:
+        document = _upgrade_v7(data)
+    elif raw_version == 6:
         document = _upgrade_v6(data)
     elif raw_version == 5:
         document = _upgrade_v5(data)
@@ -796,6 +810,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
     # "not recorded" values. An absent section is never read as a negative.
     document.setdefault("boot", None)
     document.setdefault("cache", None)
+    document.setdefault("mcu", None)
     _mark_unrecorded_capabilities(document)
     _validate_document_shape(document)
     return document
@@ -818,6 +833,32 @@ def _mark_unrecorded_capabilities(document: dict[str, Any]) -> None:
 
 #: Sections a schema-5 document never recorded.
 _V5_SECTIONS = ("component_bases",)
+
+
+def _upgrade_v7(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-7 document to schema 8 without inventing an address map.
+
+    A v7 document was produced before bare-metal images were decoded. ``mcu`` is
+    ``None``: no address map was recorded, which is not an empty one.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 7; bare-metal address maps were not recorded by that version"
+    )
+    document.setdefault("mcu", None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 7,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before Intel HEX, S-record and UF2 images were "
+                "decoded into an address map. The mcu section is absent, not empty."
+            ),
+        },
+    )
+    return document
 
 
 def _upgrade_v6(data: dict[str, Any]) -> dict[str, Any]:
@@ -1311,6 +1352,35 @@ def render_terminal(document: dict[str, Any]) -> str:
                 + ")"
             )
 
+    mcu = document.get("mcu") or {}
+    if mcu:
+        ranges = mcu.get("ranges") or []
+        gaps = mcu.get("gaps") or []
+        lines.append(
+            f"Bare-metal image: {mcu.get('format')} ({mcu.get('decoder')} "
+            f"{mcu.get('decoder_version')}), {mcu.get('records')} record(s)"
+        )
+        lines.append(f"  payload: {mcu.get('payload_bytes')} byte(s) over {len(ranges)} range(s)")
+        for item in ranges[:8]:
+            lines.append(
+                f"  [{item.get('start_hex')}-{item.get('end_hex')}] "
+                f"{item.get('length')} byte(s), records {item.get('source_records')}"
+            )
+        if gaps:
+            lines.append(
+                f"  {len(gaps)} unobserved gap(s) (never zero-filled): "
+                + ", ".join(f"{i.get('start_hex')}-{i.get('end_hex')}" for i in gaps[:4])
+            )
+        if mcu.get("family"):
+            lines.append(f"  family id {mcu.get('family')}")
+        if mcu.get("start_address_hex"):
+            lines.append(
+                f"  declared start address {mcu.get('start_address_hex')} "
+                "(an intention, not the running image)"
+            )
+        for item in (mcu.get("diagnostics") or [])[:6]:
+            lines.append(f"  ! {item.get('kind')}: {item.get('detail')}")
+
     boot = document.get("boot") or {}
     for artifact in boot.get("artifacts") or []:
         configurations = artifact.get("configurations") or []
@@ -1555,6 +1625,55 @@ def render_markdown(document: dict[str, Any]) -> str:
                 f"{node.get('offset')} | {node.get('length')} | "
                 f"{_count(node.get('extent_bytes'))} | {_md_cell(decoder)} |"
             )
+        lines.append("")
+
+    mcu = document.get("mcu") or {}
+    if mcu:
+        ranges = mcu.get("ranges") or []
+        gaps = mcu.get("gaps") or []
+        lines += [
+            f"## Bare-metal image — {mcu.get('format')}",
+            "",
+            f"- Decoder: `{mcu.get('decoder')}` {mcu.get('decoder_version')}",
+            f"- Records: {mcu.get('records')}",
+            f"- Addressed bytes: {mcu.get('payload_bytes')} over {len(ranges)} range(s) "
+            f"({mcu.get('declared_bytes')} declared)",
+            f"- Payload SHA-256: `{mcu.get('payload_sha256')}` — over the addressed bytes "
+            "in ascending order, never over a gap",
+            f"- Family id: {mcu.get('family') or '—'}",
+            f"- Declared start address: {mcu.get('start_address_hex') or '—'} "
+            "(what the producer intended, not what the device runs)",
+            "",
+            "| Start | End | Bytes | SHA-256 | Records |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for item in ranges:
+            lines.append(
+                f"| `{item.get('start_hex')}` | `{item.get('end_hex')}` | "
+                f"{item.get('length')} | `{(item.get('sha256') or '')[:16]}…` | "
+                f"{item.get('source_records')} |"
+            )
+        if gaps:
+            lines += [
+                "",
+                "Unobserved address ranges (never zero-filled):",
+                "",
+                "| Start | End | Bytes | Observed |",
+                "| --- | --- | --- | --- |",
+            ]
+            for item in gaps:
+                lines.append(
+                    f"| `{item.get('start_hex')}` | `{item.get('end_hex')}` | "
+                    f"{item.get('length')} | no |"
+                )
+        if mcu.get("diagnostics"):
+            lines += ["", "### Structural diagnostics", ""]
+            for item in mcu.get("diagnostics") or []:
+                lines.append(f"- **{item.get('kind')}** — {_md_cell(str(item.get('detail')))}")
+        if mcu.get("notes"):
+            lines += ["", "### Encoding notes", ""]
+            for note in mcu.get("notes") or []:
+                lines.append(f"- {note}")
         lines.append("")
 
     boot = document.get("boot") or {}
@@ -2050,6 +2169,32 @@ def render_html(document: dict[str, Any]) -> str:
                 "</tr>"
             )
         parts.append("</table>")
+
+    mcu = document.get("mcu") or {}
+    if mcu:
+        ranges = mcu.get("ranges") or []
+        gaps = mcu.get("gaps") or []
+        parts.append("<h2>Bare-metal image</h2>")
+        parts.append(
+            f"<p>Encoding <strong>{html.escape(str(mcu.get('format')))}</strong>; "
+            f"{html.escape(str(mcu.get('records')))} record(s); "
+            f"{html.escape(str(mcu.get('payload_bytes')))} addressed byte(s) over "
+            f"{len(ranges)} range(s); payload SHA-256 "
+            f"<code>{html.escape(str(mcu.get('payload_sha256')))}</code></p>"
+        )
+        parts.append("<table><tr><th>Start</th><th>End</th><th>Bytes</th><th>Records</th></tr>")
+        for item in ranges:
+            parts.append(
+                f"<tr><td><code>{html.escape(str(item.get('start_hex')))}</code></td>"
+                f"<td><code>{html.escape(str(item.get('end_hex')))}</code></td>"
+                f"<td>{html.escape(str(item.get('length')))}</td>"
+                f"<td>{html.escape(str(item.get('source_records')))}</td></tr>"
+            )
+        parts.append("</table>")
+        if gaps:
+            parts.append(
+                f"<p>{len(gaps)} unobserved address range(s); they are never zero-filled.</p>"
+            )
 
     boot = document.get("boot") or {}
     for artifact in boot.get("artifacts") or []:

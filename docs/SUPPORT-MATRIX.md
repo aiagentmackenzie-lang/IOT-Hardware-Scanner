@@ -1,14 +1,17 @@
-# Support matrix and qualification record — release 2.7.0
+# Support matrix and qualification record — release 2.8.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.7.0`, report schema 7, profile version 5.0.
-Release 2.7.0 changes no input format, profile or detector. It records two facts
-the document was missing — how the artifact's type label was produced, and which
-parser and helper capabilities the host actually had — and removes one dead
-scoring signal ([docs/MIGRATION-v7.md](MIGRATION-v7.md)). Release 2.6.0 bounded
+Measured with `iot-hardware-scanner 2.8.0`, report schema 8, profile version 6.0.
+Release 2.8.0 adds one input family and one profile: **bare-metal address
+spaces** (Intel HEX, S-record, UF2) decoded into one sparse map with one
+encoding-independent payload digest, under the new `firmware-mcu` profile
+([docs/MIGRATION-v8.md](MIGRATION-v8.md)). No detector, control, or existing
+profile changed. Release 2.7.0 changed no input format or profile: it recorded
+how the artifact's type label was produced and which parser and helper
+capabilities the host actually had ([docs/MIGRATION-v7.md](MIGRATION-v7.md)). Release 2.6.0 bounded
 what a control reads and what a text-fact pass costs, and stopped a binary
 artifact from supplying "verification" evidence
 ([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)).
@@ -45,11 +48,14 @@ says so.
 | Flattened device tree (`.dtb`, FDT magic) | **analyzed** — bounded structural parse; compatible/model, memory, reserved memory, partitions; no signature expectation | in-process parser (no helper) | any host | `tests/test_fit_dtb.py`, `tests/test_installed_cli.py::TestBootManifestProfile` |
 | U-Boot FIT (`.itb`, FDT magic) | **analyzed** — configurations, selected default, referenced payloads, digest integrity, signature presence and (with an operator key) verification; board facts from the referenced DTB | in-process parser + RSA/PKCS#1 verification | any host | same, plus `::test_a_supplied_key_verifies_only_the_selected_configuration` |
 | Repeated-work cache (`--cache-dir`) | **measured** — per-file rule matches and text facts; cold/warm reports equal | `ihs-analysis-cache/1` | any host | `tests/test_analysis_cache.py`, `tests/test_installed_cli.py::TestRepeatedWorkCache` |
+| Intel HEX (`.hex`, `.ihex`, `.ihx`) | **analyzed** — records validated (length, checksum, address extension), sparse address map, payload digest, structural diagnostics | in-process decoder `ihs-mcu/1` | any host | `tests/test_mcu_image.py`, `tests/test_mcu_profile.py` |
+| Motorola S-record (`.s19`, `.s28`, `.s37`, `.srec`, `.mot`) | **analyzed** — S0/S1/S2/S3/S5/S6/S7/S8/S9 interpreted, count disagreement diagnosed | same | any host | same |
+| UF2 (`.uf2`) | **analyzed** — magic-verified 512-byte blocks, family id, target address, missing/duplicate blocks diagnosed | same | any host | same |
 | Opaque / unrecognised blob | **recognized** — identified, then reported as unsupported (exit 4) | none | any host | `tests/test_installed_cli.py::TestObservedFailuresStayFixed` |
 | Malformed / adversarial artifact (any format above) | **rejected** — the lie is named (declared size, offset, depth, version), the stage is `FAILED`, exit 4, no traceback | in-process parsers; no helper | any host | `tests/test_hostile_inputs.py`, `tests/test_parser_properties.py` |
 | A saved document that is not a report (`report`, `compare`, `sbom`) | **rejected** — structural validation before any renderer indexes into it, exit 3 | in-process validator | any host | `tests/test_hostile_inputs.py` |
 | Advisory snapshot `ihs-advisory-snapshot/1` | **decoded and applied** offline | none (no network) | any host | `tests/test_advisory.py` |
-| Partitioned images, CPIO, JFFS2/UBIFS, MCU address spaces, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
+| Partitioned images, CPIO, JFFS2/UBIFS, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
 
 A level means exactly this: **recognized** — the bytes were identified;
 **decoded** — a container was opened; **extracted** — files were materialised;
@@ -73,7 +79,8 @@ installed-entrypoint modules is named by no row at all.
 | Build output replaced between ingest and analysis | **snapshot-bound** — new bytes are never attributed to the old digest; the snapshot stays in use when the source moves | `::TestReplacedBuildOutput` |
 | Sparse 2 GiB input under the resource budgets | **bounded** — peak RSS, elapsed time and scratch measured, not assumed | `::TestBudgets` |
 | Generated declaration set: one match, one version mismatch, one declared-only, one observed-only | **analyzed** — four distinguishable outcomes; a revision-less supplier row stays unresolved; another image's declaration resolves nothing | `::TestDeclarationReconciliation` |
-| Saved report schemas 1–7 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
+| Saved report schemas 1–8 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
+| MCU address map: equivalence, gaps, conflicts, truncation, bounds | **analyzed** — one digest across all three encodings, re-chunking does not move it, a gap is never zero-filled, a conflicting rewrite is named, a truncated encoding is a FAILED stage with exit 4 | `tests/test_mcu_image.py`, `tests/test_mcu_profile.py` |
 | Type-label provenance and host capabilities (`artifact.file_type_source`, `tool.capabilities`) | **recorded** — four sources distinguished (`magic-bytes`, `libmagic`, `extension`, `directory`); libmagic availability proved by calling the library and carrying its real reason; parser versions and container runtimes on `PATH` recorded; an upgraded v6 document carries `null`, and `null` renders as silence | `tests/test_capabilities.py` |
 | The support matrix itself | **executable** — every claimed node resolves to a collected test and passes when it runs; unclaimed tests are reported, not hidden | `tests/test_claim_matrix.py::test_every_matrix_reference_resolves` |
 
@@ -90,7 +97,8 @@ reaches. These are separate claims from “the format can be read”:
 | Opaque / unsupported input | **none** — nothing to compare; the scan is incomplete and the comparison says so | — | everything |
 | Build declaration (manifest, CycloneDX) | **declaration-level** — name and version against the image's records, with an explicit binding state | declared name; complete version string | whether the declared package's *files* are present |
 | FIT / DTB boot manifests | **manifest-level** — the selected configuration is resolved against the artifact's own payloads, and declared vs observed digests are compared | configuration name; payload node; declared digest | anything across releases; runtime boot behaviour |
-| MCU / RAUC / partitioned images | **not supported** — no comparison claim | — | — |
+| RAUC / partitioned images | **not supported** — no comparison claim | — | — |
+| Bare-metal address map | **not supported in `compare`** — the section is recorded in each document, but release-to-release identity for a sparse flash map is a separate gate; a diff would need an address-identity contract this release does not claim | — | everything |
 
 ### Hosts
 

@@ -91,6 +91,20 @@ class ScannerConfig:
         description="Budget for entries in an extracted filesystem",
         ge=1,
     )
+    max_mcu_payload_mb: int = Field(
+        default=64,
+        description=(
+            "Budget for bytes decoded from a bare-metal encoding (Intel HEX, S-record, "
+            "UF2). Separate from the file size: hex text is at least twice the payload."
+        ),
+        ge=1,
+        le=4096,
+    )
+    max_mcu_records: int = Field(
+        default=500000,
+        description="Budget for records/blocks read from a bare-metal encoding",
+        ge=1,
+    )
     keep_scratch: bool = Field(
         default=False,
         description="Keep the extraction scratch directory after a failed run",

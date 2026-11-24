@@ -67,6 +67,7 @@ class InputKind(str, Enum):
     FILE = "file"  # a single image/blob, addressed by its byte digest
     TREE = "tree"  # a directory, addressed by a canonical tree-manifest digest
     BOOT = "boot"  # a flattened device tree or U-Boot FIT boot manifest
+    MCU = "mcu"  # a bare-metal image addressed by its device address space
 
 
 class StageId(str, Enum):
@@ -88,6 +89,7 @@ class StageId(str, Enum):
     RULE_COMPILATION = "rule_compilation"
     RISK_CONTROLS = "risk_controls"
     BOOT_ANALYSIS = "boot_analysis"
+    MCU_ANALYSIS = "mcu_analysis"
 
 
 class StageStatus(str, Enum):
@@ -351,6 +353,13 @@ class ScanContext:
     #: Slice 3D: the parsed boot manifests, or ``None`` when the selected
     #: profile does not read a boot artifact.
     boot: BootAnalysis | None = None
+
+    #: Slice 3C: the decoded bare-metal image (sparse address map), or ``None``
+    #: when the selected profile does not decode one.
+    mcu: McuAnalysis | None = None
+    #: Slice 3C: compiled-rule matches found in the decoded payload, each with the
+    #: device address it was found at. Routed by destination in the assessment.
+    mcu_matches: list[YaraMatch] = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -671,6 +680,151 @@ class BootAnalysis:
     def as_dict(self) -> dict[str, Any]:
         return {
             "artifacts": [a.as_dict() for a in self.artifacts],
+            "notes": list(self.notes),
+        }
+
+
+# ──────────────────────────────────────────────
+# Phase 3c: MCU address spaces (slice 3C)
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class McuRange:
+    """One contiguous, observed byte range in the device's address space.
+
+    ``start``/``end`` are **device addresses**, never file offsets, and ``end``
+    is exclusive. A range exists because records declared those bytes; nothing
+    here is inferred from the shape of the file.
+    """
+
+    start: int
+    end: int
+    length: int
+    sha256: str
+    source_records: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "start_hex": f"0x{self.start:08x}",
+            "end": self.end,
+            "end_hex": f"0x{self.end:08x}",
+            "length": self.length,
+            "sha256": self.sha256,
+            "source_records": self.source_records,
+        }
+
+
+@dataclass
+class McuGap:
+    """An unobserved address range between two declared ones.
+
+    It is reported with ``observed: false`` and is never zero-filled: filling it
+    would invent bytes the artifact did not carry.
+    """
+
+    start: int
+    end: int
+    length: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "start_hex": f"0x{self.start:08x}",
+            "end": self.end,
+            "end_hex": f"0x{self.end:08x}",
+            "length": self.length,
+            "observed": False,
+        }
+
+
+@dataclass
+class McuDiagnostic:
+    """A structural observation about the encoding itself.
+
+    ``kind`` is one of ``conflict``, ``duplicate``, ``out-of-order``,
+    ``missing-eof``, ``missing-block``, ``duplicate-block``,
+    ``record-count-mismatch``, ``unknown-record-type``.
+    """
+
+    kind: str
+    detail: str
+    address: int | None = None
+    length: int | None = None
+    records: list[int] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "detail": self.detail,
+            "address": self.address,
+            "address_hex": None if self.address is None else f"0x{self.address:08x}",
+            "length": self.length,
+            "records": list(self.records),
+        }
+
+
+@dataclass
+class McuAnalysis:
+    """A bare-metal image decoded into a sparse address map (slice 3C).
+
+    ``payload_sha256`` is computed over the merged ranges in ascending address
+    order (:data:`iot_hardware_scanner.scanner.mcu_image._DIGEST_PREFIX`), so
+    the same payload yields the same digest whichever of the three encodings
+    carried it. ``declared_bytes`` counts every byte any record declared;
+    ``payload_bytes`` counts the bytes that ended up addressed once. They differ
+    only when records overlap, and the difference is a ``conflict`` or
+    ``duplicate`` diagnostic rather than a quiet correction.
+    """
+
+    format: str
+    decoder: str
+    decoder_version: str
+    locator: str
+    digest: str
+    ranges: list[McuRange] = field(default_factory=list)
+    gaps: list[McuGap] = field(default_factory=list)
+    payload_bytes: int = 0
+    declared_bytes: int = 0
+    payload_sha256: str = ""
+    records: int = 0
+    start_address: int | None = None
+    target_address: int | None = None
+    family: str | None = None
+    header: str | None = None
+    diagnostics: list[McuDiagnostic] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    #: The decoded bytes, one entry per merged range, so the rule sweep reads the
+    #: payload rather than re-parsing the encoding. Bounded by the payload budget
+    #: and **never serialised**: a report carries addresses and digests, not a
+    #: copy of the firmware.
+    payload_ranges: list[tuple[int, bytes]] = field(default_factory=list, repr=False)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "format": self.format,
+            "decoder": self.decoder,
+            "decoder_version": self.decoder_version,
+            "locator": self.locator,
+            "digest": self.digest,
+            "ranges": [item.as_dict() for item in self.ranges],
+            "gaps": [item.as_dict() for item in self.gaps],
+            "payload_bytes": self.payload_bytes,
+            "declared_bytes": self.declared_bytes,
+            "payload_sha256": self.payload_sha256,
+            "records": self.records,
+            "start_address": self.start_address,
+            "start_address_hex": (
+                None if self.start_address is None else f"0x{self.start_address:08x}"
+            ),
+            "target_address": self.target_address,
+            "target_address_hex": (
+                None if self.target_address is None else f"0x{self.target_address:08x}"
+            ),
+            "family": self.family,
+            "header": self.header,
+            "diagnostics": [item.as_dict() for item in self.diagnostics],
             "notes": list(self.notes),
         }
 
