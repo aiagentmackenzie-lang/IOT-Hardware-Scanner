@@ -1,17 +1,24 @@
-# Support matrix and qualification record — release 2.6.0
+# Support matrix and qualification record — release 2.7.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.6.0`, report schema 6, profile version 5.0.
-Release 2.6.0 changes no format, schema or profile: it bounds what a control
-reads and what a text-fact pass costs, and it stops a binary artifact from
-supplying "verification" evidence ([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)).
+Measured with `iot-hardware-scanner 2.7.0`, report schema 7, profile version 5.0.
+Release 2.7.0 changes no input format, profile or detector. It records two facts
+the document was missing — how the artifact's type label was produced, and which
+parser and helper capabilities the host actually had — and removes one dead
+scoring signal ([docs/MIGRATION-v7.md](MIGRATION-v7.md)). Release 2.6.0 bounded
+what a control reads and what a text-fact pass costs, and stopped a binary
+artifact from supplying "verification" evidence
+([docs/2.6-INPUT-COST.md](2.6-INPUT-COST.md)).
 Release 2.5.1 made **this file** executable: every backticked test reference is
 resolved against a collected test and checked for a pass when it runs, and every
 acceptance class in the two installed-entrypoint modules must be named by a row
-here. Every other row keeps the evidence recorded for 2.4 and 2.5.
+here. Every other row keeps the evidence recorded for 2.4 and 2.5; **the corpus
+numbers below are the 2.6.0 qualification and were not re-measured for 2.7.0**,
+because no format, detector, control or profile changed — only two recorded
+facts and one deleted dead signal.
 Numbers come from runs recorded in [docs/P2-PERFORMANCE.md](P2-PERFORMANCE.md)
 (the performance contract), [docs/MILESTONE-C.md](MILESTONE-C.md) (the
 2.2 qualification), [docs/MILESTONE-D.md](MILESTONE-D.md) (the 2.3 comparison,
@@ -66,7 +73,8 @@ installed-entrypoint modules is named by no row at all.
 | Build output replaced between ingest and analysis | **snapshot-bound** — new bytes are never attributed to the old digest; the snapshot stays in use when the source moves | `::TestReplacedBuildOutput` |
 | Sparse 2 GiB input under the resource budgets | **bounded** — peak RSS, elapsed time and scratch measured, not assumed | `::TestBudgets` |
 | Generated declaration set: one match, one version mismatch, one declared-only, one observed-only | **analyzed** — four distinguishable outcomes; a revision-less supplier row stays unresolved; another image's declaration resolves nothing | `::TestDeclarationReconciliation` |
-| Saved report schemas 1–6 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
+| Saved report schemas 1–7 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
+| Type-label provenance and host capabilities (`artifact.file_type_source`, `tool.capabilities`) | **recorded** — four sources distinguished (`magic-bytes`, `libmagic`, `extension`, `directory`); libmagic availability proved by calling the library and carrying its real reason; parser versions and container runtimes on `PATH` recorded; an upgraded v6 document carries `null`, and `null` renders as silence | `tests/test_capabilities.py` |
 | The support matrix itself | **executable** — every claimed node resolves to a collected test and passes when it runs; unclaimed tests are reported, not hidden | `tests/test_claim_matrix.py::test_every_matrix_reference_resolves` |
 
 ### Comparison level per input format
@@ -215,6 +223,7 @@ machine-independent invariants are still enforced
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.7.0, local) | `9f5d12330d2d81bd0a26dbad697304f350bee78d34a11c58973e87ba2bf5388c` — `iot_hardware_scanner-2.7.0-py3-none-any.whl`; two consecutive local builds are byte-identical. Linux CI byte-identity is recorded by the run that ships it. **Report schema 7**, so 2.6–2.4 reports stay readable and gain `null` for the two facts they never recorded; no profile change |
 | Wheel (2.6.0, local) | `389a1555ecdfb9ec488865c19f276675964d7e27d6545cc992afa0358f54d931` — `iot_hardware_scanner-2.6.0-py3-none-any.whl`; two consecutive local builds are byte-identical. Linux CI byte-identity is recorded by the run that ships it. **No schema or profile change**, so 2.4/2.5 reports stay readable; cached text facts from 2.5 (`ihs-analysis-cache/1`, extractor version 1) are ignored and recomputed |
 | Wheel (2.5.1, qualified) | `4f7fa23e1141cfe251894358b8b557de8f268fe8800666f285c6cb4a6f185add` — `iot_hardware_scanner-2.5.1-py3-none-any.whl`; two consecutive local builds are byte-identical. **No schema or profile change**, so 2.5.0 and 2.4 reports stay readable; a v1 replay gains explicit `null` "not recorded" sections (see [docs/P1-CLAIM-MATRIX.md](P1-CLAIM-MATRIX.md)) |
 | Wheel (2.5.0, qualified) | `3af486a4e922010300d13365c09b98bb1e7a7ce00501e2ef6f85f4ab912b3303` — `iot_hardware_scanner-2.5.0-py3-none-any.whl`; **byte-identical** from the macOS arm64 build and the Linux CI build in run `44911766646`. **No schema or profile change**, so 2.4 reports stay readable |

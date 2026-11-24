@@ -12,7 +12,19 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.6.0
+## Status — version 2.7.0
+
+Version 2.7.0 records two facts the document was missing, and deletes one claim
+it never supported. `artifact.file_type_source` says **how** the type label was
+produced — `magic-bytes`, `libmagic`, `extension` or `directory` — because the
+same words read from libmagic and from a `.elf` suffix are different claims.
+`tool.capabilities` records what the host could actually use: libmagic
+availability proved by calling the library (with its real reason), the
+`pyelftools` and `yara-python` versions that produced the records, and which
+container runtimes are on `PATH`. A host without libmagic now says so instead of
+silently identifying less, and the fallback log names libmagic, not the package.
+The terminal and Markdown renderers print the provenance. Report schema 6 → 7,
+profile unchanged at 5.0. Record: [docs/MIGRATION-v7.md](docs/MIGRATION-v7.md).
 
 Version 2.6.0 bounds what the scanner will read in order to answer a question, and
 stops a binary artifact from answering one. Control 5 used to select "update" files by
@@ -74,6 +86,7 @@ to a passing case.
 | Capability | State |
 | --- | --- |
 | Input identity (file SHA-256 / canonical tree digest) | ✅ implemented |
+| Type-label provenance (`file_type_source`) and recorded host capabilities | ✅ implemented, schema 7 |
 | Immutable input binding (private snapshot, verified digest) | ✅ implemented |
 | Opaque or unsupported artifact handling | ✅ reports incomplete, never "clean" |
 | Credential, secret and Unix-account detection | ✅ implemented, offline |
@@ -267,8 +280,9 @@ renderer indexes into it.
 
 ## Report document
 
-One schema-6 JSON document is the single source for every format. Full details in
-[docs/MIGRATION-v6.md](docs/MIGRATION-v6.md) for `boot` and `cache`;
+One schema-7 JSON document is the single source for every format. Full details in
+[docs/MIGRATION-v7.md](docs/MIGRATION-v7.md) for the type-label provenance and the
+recorded host capabilities; [docs/MIGRATION-v6.md](docs/MIGRATION-v6.md) for `boot` and `cache`;
 [docs/MIGRATION-v5.md](docs/MIGRATION-v5.md) is the schema-5 change, the schema-4 change in
 [docs/MIGRATION-v4.md](docs/MIGRATION-v4.md), the schema-3 change in
 [docs/MIGRATION-v3.md](docs/MIGRATION-v3.md) and the schema-2 change in
@@ -280,9 +294,16 @@ document, and neither is a substitute for one.
 
 ```json
 {
-  "schema_version": 6,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.6.0"},
-  "artifact": {"kind": "tree", "sha256": "…", "size": 145, "file_type": "Staged root tree (2 files)"},
+  "schema_version": 7,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.7.0",
+           "capabilities": {
+             "libmagic": {"available": true, "version": "540", "detail": null},
+             "pyelftools": {"available": true, "version": "0.33", "detail": null},
+             "yara-python": {"available": true, "version": "4.5.4", "detail": null},
+             "container_runtime_on_path": ["podman", "docker"]}},
+  "artifact": {"kind": "tree", "sha256": "…", "size": 145,
+               "file_type": "Staged root tree (2 files)",
+               "file_type_source": "directory"},
   "assessment": {
     "profile": "credentials-only",
     "profile_version": "5.0",
@@ -550,11 +571,19 @@ and corpus digests, with the platform each was built on. The reference image is
   alternative was reporting `libc.so` and `payload.offset` as C2 infrastructure.
 * **A rule match is not a verdict.** A crypto finding says an implementation is present in a named
   file at a named offset; it does not say the device uses it.
+* **The scanner records what it used, not what is installable.** `tool.capabilities` proves
+  libmagic by calling it, names the parser versions that produced the records, and lists the
+  container runtimes on `PATH` — presence only, never reachability; what a scan actually did is in
+  `extraction`. A report from a version before 7 carries `null` for both facts, which means "not
+  recorded", not "none available".
+* **No TLS or registrar reputation signal exists.** An offline scan cannot verify a certificate,
+  so the "valid certificate plus established organisation" score is absent rather than silently
+  subtracting zero.
 * **Installed-package records are not file evidence.** The database says what the package manager
   recorded; it does not prove every package-owned file is present or intact.
 * **Component naming has two kinds of authority.** Every one of the reference image's 196
-  installed records is a component with its own evidence range. Three name a product NIST's CPE
-  dictionary lists (`nist-mapped`); the other 193 have no authoritative entry, so the name is
+  installed records is a component with its own evidence range. Five name a product NIST's CPE
+  dictionary lists (`nist-mapped`); the other 191 have no authoritative entry, so the name is
   built from the opkg package's own name with vendor `openwrt` (`opkg-package-name`). The basis is
   recorded per component and counted in the report, so a reader can weigh it; the scanner never
   invents a vendor to make the number look better.
