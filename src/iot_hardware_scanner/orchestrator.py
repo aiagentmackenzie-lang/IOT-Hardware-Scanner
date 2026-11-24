@@ -28,16 +28,21 @@ import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
 from iot_hardware_scanner.config import ScannerConfig
 from iot_hardware_scanner.exceptions import InputKindError, ScannerError
 from iot_hardware_scanner.models import (
+    EXTRACTION_CORRUPT,
+    EXTRACTION_OK,
     EXTRACTION_UNAVAILABLE,
     ArtifactNode,
     BootAnalysis,
     ControlResult,
+    ExtractionProvenance,
+    ExtractionResult,
     FileCategory,
     FilesystemInventory,
     ImageMap,
@@ -1005,6 +1010,11 @@ class Orchestrator:
             image_map = builder.start(reader, context.file_hash_sha256, context.firmware_name)
             context.image_map = image_map
 
+            if image_map.nodes[0].format == "disk":
+                # A disk image is not one filesystem: its table names partitions,
+                # and each partition is decoded by its own magic bytes.
+                return self._partitioned_extraction(context, builder, reader, scratch)
+
             if image_map.nodes[0].format == "gzip":
                 decoded = scratch / "decoded" / "root.squashfs"
                 _path, child = builder.decompress_gzip(
@@ -1179,6 +1189,272 @@ class Orchestrator:
         context.image_rootfs_artifact_id = parent_id
         return context
 
+    def _partitioned_extraction(
+        self,
+        context: ScanContext,
+        builder: Any,
+        reader: Any,
+        scratch: Path,
+    ) -> ScanContext:
+        """Phase 2 for a disk image: one partition at a time (slice 3A, part 2).
+
+        Each partition is sliced into private scratch, decoded by its own magic
+        bytes, and extracted with the same worker a single-image scan uses. A
+        partition that holds no recognisable filesystem is recorded as such and
+        does not fail the others: a disk image legitimately carries a bootloader,
+        a `uboot-env` blob and two roots side by side.
+        """
+        from iot_hardware_scanner.scanner.extraction_worker import (
+            ExtractionError,
+            SquashfsWorker,
+        )
+        from iot_hardware_scanner.scanner.image_map import ImageMapError
+        from iot_hardware_scanner.scanner.partitions import PartitionError
+
+        # Phase 2's own header was already printed by the caller.
+        image_map = context.image_map
+        assert image_map is not None
+        try:
+            nodes = builder.add_partitions(reader)
+        except PartitionError as exc:
+            record_stage(
+                context,
+                StageId.EXTRACTION,
+                StageStatus.FAILED,
+                reason=f"the partition table is not decodable: {exc}",
+                omissions=["filesystem never enumerated"],
+            )
+            record_stage(
+                context,
+                StageId.ROOT_DISCOVERY,
+                StageStatus.UNAVAILABLE,
+                reason="the partition table was rejected, so no partition was reached",
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+
+        scheme = str(image_map.nodes[0].details.get("partition_scheme", "partition")).upper()
+        console.print(
+            f"  [green]✓[/green] {scheme} table: {len(nodes)} partition(s), "
+            "every declared range inside the image"
+        )
+
+        worker = SquashfsWorker(self.config)
+        collected = ExtractionResult(
+            success=False,
+            extraction_dir=scratch / "extract",
+            backend="unknown",
+            state=EXTRACTION_UNAVAILABLE,
+        )
+        provenance: ExtractionProvenance | None = None
+        roots: list[Path] = []
+        omissions: list[str] = []
+        filesystem_partitions = 0
+        unavailable = False
+
+        for node in nodes:
+            try:
+                sliced = builder.slice_partition(
+                    reader, node, scratch / "partitions" / f"{node.artifact_id}.img"
+                )
+            except ImageMapError as exc:
+                record_stage(
+                    context,
+                    StageId.EXTRACTION,
+                    StageStatus.FAILED,
+                    reason=f"partition {node.artifact_id} could not be read: {exc}",
+                    omissions=["filesystem never enumerated"],
+                )
+                record_stage(
+                    context,
+                    StageId.ROOT_DISCOVERY,
+                    StageStatus.UNAVAILABLE,
+                    reason="a declared partition range could not be read",
+                )
+                console.print(f"  [red]✗[/red] {exc}")
+                return context
+
+            try:
+                squashfs_path, child = self._decode_partition(sliced, node, builder)
+            except ImageMapError as exc:
+                node.details["content"] = "undecodable"
+                node.details["content_note"] = str(exc)
+                omissions.append(
+                    f"{node.artifact_id}: declared bytes are not a decodable container"
+                )
+                console.print(f"  [yellow]![/yellow] {node.artifact_id}: {exc}")
+                continue
+            if squashfs_path is None:
+                node.details["content"] = "unrecognised"
+                omissions.append(f"{node.artifact_id}: no recognised filesystem in its bytes")
+                console.print(
+                    f"  [yellow]![/yellow] {node.artifact_id} ({node.details.get('type_name')}): "
+                    "no SquashFS magic in its bytes"
+                )
+                continue
+
+            try:
+                result = worker.extract(squashfs_path, scratch / "extract" / node.artifact_id)
+            except ExtractionError as exc:
+                if exc.state == EXTRACTION_UNAVAILABLE:
+                    unavailable = True
+                node.details["content"] = "squashfs"
+                node.details["extraction_state"] = exc.state
+                omissions.append(f"{node.artifact_id}: {exc.message}")
+                console.print(f"  [yellow]![/yellow] {node.artifact_id}: {exc.message}")
+                continue
+
+            node.details["content"] = "squashfs"
+            node.details["extraction_state"] = result.state
+            node.details["file_count"] = result.file_count
+            if child is not None and result.provenance is not None:
+                child.decoder_version = result.provenance.helper_version
+            if not result.success or not result.root_filesystems:
+                omissions.append(
+                    f"{node.artifact_id}: {result.state}"
+                    + (
+                        f" ({'; '.join(result.extraction_errors)})"
+                        if result.extraction_errors
+                        else ""
+                    )
+                )
+                console.print(f"  [yellow]![/yellow] {node.artifact_id}: extraction {result.state}")
+                continue
+
+            filesystem_partitions += 1
+            roots.extend(result.root_filesystems)
+            collected.file_count += result.file_count
+            collected.total_size += result.total_size
+            collected.omissions.extend(result.omissions)
+            provenance = result.provenance or provenance
+            collected.backend = result.backend
+            collected.backend_version = result.backend_version
+            collected.worker_digest = result.worker_digest
+            manifest = _extract_manifest_metadata(result)
+            for root in result.root_filesystems:
+                context.root_sources[str(root)] = {
+                    "metadata": manifest,
+                    "metadata_source": "image" if manifest else "host",
+                    "artifact_id": node.artifact_id,
+                }
+            console.print(
+                f"  [green]✓[/green] {node.artifact_id} ({node.details.get('label')}): "
+                f"SquashFS root, {result.file_count:,} file(s), "
+                f"{len(result.root_filesystems)} root(s)"
+            )
+
+        if not roots:
+            detail = "; ".join(omissions) or "no partition holds a recognised filesystem"
+            state = EXTRACTION_UNAVAILABLE if unavailable else EXTRACTION_CORRUPT
+            record_stage(
+                context,
+                StageId.EXTRACTION,
+                StageStatus.UNAVAILABLE if unavailable else StageStatus.FAILED,
+                reason=detail,
+                dependency=EXTRACTION_DEPENDENCY if unavailable else None,
+                omissions=["filesystem never enumerated"],
+            )
+            record_stage(
+                context,
+                StageId.ROOT_DISCOVERY,
+                StageStatus.UNAVAILABLE,
+                reason="no partition yielded an enumerable root filesystem",
+            )
+            collected.state = state
+            collected.success = False
+            collected.extraction_errors = list(omissions)
+            context.extraction_result = collected
+            console.print(f"  [yellow]![/yellow] No root filesystem: {detail}")
+            return context
+
+        collected.success = True
+        collected.state = EXTRACTION_OK
+        collected.root_filesystems = roots
+        collected.provenance = provenance
+        collected.omissions = list(dict.fromkeys(collected.omissions + omissions))
+        context.extraction_result = collected
+        context.extraction_provenance = provenance
+        context.extracted_rootfs = roots[0]
+        context.image_rootfs_artifact_id = (
+            context.root_sources.get(str(roots[0]), {}).get("artifact_id")
+            or image_map.root_artifact_id
+        )
+        record_stage(
+            context,
+            StageId.EXTRACTION,
+            StageStatus.PARTIAL if omissions else StageStatus.COMPLETE,
+            reason=(
+                f"{filesystem_partitions} of {len(nodes)} partition(s) hold a filesystem; "
+                f"{collected.backend} worker"
+                + (f" {collected.backend_version}" if collected.backend_version else "")
+                + (f", image {collected.worker_digest[:19]}…" if collected.worker_digest else "")
+            ),
+            inspected=filesystem_partitions,
+            eligible=len(nodes),
+            omissions=list(omissions),
+        )
+        record_stage(
+            context,
+            StageId.ROOT_DISCOVERY,
+            StageStatus.COMPLETE,
+            reason=(
+                f"{len(roots)} root filesystem(s) located across "
+                f"{filesystem_partitions} partition(s)"
+            ),
+            inspected=len(roots),
+            eligible=len(roots),
+        )
+        console.print(
+            f"  [green]✓[/green] {len(roots)} root(s) from {filesystem_partitions} partition(s), "
+            f"{collected.file_count:,} file(s), {collected.total_size:,} bytes"
+        )
+        return context
+
+    def _decode_partition(
+        self, sliced: Path, node: ArtifactNode, builder: Any
+    ) -> tuple[Path | None, ArtifactNode | None]:
+        """Decide what one partition holds, from its first bytes.
+
+        A partition is either a bare SquashFS image, a gzip-wrapped one, or
+        neither. "Neither" is a fact about this partition, not a failure of the
+        scan, so it returns ``(None, None)`` and the caller records it.
+        """
+        from iot_hardware_scanner.scanner.image_map import (
+            GZIP_MAGIC,
+            ImageMapError,
+        )
+
+        reader = open_bounded(sliced)
+        head = reader.read_head(4)
+        if head.startswith(GZIP_MAGIC):
+            if builder.map is None:  # pragma: no cover - builder is always started
+                raise ImageMapError("image map was not started")
+            builder.map.root_artifact_id = node.artifact_id
+            decoded = sliced.parent / f"{sliced.stem}.squashfs"
+            try:
+                _path, child = builder.decompress_gzip(
+                    reader,
+                    decoded,
+                    max_decoded_bytes=self.config.max_decoded_bytes_mb * 1024 * 1024,
+                    node_id=f"{node.artifact_id}g",
+                )
+            finally:
+                builder.map.root_artifact_id = "a0"
+            child.parent_id = node.artifact_id
+            node.details["content"] = "gzip"
+            return decoded, child
+        if head.startswith(b"hsqs"):
+            superblock = builder.parse_squashfs(reader)
+            if superblock.bytes_used > node.length:
+                raise ImageMapError(
+                    f"the superblock declares {superblock.bytes_used:,} bytes used, more than "
+                    f"the {node.length:,}-byte partition"
+                )
+            node.details["superblock"] = superblock.as_dict()
+            node.extent_bytes = superblock.bytes_used
+            return sliced, None
+        return None, None
+
     # ──────────────────────────────────────────
     # Phase 2b: enumeration
     # ──────────────────────────────────────────
@@ -1221,18 +1497,22 @@ class Orchestrator:
             metadata_source="image" if metadata else "host",
         )
         for index, rootfs in enumerate(roots):
+            root_id = f"rootfs{index + 1}" if len(roots) > 1 else "rootfs"
+            # A disk image can carry two partitions whose relative paths collide.
+            # Metadata and the artifact node are therefore taken per root, never
+            # from one aggregate manifest.
+            source = context.root_sources.get(str(rootfs), {})
+            root_metadata = source.get("metadata") or metadata
+            root_source = source.get("metadata_source") or ("image" if root_metadata else "host")
             inventory = scanner.scan(
                 rootfs,
-                root_id=f"rootfs{index + 1}" if len(roots) > 1 else "rootfs",
-                metadata=metadata,
-                metadata_source="image" if metadata else "host",
+                root_id=root_id,
+                metadata=root_metadata,
+                metadata_source=root_source,
+                artifact_id=source.get("artifact_id"),
             )
             _merge_inventory(merged, inventory)
-            merged.boot_evidence.extend(
-                scanner.collect_boot_evidence(
-                    rootfs, root_id=f"rootfs{index + 1}" if len(roots) > 1 else "rootfs"
-                )
-            )
+            merged.boot_evidence.extend(scanner.collect_boot_evidence(rootfs, root_id=root_id))
 
         context.filesystem_inventory = merged
         self._record_enumeration(context, merged)

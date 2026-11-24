@@ -40,8 +40,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import partition_fixtures
 from elf_fixtures import ElfSpec, write_fixture
-from harness import Runner
+from harness import Runner, make_tree
 
 WORKER_IMAGE = "ihs-squashfs-worker:4.5.1"
 REFERENCE_SHA256 = "8b5aa82659cafd90b26333dd419a0df9ad63c517ad94a2159e970a5bb5b6ff02"
@@ -99,6 +100,54 @@ def runtime() -> str:
             "(the linux-extractor CI job is the qualified gate)"
         )
     return found[0]
+
+
+@lru_cache(maxsize=1)
+def _mksquashfs_available() -> bool:
+    """Whether the worker image carries the *builder*, for generated fixtures."""
+    found = _container_runtime()
+    if found is None:
+        return False
+    probe = subprocess.run(
+        [found[0], "run", "--rm", "--entrypoint", "/usr/bin/mksquashfs", WORKER_IMAGE, "-version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+def _build_squashfs(runtime: str, workdir: Path, source: Path, name: str) -> Path:
+    """Build a SquashFS image from a tree, using the pinned worker's tool set."""
+    # `-all-root` is what makes the image extractable without a chown the
+    # container is not permitted to perform; it is the same recipe
+    # `build_image()` uses for the single-image rows.
+    subprocess.run(
+        [
+            runtime,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"{workdir}:/work",
+            "--entrypoint",
+            "/usr/bin/mksquashfs",
+            WORKER_IMAGE,
+            f"/work/{source.name}",
+            f"/work/{name}",
+            "-noappend",
+            "-comp",
+            "gzip",
+            "-all-root",
+            "-quiet",
+            "-no-progress",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return workdir / name
 
 
 @pytest.fixture
@@ -1311,3 +1360,101 @@ class TestCycloneDXExport:
             assert component["cpe"].count(":") == 12
             assert component["cpe"].startswith("cpe:2.3:a:")
             assert escape_component(original["version"]) in component["cpe"]
+
+
+# ──────────────────────────────────────────────
+# Slice 3A, part 2: a disk image with two root filesystems
+# ──────────────────────────────────────────────
+
+
+class TestPartitionedImage:
+    """The plan's 3A acceptance row, through the installed CLI.
+
+    Two distinct root filesystems inside one GPT image, built by the pinned
+    worker's own ``mksquashfs``; both must appear in the report, every partition
+    range must be inside the image, and the same relative path in each root must
+    stay distinguishable because it is qualified by its root id.
+    """
+
+    def test_two_roots_in_one_disk_are_mapped_and_distinguishable(
+        self, runtime: str, workdir: Path, runner: Runner
+    ) -> None:
+        if not _mksquashfs_available():
+            pytest.skip(
+                f"the {WORKER_IMAGE} image carries no mksquashfs: a generated disk image "
+                "cannot be built here"
+            )
+
+        # Two trees with the same relative path and different account state:
+        # A is locked, B has an empty password on a login shell.
+        tree_a = make_tree(workdir / "tree-a", "root:*:19000:0:99999:7:::\n")
+        tree_b = make_tree(workdir / "tree-b", "root::19000:0:99999:7:::\n")
+        image_a = _build_squashfs(runtime, workdir, tree_a, "a.squashfs")
+        image_b = _build_squashfs(runtime, workdir, tree_b, "b.squashfs")
+
+        first_lba = partition_fixtures.BASE_LBA
+        second_lba = first_lba + (image_a.stat().st_size // 512) + 16
+        disk_sectors = second_lba + (image_b.stat().st_size // 512) + 16
+        disk = bytearray(
+            partition_fixtures.gpt_image(
+                [
+                    (
+                        first_lba,
+                        image_a.stat().st_size // 512 + 1,
+                        partition_fixtures.LINUX_GUID,
+                        "rootfs-a",
+                    ),
+                    (
+                        second_lba,
+                        image_b.stat().st_size // 512 + 1,
+                        partition_fixtures.LINUX_GUID,
+                        "rootfs-b",
+                    ),
+                ],
+                sectors=disk_sectors,
+            )
+        )
+        for path, lba in ((image_a, first_lba), (image_b, second_lba)):
+            start = lba * 512
+            payload = path.read_bytes()
+            disk[start : start + len(payload)] = payload
+        disk_path = workdir / "two-roots.img"
+        disk_path.write_bytes(bytes(disk))
+
+        result = runner(
+            ["scan", str(disk_path), "--offline", "--format", "json", "--out", "disk.json"],
+            cwd=workdir,
+            env=_daemon_env(),
+        )
+        document = json.loads((workdir / "disk.json").read_text())
+
+        # 1. Both partitions are in the map, with byte coordinates in the image.
+        nodes = document["image_map"]["nodes"]
+        partitions = [node for node in nodes if node["format"] == "partition"]
+        assert [node["artifact_id"] for node in partitions] == ["p1", "p2"]
+        assert [node["details"]["label"] for node in partitions] == ["rootfs-a", "rootfs-b"]
+        assert partitions[0]["coordinate_system"] == "container-bytes"
+        assert partitions[0]["offset"] == first_lba * 512
+        assert len({node["offset"] for node in partitions}) == 2
+        for node in partitions:
+            assert node["offset"] + node["length"] <= disk_path.stat().st_size
+            assert node["details"]["content"] == "squashfs"
+
+        # 2. Both roots were enumerated, and each is attributed to its partition.
+        roots = document["inventory"]["roots"]
+        assert len(roots) == 2
+        assert {root["artifact_id"] for root in roots} == {"p1", "p2"}
+        assert len({root["root_id"] for root in roots}) == 2
+
+        # 3. The same relative path stays distinguishable: the empty-password
+        #    finding names the root it was found in, not a bare etc/shadow.
+        b_root = next(root for root in roots if root["artifact_id"] == "p2")
+        empty = [
+            f for f in document["findings"] if f["rule_id"] == "credential.unix.empty_password"
+        ]
+        assert empty, document["outcome"]
+        assert all(
+            location.startswith(f"{b_root['root_id']}/") for location in empty[0]["locations"]
+        ), empty[0]["locations"]
+        assert document["assessment"]["completion"] == "COMPLETE"
+        assert result.returncode == 1

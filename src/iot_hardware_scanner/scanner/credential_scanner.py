@@ -182,21 +182,29 @@ def _deduplicate_findings(findings: list[CredentialFinding]) -> list[CredentialF
     return [merged[key] for key in order]
 
 
-def _rel_label(path: Path | None, root_id: str) -> str:
+def _rel_label(path: Path | None, root_id: str, *, root_dir: Path | None = None) -> str:
     """Locate a record inside the root it came from.
 
-    The root name qualifies the path so two roots that both contain
-    ``etc/shadow`` produce two distinguishable locations, and a second
-    extraction of the same image cannot silently overwrite the first one's
-    evidence.
+    Two things are needed and they are not the same thing:
+
+    * a **label** that qualifies the location so two roots containing
+      ``etc/shadow`` stay distinguishable (``rootfs2/etc/shadow``);
+    * the **directory** the relative path is computed against, because the
+      label is an identity, not a path — a disk image's roots are both extracted
+      into a directory called ``rootfs``.
+
+    Passing the label where the directory belongs used to fall through to an
+    absolute path, which is neither stable nor comparable across hosts.
     """
+    label = Path(root_id).name or "<root>"
     if path is None:
-        return f"{Path(root_id).name or '<root>'}/etc/shadow"
+        return f"{label}/etc/shadow"
+    base = root_dir if root_dir is not None else Path(root_id)
     try:
-        relative = path.relative_to(root_id)
+        relative = path.relative_to(base)
     except ValueError:
         return str(path)
-    return f"{Path(root_id).name or '<root>'}/{relative}"
+    return f"{label}/{relative}"
 
 
 class CredentialScanner:
@@ -433,6 +441,13 @@ class CredentialScanner:
         findings: list[CredentialFinding] = []
         pairs = 0
 
+        # The qualifier a location is reported under is the *scan's* root id, not
+        # the directory's basename. Two partitions extracted by the same worker
+        # both land in a directory called ``rootfs``; naming the location after
+        # that basename would make their evidence indistinguishable.
+        labels = {
+            str(Path(root.locator)): root.root_id for root in (inventory.roots if inventory else [])
+        }
         roots: list[tuple[str, Path, Path | None]] = []
         if inventory is not None:
             seen: set[Path] = set()
@@ -447,18 +462,22 @@ class CredentialScanner:
                     continue
                 seen.add(root_dir)
                 shadow = root_dir / "etc" / "shadow"
-                roots.append((str(root_dir), ff.absolute_path, shadow if shadow.exists() else None))
+                label = labels.get(str(root_dir), str(root_dir))
+                roots.append((label, ff.absolute_path, shadow if shadow.exists() else None))
         elif root is not None and root.is_dir():
             for passwd, shadow_opt in discover_account_databases(root):
                 roots.append((str(passwd.parent.parent), passwd, shadow_opt))
 
         for root_id, passwd_path, shadow_path in roots:
+            root_dir = Path(passwd_path).parent.parent
             records = parser.join(
                 passwd_path,
                 shadow_path,
                 root_id=root_id,
-                passwd_label=_rel_label(passwd_path, root_id),
-                shadow_label=_rel_label(shadow_path, root_id) if shadow_path else None,
+                passwd_label=_rel_label(passwd_path, root_id, root_dir=root_dir),
+                shadow_label=(
+                    _rel_label(shadow_path, root_id, root_dir=root_dir) if shadow_path else None
+                ),
             )
             if records:
                 pairs += 1

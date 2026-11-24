@@ -297,6 +297,11 @@ class ScanContext:
 
     # Populated by Phase 2
     extracted_rootfs: Path | None = None
+    #: Per-root provenance, keyed by the root's absolute path: the extractor's
+    #: manifest for *that* root, and the artifact node it came from. A single
+    #: aggregate manifest cannot describe two partitions that hold the same
+    #: relative path with different metadata, so this stays per root.
+    root_sources: dict[str, dict[str, Any]] = field(default_factory=dict)
     extraction_result: ExtractionResult | None = None
     extraction_provenance: ExtractionProvenance | None = None
 

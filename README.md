@@ -12,7 +12,20 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.8.0
+## Status — version 2.9.0
+
+Version 2.9.0 delivers **partitioned disk images** (slice 3A, part 2). A flash
+dump or SD-card image is no longer an opaque blob: the MBT/GPT table is decoded,
+every declared range is validated against the file **before it is read**, and each
+partition is mapped as a node and decoded by its own magic bytes. Two root
+filesystems in one image are both inventoried, and the same relative path in each
+stays distinguishable because every locator is qualified by its root id
+(`rootfs2/etc/shadow`). Extended MBR chains are followed (bounded, cycle-checked);
+MBR entries, GPT headers and entry arrays are CRC-verified; an unknown type id is
+reported by id rather than guessed. A partition that holds no filesystem is
+recorded as such and does not fail the others. No schema change — the node model
+already carried a parent, a coordinate system, an offset and a length. Record:
+[docs/3A-PARTITIONS.md](docs/3A-PARTITIONS.md).
 
 Version 2.8.0 delivers slice **3C: bare-metal address spaces**. Intel HEX,
 Motorola S-record and UF2 images are no longer rejected as opaque blobs: each is
@@ -123,8 +136,9 @@ to a passing case.
 | CycloneDX 1.6 BOM export (`sbom --validate`) | ✅ implemented, validated against a vendored schema |
 | Flattened device trees and U-Boot FIT (`firmware-boot`) | ✅ bounded parse; configuration, payload integrity, signature presence/verification |
 | Bare-metal address spaces (`firmware-mcu`) | ✅ Intel HEX, S-record and UF2 decoded to one sparse map; one payload digest across encodings; gaps unobserved; conflicts named |
+| Partitioned disk images (MBR, extended MBR, GPT) | ✅ table CRC-verified and bounds-checked; every partition mapped and decoded by its own magic; two roots in one image both inventoried |
 | Repeated-work cache (`--cache-dir`) | ✅ opt-in, bounded, atomic; measured cold/warm equivalence |
-| RAUC bundles / partitioned images / CPIO / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
+| RAUC bundles / CPIO / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -584,6 +598,9 @@ and corpus digests, with the platform each was built on. The reference image is
 * **One container path.** gzip-wrapped SquashFS v4 only. Partitioned images, CPIO, JFFS2/UBIFS,
   MCU address spaces and RAUC bundles are later gates with their own fixtures; each is reported as
   unsupported rather than guessed at.
+* **A partitioned image is mapped, not compared.** `scan` inventories every partition that holds a
+  SquashFS filesystem; `compare` does not yet diff two disk layouts. Partitions that hold something
+  else (a bootloader, a `uboot-env` blob) are recorded as `unrecognised` and are not an error.
 * **A bare-metal image is bytes, not a system.** The `firmware-mcu` profile reports an address
   map, one payload digest and a single rule-set sweep over the decoded bytes; each match is a
   review finding at a device address, never a control verdict. An address gap is unobserved, not

@@ -43,11 +43,19 @@ from iot_hardware_scanner.models import (
     SquashfsSuperblock,
 )
 from iot_hardware_scanner.scanner.bounded_reader import BoundedReader, open_bounded
+from iot_hardware_scanner.scanner.partitions import (
+    decode_partition_table,
+    looks_like_partition_table,
+)
 
 logger = logging.getLogger(__name__)
 
 GZIP_MAGIC = b"\x1f\x8b"
 SQUASHFS_MAGIC = b"hsqs"
+#: Enough bytes to see an MBR signature and a GPT header in one read.
+SECTOR_SIZE_BYTES = 1024
+#: Decoder identity for the partition table reader, recorded on every node.
+PARTITION_DECODER_VERSION = "1"
 #: The superblock is 96 bytes in SquashFS v4.
 SUPERBLOCK_SIZE = 96
 #: Compressor identifiers, from squashfs_fs.h.
@@ -92,9 +100,19 @@ class ImageMapBuilder:
     # ──────────────────────────────────────────
 
     def start(self, reader: BoundedReader, digest: str, name: str) -> ImageMap:
-        """Create the map with the inspected artifact as its root node."""
-        header = reader.read_head(4)
-        fmt = "gzip" if header.startswith(GZIP_MAGIC) else "file"
+        """Create the map with the inspected artifact as its root node.
+
+        Three containers are recognised here, each by its own bytes: a gzip
+        wrapper, a disk with an MBR/GPT table, and everything else (which the
+        caller then tries as a bare SquashFS image).
+        """
+        header = reader.read_head(SECTOR_SIZE_BYTES)
+        if header.startswith(GZIP_MAGIC):
+            fmt = "gzip"
+        elif looks_like_partition_table(header):
+            fmt = "disk"
+        else:
+            fmt = "file"
         root = ArtifactNode(
             artifact_id="a0",
             parent_id=None,
@@ -111,6 +129,91 @@ class ImageMapBuilder:
         )
         self.map = ImageMap(root_artifact_id=root.artifact_id, nodes=[root])
         return self.map
+
+    # ──────────────────────────────────────────
+    # Partition tables (slice 3A, part 2)
+    # ──────────────────────────────────────────
+
+    def add_partitions(self, reader: BoundedReader) -> list[ArtifactNode]:
+        """Decode the table and add one child node per partition.
+
+        Every declared range is validated against the file before a node exists,
+        so a table that points past the end of a truncated image raises here
+        rather than producing a partition that reads as empty.
+        """
+        assert self.map is not None, "start() must be called before add_partitions()"
+        scheme, records = decode_partition_table(reader)
+        root = self.map.nodes[0]
+        root.format = "disk"
+        root.details["partition_scheme"] = scheme
+        root.details["partition_count"] = len(records)
+        nodes: list[ArtifactNode] = []
+        for record in records:
+            node = self.map.add(
+                ArtifactNode(
+                    artifact_id=f"p{record.index}",
+                    parent_id=root.artifact_id,
+                    # The digest is of the whole container; a partition's own
+                    # digest is recorded when it is sliced, because that is the
+                    # first moment its bytes are read.
+                    digest_sha256="",
+                    format="partition",
+                    coordinate_system="container-bytes",
+                    offset=record.offset,
+                    length=record.length,
+                    decoder="ihs-partitions",
+                    decoder_version=PARTITION_DECODER_VERSION,
+                    depth=1,
+                    locator=f"{root.locator}:{record.label}",
+                    details=record.to_details(),
+                )
+            )
+            nodes.append(node)
+        logger.info("partition table: %s, %d partition(s)", scheme, len(records))
+        return nodes
+
+    def slice_partition(self, reader: BoundedReader, node: ArtifactNode, destination: Path) -> Path:
+        """Copy one partition's declared bytes to scratch, bounded and hashed.
+
+        A partition is streamed, never loaded: the budget is the node's own
+        declared length, which :func:`decode_partition_table` already proved to
+        lie inside the file.
+        """
+        if node.format != "partition":
+            raise ImageMapError(f"node {node.artifact_id} is not a partition")
+        if node.offset < 0 or node.offset + node.length > reader.size:
+            raise ImageMapError(
+                f"partition {node.artifact_id} range {node.offset}:{node.offset + node.length} "
+                f"is outside the {reader.size}-byte input"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        hasher = hashlib.sha256()
+        written = 0
+        try:
+            with destination.open("wb") as out:
+                for window in reader.iter_windows(
+                    min(1024 * 1024, node.length),
+                    budget=node.length,
+                    start=node.offset,
+                ):
+                    if written + window.length > node.length:
+                        raise ImageMapError(
+                            f"partition {node.artifact_id} produced more bytes than it declares"
+                        )
+                    out.write(window.data)
+                    hasher.update(window.data)
+                    written += window.length
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+        if written != node.length:
+            destination.unlink(missing_ok=True)
+            raise ImageMapError(
+                f"partition {node.artifact_id} declares {node.length} byte(s), "
+                f"{written} could be read"
+            )
+        node.digest_sha256 = hasher.hexdigest()
+        return destination
 
     # ──────────────────────────────────────────
     # gzip wrapper

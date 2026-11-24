@@ -1,15 +1,18 @@
-# Support matrix and qualification record — release 2.8.0
+# Support matrix and qualification record — release 2.9.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.8.0`, report schema 8, profile version 6.0.
-Release 2.8.0 adds one input family and one profile: **bare-metal address
-spaces** (Intel HEX, S-record, UF2) decoded into one sparse map with one
-encoding-independent payload digest, under the new `firmware-mcu` profile
-([docs/MIGRATION-v8.md](MIGRATION-v8.md)). No detector, control, or existing
-profile changed. Release 2.7.0 changed no input format or profile: it recorded
+Measured with `iot-hardware-scanner 2.9.0`, report schema 8, profile version 6.0.
+Release 2.9.0 adds one container: **partitioned disk images** (MBR, extended MBR
+and GPT) whose partitions are mapped as nodes and each decoded by its own magic,
+so two root filesystems in one image are both inventoried and stay
+distinguishable ([docs/3A-PARTITIONS.md](3A-PARTITIONS.md)). **No report-schema
+change and no profile change**: the node model already carried a parent, a
+coordinate system, an offset and a length. Release 2.8.0 added bare-metal address
+spaces and the `firmware-mcu` profile ([docs/MIGRATION-v8.md](MIGRATION-v8.md)).
+No detector or control changed in either release. Release 2.7.0 changed no input format or profile: it recorded
 how the artifact's type label was produced and which parser and helper
 capabilities the host actually had ([docs/MIGRATION-v7.md](MIGRATION-v7.md)). Release 2.6.0 bounded
 what a control reads and what a text-fact pass costs, and stopped a binary
@@ -38,6 +41,7 @@ says so.
 | --- | --- | --- | --- | --- |
 | Gzip-wrapped SquashFS v4 root image (OpenWrt) | **analyzed** — decoded, extracted, enumerated, inventoried, detected | `unsquashfs 4.5.1 (2022/03/17)` in `ihs-squashfs-worker:4.5.1` | Linux x86_64 container, arm64 container | `tests/test_installed_image_cli.py::TestReferenceImageInventory`, `::TestReleasedDetectionSemantics` |
 | Unwrapped SquashFS v4 image at offset 0 | **analyzed** — superblock validated in place, then the same worker path | as above | as above | `tests/test_image_map.py`, `tests/test_installed_image_cli.py` |
+| Partitioned disk image (MBR, extended MBR, GPT) | **analyzed** — table decoded with every declared range validated in bounds; each partition sliced, decoded by its own magic, and extracted; two roots in one image both inventoried | in-process table reader `ihs-partitions/1` + pinned worker for the filesystems | any host for the map; Linux worker for extraction | `tests/test_partitions.py`, `tests/test_installed_image_cli.py::TestPartitionedImage` |
 | Staged root tree (`--input-tree`) | **analyzed** — no container, no extraction | local bounded reader | any host | `tests/test_staged_tree.py`, `tests/test_installed_image_cli.py::TestTreeAndImage` |
 | Two saved scan documents (`compare`) | **analyzed** — records, components, layout and findings compared by identity | none (no extraction, no network) | any host | `tests/test_comparison.py`, `tests/test_installed_image_cli.py::TestTwoReleaseComparison`, `::TestReferenceDeclarationReconciliation` |
 | OpenWrt target manifest as a declaration (`compare --declaration`) | **analyzed** — 124 rows reconciled against 196 image records, 72 image-only | none | any host | `tests/test_installed_image_cli.py::TestReferenceDeclarationReconciliation` |
@@ -55,7 +59,7 @@ says so.
 | Malformed / adversarial artifact (any format above) | **rejected** — the lie is named (declared size, offset, depth, version), the stage is `FAILED`, exit 4, no traceback | in-process parsers; no helper | any host | `tests/test_hostile_inputs.py`, `tests/test_parser_properties.py` |
 | A saved document that is not a report (`report`, `compare`, `sbom`) | **rejected** — structural validation before any renderer indexes into it, exit 3 | in-process validator | any host | `tests/test_hostile_inputs.py` |
 | Advisory snapshot `ihs-advisory-snapshot/1` | **decoded and applied** offline | none (no network) | any host | `tests/test_advisory.py` |
-| Partitioned images, CPIO, JFFS2/UBIFS, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
+| CPIO, JFFS2/UBIFS, RAUC, raw NAND | **not supported** — reported as unsupported, never guessed at | — | — | later gates with their own fixtures |
 
 A level means exactly this: **recognized** — the bytes were identified;
 **decoded** — a container was opened; **extracted** — files were materialised;
@@ -79,6 +83,8 @@ installed-entrypoint modules is named by no row at all.
 | Build output replaced between ingest and analysis | **snapshot-bound** — new bytes are never attributed to the old digest; the snapshot stays in use when the source moves | `::TestReplacedBuildOutput` |
 | Sparse 2 GiB input under the resource budgets | **bounded** — peak RSS, elapsed time and scratch measured, not assumed | `::TestBudgets` |
 | Generated declaration set: one match, one version mismatch, one declared-only, one observed-only | **analyzed** — four distinguishable outcomes; a revision-less supplier row stays unresolved; another image's declaration resolves nothing | `::TestDeclarationReconciliation` |
+| Partition table pointing outside a truncated image | **rejected** — the declared range is checked before it is read; `FAILED`, exit 4 | `tests/test_partitions.py::TestBounds` |
+| Partition holding no recognisable filesystem | **recorded** — `details.content` says `unrecognised`; the other partitions still extract; the run is `PARTIAL` not clean | `tests/test_partitions.py`, `tests/test_installed_image_cli.py::TestPartitionedImage` |
 | Saved report schemas 1–8 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage | `tests/test_schema_compat.py` |
 | MCU address map: equivalence, gaps, conflicts, truncation, bounds | **analyzed** — one digest across all three encodings, re-chunking does not move it, a gap is never zero-filled, a conflicting rewrite is named, a truncated encoding is a FAILED stage with exit 4 | `tests/test_mcu_image.py`, `tests/test_mcu_profile.py` |
 | Type-label provenance and host capabilities (`artifact.file_type_source`, `tool.capabilities`) | **recorded** — four sources distinguished (`magic-bytes`, `libmagic`, `extension`, `directory`); libmagic availability proved by calling the library and carrying its real reason; parser versions and container runtimes on `PATH` recorded; an upgraded v6 document carries `null`, and `null` renders as silence | `tests/test_capabilities.py` |
@@ -97,7 +103,8 @@ reaches. These are separate claims from “the format can be read”:
 | Opaque / unsupported input | **none** — nothing to compare; the scan is incomplete and the comparison says so | — | everything |
 | Build declaration (manifest, CycloneDX) | **declaration-level** — name and version against the image's records, with an explicit binding state | declared name; complete version string | whether the declared package's *files* are present |
 | FIT / DTB boot manifests | **manifest-level** — the selected configuration is resolved against the artifact's own payloads, and declared vs observed digests are compared | configuration name; payload node; declared digest | anything across releases; runtime boot behaviour |
-| RAUC / partitioned images | **not supported** — no comparison claim | — | — |
+| Partitioned images | **mapped, not compared** — the layout is recorded per document, but a disk-identity contract for `compare` is a separate gate | — | partition layout changes |
+| RAUC bundles | **not supported** — no comparison claim | — | — |
 | Bare-metal address map | **not supported in `compare`** — the section is recorded in each document, but release-to-release identity for a sparse flash map is a separate gate; a diff would need an address-identity contract this release does not claim | — | everything |
 
 ### Hosts
