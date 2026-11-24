@@ -98,9 +98,23 @@ partial document.
 | Tests | `pytest` (local, macOS arm64, CPython 3.12.14) | **1014 collected, 988 passed, 0 failed, 26 skipped** — the skips are the container, verify-image and reference-image rows, which the qualified CI job runs |
 | Schema reader | `pytest tests/test_schema_compat.py` | one fixture per version 1–7, exact upgrade asserted |
 
-CI evidence for this release is recorded **after** the push that follows this
-change; it is not claimed in this document. The qualified job that decides it is
-`linux-extractor` (zero skips), as in 2.2.0–2.6.0.
+CI run **`45301197717`** on `main` (`eb9f44f`): **9/9 jobs green**, the wheel
+rebuilt on Linux is byte-identical to a macOS clean-checkout build
+(`404cb097…c4978`), and the qualified job is clean:
+
+| Job | Result |
+| --- | --- |
+| `linux-extractor` (worker image, real corpus, declarations) | **234 passed, 0 skipped** — the only job with the real extraction path; a skip there fails the job |
+| `python-gate` 3.10 / 3.12 / 3.14 | 985 passed, 29 skipped each (the container and reference-image rows this job does not own), coverage gate 80 % met |
+| `installed-wheel-no-backend` | 22 passed, 1 skipped — 1 skip is the reference image, which the job above owns; 45 hostile-input rows passed |
+| `report-contract` | 119 passed, 1 skipped (replay and schema 1–7) |
+| `reference-image` (worker off) | 3 passed, 1 skipped — exit 5 with a useful partial report |
+| `bounded-resources` | 2 GiB sparse input, exit 0, 70.46 s, peak RSS 90.9 MiB |
+| `performance-contract` | recorded; invariants enforced, envelope only on the fingerprinted host |
+
+The `readelf: no such file or directory` line in the worker-image step is the
+**negative** assertion that binutils has not leaked into the runtime image, which
+is why the step passes.
 
 ## 6. What did not change
 
