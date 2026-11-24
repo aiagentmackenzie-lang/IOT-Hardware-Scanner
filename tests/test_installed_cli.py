@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import REPO_ROOT, Runner, make_tree
 
 from iot_hardware_scanner import __version__
+from iot_hardware_scanner.scanner.report_document import SCHEMA_VERSION
 
 PASSWD = "root:x:0:0:root:/root:/bin/ash\nuser:x:1000:1000:user:/home/user:/bin/ash\n"
 SHADOW_LOCKED = "root:!$6$salt$hash:19000:0:99999:7:::\nuser:$6$salt$hash:19000:0:99999:7:::\n"
@@ -293,7 +294,7 @@ class TestBootManifestProfile:
         stages = {stage["stage"]: stage for stage in document["stages"]}
         assert stages[StageId.OPKG_INVENTORY.value]["status"] == "NOT_APPLICABLE"
         assert stages[StageId.EXTRACTION.value]["status"] == "NOT_APPLICABLE"
-        assert document["schema_version"] == 6
+        assert document["schema_version"] == SCHEMA_VERSION
 
     def test_a_mismatched_payload_is_a_reportable_observation(
         self, runner: Runner, tmp_path: Path

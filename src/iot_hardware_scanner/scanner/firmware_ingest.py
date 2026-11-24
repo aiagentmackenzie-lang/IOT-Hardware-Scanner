@@ -38,6 +38,13 @@ from iot_hardware_scanner.scanner.fit_dtb import looks_like_fdt
 
 logger = logging.getLogger(__name__)
 
+#: Where an artifact's type label came from (schema 7). These are the only values
+#: the report uses, so a reader can weigh a label without guessing.
+FILE_TYPE_SOURCE_MAGIC_BYTES = "magic-bytes"
+FILE_TYPE_SOURCE_LIBMAGIC = "libmagic"
+FILE_TYPE_SOURCE_EXTENSION = "extension"
+FILE_TYPE_SOURCE_DIRECTORY = "directory"
+
 # ──────────────────────────────────────────────
 # Supported firmware extensions (SDR Appendix A)
 # ──────────────────────────────────────────────
@@ -156,8 +163,8 @@ class FirmwareIngest:
         logger.info("MD5:     %s", md5)
 
         # ── Step 8: Identify file type ──
-        file_type = self._identify_file_type(firmware_path)
-        logger.info("File type: %s", file_type)
+        file_type, file_type_source = self._identify_file_type(firmware_path)
+        logger.info("File type: %s (%s)", file_type, file_type_source)
 
         # ── Step 9: Determine size category ──
         size_category = self._classify_size(file_size)
@@ -177,6 +184,7 @@ class FirmwareIngest:
             file_hash_md5=md5,
             file_size=file_size,
             file_type=file_type,
+            file_type_source=file_type_source,
             firmware_name=firmware_name,
             size_category=size_category,
             started_at=datetime.now(timezone.utc),
@@ -322,6 +330,7 @@ class FirmwareIngest:
             file_hash_md5=md5,
             file_size=total_size,
             file_type=f"Staged root tree ({len(entries)} entries)",
+            file_type_source=FILE_TYPE_SOURCE_DIRECTORY,
             firmware_name=resolved.name,
             size_category=self._classify_size(total_size),
             started_at=datetime.now(timezone.utc),
@@ -420,7 +429,7 @@ class FirmwareIngest:
             raise FirmwareEmptyError(f"Firmware file is empty: {firmware_path}")
 
         sha256, md5 = self._compute_hashes(firmware_path)
-        file_type = self._identify_file_type(firmware_path)
+        file_type, _file_type_source = self._identify_file_type(firmware_path)
 
         return FirmwareMetadata(
             path=firmware_path,
@@ -472,36 +481,59 @@ class FirmwareIngest:
 
         return sha256_hasher.hexdigest(), md5_hasher.hexdigest()
 
-    def _identify_file_type(self, path: Path) -> str:
-        """Identify file type from magic bytes, then python-magic, then extension.
+    def _identify_file_type(self, path: Path) -> tuple[str, str]:
+        """Identify the file type and how it was established.
+
+        The source is part of the observation (schema 7). A type read from the
+        file's own magic bytes, from libmagic, and from a filename suffix are
+        three different claims, and a report that does not say which produced
+        the label cannot be audited or compared across hosts.
 
         A flattened device tree is recognised by its own magic before any
         library is consulted, so a DTB with no extension is still identified on
         a host without python-magic.
+
+        Returns:
+            ``(file_type, source)`` where source is one of
+            :data:`FILE_TYPE_SOURCE_MAGIC_BYTES`, :data:`FILE_TYPE_SOURCE_LIBMAGIC`
+            or :data:`FILE_TYPE_SOURCE_EXTENSION`.
         """
         try:
             head = open_bounded(path).read_head(4)
         except OSError:
             head = b""
         if looks_like_fdt(head):
-            return "Flattened device tree or U-Boot FIT (FDT magic 0xd00dfeed)"
+            return (
+                "Flattened device tree or U-Boot FIT (FDT magic 0xd00dfeed)",
+                FILE_TYPE_SOURCE_MAGIC_BYTES,
+            )
 
         try:
             import magic
+        except ImportError as exc:
+            # Two different faults land here: the binding is not installed, or
+            # it is installed and libmagic itself cannot be found. Report the
+            # actual one instead of blaming the package every time.
+            logger.warning(
+                "No libmagic binding (%s). Falling back to magic-byte and extension "
+                "detection; the report records this as tool.capabilities.libmagic.",
+                exc or "python-magic is not installed",
+            )
+            return self._identify_by_extension(path), FILE_TYPE_SOURCE_EXTENSION
 
+        try:
             file_type = magic.from_file(str(path), mime=True)
             # Also get the descriptive type for richer output
             desc_type = magic.from_file(str(path))
-            return f"{desc_type} ({file_type})"
-        except ImportError:
-            logger.warning(
-                "python-magic not installed. Falling back to extension-based detection. "
-                "Install python-magic for accurate file type identification."
-            )
-            return self._identify_by_extension(path)
+            return f"{desc_type} ({file_type})", FILE_TYPE_SOURCE_LIBMAGIC
         except Exception as exc:
-            logger.warning("Magic detection failed (%s). Falling back to extension.", exc)
-            return self._identify_by_extension(path)
+            logger.warning(
+                "libmagic could not identify %s (%s). Falling back to extension-based "
+                "detection; the report records this as tool.capabilities.libmagic.",
+                path.name,
+                exc,
+            )
+            return self._identify_by_extension(path), FILE_TYPE_SOURCE_EXTENSION
 
     def _identify_by_extension(self, path: Path) -> str:
         """Fallback file type identification by extension."""

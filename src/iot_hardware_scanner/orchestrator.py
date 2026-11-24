@@ -652,7 +652,10 @@ class Orchestrator:
         )
         console.print("  [green]✓[/green] File validated")
         console.print(f"  [green]✓[/green] SHA-256: {context.file_hash_sha256[:32]}...")
-        console.print(f"  [green]✓[/green] Type: {context.file_type}")
+        console.print(
+            f"  [green]✓[/green] Type: {context.file_type} "
+            f"[dim](identified by {context.file_type_source})[/dim]"
+        )
         console.print(
             f"  [green]✓[/green] Size: {context.file_size:,} bytes ({context.size_category.value})"
         )

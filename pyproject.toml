@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "iot-hardware-scanner"
-version = "2.6.0"
+version = "2.7.0"
 description = "Defensive firmware security analysis platform for IoT/embedded/OT devices"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
     "Topic :: System :: Hardware",
 ]
@@ -39,8 +40,11 @@ dependencies = [
 [project.optional-dependencies]
 # NOTE: no `extraction` extra. No installable release of the Python binwalk
 # binding provides the API this scanner needs, so advertising one produced a
-# resolver failure. Firmware image extraction is unavailable in this release
-# and the CLI says so explicitly.
+# resolver failure. That is a statement about the *binding*, not about
+# extraction: gzip/SquashFS v4 images are decoded by upstream `unsquashfs` in the
+# pinned Linux worker (`worker/`, image `ihs-squashfs-worker:4.5.1`), which ships
+# with the scanner and needs no Python extra. Without a container runtime the
+# scan still identifies the image and reports the missing dependency (exit 5).
 nvd = ["nvdlib>=0.7"]
 # `sbom` is real: `iot-hardware-scanner sbom --validate` checks the exported
 # CycloneDX 1.6 BOM against the schema vendored inside the wheel.

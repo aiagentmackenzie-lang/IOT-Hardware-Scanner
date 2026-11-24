@@ -270,6 +270,11 @@ class ScanContext:
     # Identity of the inspected artifact (added in schema 2)
     input_kind: InputKind = InputKind.FILE
     input_manifest_entries: int | None = None
+    #: How ``file_type`` was established (schema 7): ``magic-bytes``, ``libmagic``,
+    #: ``extension`` or ``directory``. A label without its source is not evidence:
+    #: "ELF executable" from libmagic and from a ``.elf`` suffix are not the same
+    #: observation, and a report that cannot tell them apart cannot be audited.
+    file_type_source: str = "unknown"
 
     # Populated by the orchestrator: what ran, what did not, and why
     profile: str = "firmware-static"

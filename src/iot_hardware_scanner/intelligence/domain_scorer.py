@@ -31,7 +31,6 @@ _SCORE_DGA = 25.0
 _SCORE_BOTNET_NAMING = 30.0
 _SCORE_IN_HOSTS_CONFIG = 5.0
 _SCORE_BENIGN = -50.0
-_SCORE_SSL_ORG = -20.0  # Stub: not implemented, always 0
 
 # ── DGA detection constants ──
 _DGA_MIN_SUBDOMAIN_LEN = 8
@@ -248,8 +247,9 @@ class DomainScorer:
         if context.get("in_hosts", False):
             total += _SCORE_IN_HOSTS_CONFIG
 
-        # ── Signal: SSL/Org (stub — always 0) ──
-        # Per SDR: "valid SSL cert + established org" → -20, stub: not implemented
+        # There is no TLS or registrar-reputation signal here on purpose: this
+        # scanner is offline and cannot verify a certificate, so a signal that
+        # would always subtract zero is absent rather than pretending to run.
 
         return total
 

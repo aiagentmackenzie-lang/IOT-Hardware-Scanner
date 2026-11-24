@@ -52,8 +52,10 @@ import html
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -66,11 +68,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 
 #: Component bases, in report order. Every count is present even when zero.
 COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
@@ -118,8 +120,71 @@ def _control_to_dict(control: ControlResult) -> dict[str, Any]:
     }
 
 
+def _tool_section(version: str) -> dict[str, Any]:
+    """The scanner, and what this host could actually use (schema 7).
+
+    A version string alone is not enough to audit a report: whether libmagic
+    loaded, and which parser versions produced the records, change what the run
+    could see. The plan's rule is to record what ran, not what was available in
+    principle.
+    """
+    return {
+        "name": TOOL_NAME,
+        "version": version,
+        "capabilities": {
+            "libmagic": _libmagic_capability(),
+            "pyelftools": _package_capability("pyelftools"),
+            "yara-python": _package_capability("yara-python"),
+            # Presence on PATH only. Reachability, the isolation mode and the
+            # image actually used are recorded in the extraction section.
+            "container_runtime_on_path": [
+                name for name in ("podman", "docker") if shutil.which(name)
+            ],
+        },
+    }
+
+
+def _package_capability(distribution: str) -> dict[str, Any]:
+    """Whether a required parser package is installed, and its version."""
+    try:
+        version = importlib_metadata.version(distribution)
+    except importlib_metadata.PackageNotFoundError:
+        return {"available": False, "version": None, "detail": f"{distribution} not installed"}
+    return {"available": True, "version": version, "detail": None}
+
+
+def _libmagic_capability() -> dict[str, Any]:
+    """Whether this host can use libmagic, and why not when it cannot.
+
+    ``import magic`` fails for two different reasons -- the binding is missing,
+    or the shared library is -- so the reason is kept instead of being flattened
+    into "not installed".
+    """
+    try:
+        import magic
+    except ImportError as exc:
+        return {
+            "available": False,
+            "version": None,
+            "detail": str(exc) or "python-magic is not installed",
+        }
+    try:
+        # Importing the binding is not proof the library answers: call it.
+        magic.from_buffer(b"\x7fELF\x02\x01\x01\x00", mime=True)
+    except Exception as exc:  # pragma: no cover - depends on the host library
+        return {"available": False, "version": None, "detail": str(exc)}
+    version = None
+    version_query = getattr(magic, "version", None)
+    if callable(version_query):
+        try:
+            version = str(version_query())
+        except Exception:  # pragma: no cover - depends on the host library
+            version = None
+    return {"available": True, "version": version, "detail": None}
+
+
 def build_document(context: ScanContext, version: str) -> dict[str, Any]:
-    """Build the schema-2 report document for a completed scan."""
+    """Build a report document at :data:`SCHEMA_VERSION` for a completed scan."""
     from iot_hardware_scanner.scanner.assessment import collect_findings
 
     assessment = context.assessment
@@ -127,7 +192,7 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
 
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "tool": {"name": TOOL_NAME, "version": version},
+        "tool": _tool_section(version),
         "scan_id": context.scan_id,
         "scan_date": context.started_at.isoformat() if context.started_at else None,
         "report_generated": datetime.now(tz=timezone.utc).isoformat(),
@@ -139,6 +204,7 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
             "sha256": context.file_hash_sha256,
             "md5": context.file_hash_md5,
             "file_type": context.file_type,
+            "file_type_source": context.file_type_source,
             "size_category": context.size_category.value,
             "manifest_entries": context.input_manifest_entries,
         },
@@ -685,7 +751,7 @@ def _validate_document_shape(document: dict[str, Any]) -> None:
 
 
 def load_document(data: dict[str, Any]) -> dict[str, Any]:
-    """Return a schema-2 document, upgrading a v1 document if necessary."""
+    """Return a document at the current schema, upgrading an older one if necessary."""
     if not isinstance(data, dict):
         raise ValueError("report document must be a JSON object")
 
@@ -709,10 +775,13 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("risk_score", None)
         document.setdefault("boot", None)
         document.setdefault("cache", None)
+        _mark_unrecorded_capabilities(document)
         _validate_document_shape(document)
         return document
 
-    if raw_version == 5:
+    if raw_version == 6:
+        document = _upgrade_v6(data)
+    elif raw_version == 5:
         document = _upgrade_v5(data)
     elif raw_version == 4:
         document = _upgrade_v4(data)
@@ -727,20 +796,66 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
     # "not recorded" values. An absent section is never read as a negative.
     document.setdefault("boot", None)
     document.setdefault("cache", None)
+    _mark_unrecorded_capabilities(document)
     _validate_document_shape(document)
     return document
 
 
-#: Sections a schema-4 document never recorded.
+def _mark_unrecorded_capabilities(document: dict[str, Any]) -> None:
+    """Give every document the schema-7 capability keys, absent when unknown.
+
+    A version before 7 did not record how its type label was established, nor
+    what the host could use. ``None`` says "not recorded"; an empty capability
+    map would read as "nothing was available".
+    """
+    artifact = document.get("artifact")
+    if isinstance(artifact, dict):
+        artifact.setdefault("file_type_source", None)
+    tool = document.get("tool")
+    if isinstance(tool, dict):
+        tool.setdefault("capabilities", None)
+
+
+#: Sections a schema-5 document never recorded.
 _V5_SECTIONS = ("component_bases",)
 
 
+def _upgrade_v6(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-6 document to schema 7 without inventing host capability.
+
+    A v6 document recorded the type label but not how it was produced, and its
+    tool section carried a version and nothing else. Those two facts are
+    ``None`` here: unknown, not false and not empty.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 6; how the file type was identified and which host "
+        "capabilities were available were not recorded by that version"
+    )
+    document.setdefault(
+        "migration",
+        {
+            "from": 6,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before the report recorded the source of "
+                "its file-type label (libmagic, magic bytes or a filename suffix) and "
+                "the parser and helper capabilities of the host that ran the scan. "
+                "Those facts are absent, not false."
+            ),
+        },
+    )
+    return document
+
+
 def _upgrade_v5(data: dict[str, Any]) -> dict[str, Any]:
-    """Lift a schema-5 document to schema 6 without inventing a boot section.
+    """Lift a schema-5 document to the current schema without inventing a boot section.
 
     A v5 document was produced before boot manifests were parsed. Its facts are
     preserved; ``boot`` is ``None`` and ``cache`` is ``None`` because neither
-    existed in that version. No unknown is turned into a negative.
+    existed in that version. The schema-7 capability keys are added as ``None``
+    by :func:`_mark_unrecorded_capabilities`. No unknown becomes a negative.
     """
     document = dict(data)
     document["schema_version"] = SCHEMA_VERSION
@@ -766,7 +881,7 @@ def _upgrade_v5(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _upgrade_v4(data: dict[str, Any]) -> dict[str, Any]:
-    """Lift a schema-4 document to schema 5 without inventing a component basis.
+    """Lift a schema-4 document to the current schema without inventing a component basis.
 
     Every v4 fact is preserved. A v4 component never recorded how its
     vendor/product pair was decided, so ``component_bases`` is ``None`` and each
@@ -800,7 +915,7 @@ _V4_SECTIONS = ("ruleset", "advisory")
 
 
 def _upgrade_v3(data: dict[str, Any]) -> dict[str, Any]:
-    """Lift a schema-3 document to schema 4 without inventing rule identity.
+    """Lift a schema-3 document to the current schema without inventing rule identity.
 
     Every v3 fact is preserved. The rule set and the advisory assessment were
     never recorded, so they are ``None`` with a migration note; findings keep
@@ -837,7 +952,7 @@ _V3_SECTIONS = ("image_map", "extraction", "input_binding", "opkg", "tree")
 
 
 def _upgrade_v2(data: dict[str, Any]) -> dict[str, Any]:
-    """Lift a schema-2 document to schema 3 without inventing evidence.
+    """Lift a schema-2 document to the current schema without inventing evidence.
 
     Every v2 fact is preserved. The v3 sections are set to ``None`` with a
     migration note, and ``elf`` is added with an empty record list because a v2
@@ -895,7 +1010,7 @@ def _looks_like_v1(data: dict[str, Any]) -> bool:
 def _upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     """Convert an unversioned v1 document without inventing facts.
 
-    Every section the schema-6 document defines from 2.1 onward is present as
+    Every section the current document defines from 2.1 onward is present as
     ``None`` ("not recorded"), matching what a v2 upgrade produces. Before P1 a
     v1 replay simply omitted them, so a consumer reading
     ``document["image_map"]`` got ``KeyError`` for v1 and ``None`` for v2 for the
@@ -1054,6 +1169,49 @@ def _severity_counts(findings: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _file_type_source_suffix(artifact: dict[str, Any]) -> str:
+    """How the type label was established, when the document records it."""
+    source = artifact.get("file_type_source")
+    if not source:
+        return ""
+    return f" (identified by {source})"
+
+
+def _identified_line(artifact: dict[str, Any]) -> str:
+    """The terminal one-liner for type and provenance, or nothing when unknown."""
+    suffix = _file_type_source_suffix(artifact)
+    if not suffix:
+        return ""
+    return f"  type:    {artifact.get('file_type')}{suffix}"
+
+
+def _capabilities_line(document: dict[str, Any]) -> str:
+    """One Markdown line naming what the host could use (schema 7 only).
+
+    ``None`` means the version never recorded capabilities, which is not the same
+    as "nothing was available", so an upgraded document gets no line at all.
+    """
+    tool = document.get("tool") or {}
+    capabilities = tool.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return ""
+    parts: list[str] = []
+    for name in ("libmagic", "pyelftools", "yara-python"):
+        entry = capabilities.get(name)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("available"):
+            version = entry.get("version")
+            parts.append(f"{name}" + (f" {version}" if version else ""))
+        else:
+            detail = entry.get("detail") or "unavailable"
+            parts.append(f"{name} **unavailable** ({detail})")
+    runtimes = capabilities.get("container_runtime_on_path")
+    if isinstance(runtimes, list):
+        parts.append("container runtime on PATH: " + (", ".join(runtimes) if runtimes else "none"))
+    return "**Host capabilities:** " + "; ".join(parts) if parts else ""
+
+
 # ──────────────────────────────────────────────
 # Rendering — terminal
 # ──────────────────────────────────────────────
@@ -1073,6 +1231,9 @@ def render_terminal(document: dict[str, Any]) -> str:
         f"  profile: {assessment.get('profile')} v{assessment.get('profile_version')}",
         _completion_line(document),
     ]
+    identified = _identified_line(artifact)
+    if identified:
+        lines.insert(3, identified)
 
     missing = assessment.get("missing_required_dependencies") or []
     if missing:
@@ -1132,13 +1293,19 @@ def render_terminal(document: dict[str, Any]) -> str:
     if nodes:
         lines.append("Image map:")
         for node in nodes:
-            extent = f", extent {node['extent_bytes']:,}" if node.get("extent_bytes") else ""
-            expanded = (
-                f" -> {node['expanded_bytes']:,} decoded" if node.get("expanded_bytes") else ""
+            # A node from an older or partial document may not carry numbers.
+            # The absence is printed as "not recorded", never raised over.
+            extent_value = node.get("extent_bytes")
+            expanded_value = node.get("expanded_bytes")
+            length_value = node.get("length")
+            extent = f", extent {extent_value:,}" if isinstance(extent_value, int) else ""
+            expanded = f" -> {expanded_value:,} decoded" if isinstance(expanded_value, int) else ""
+            length = (
+                f"{length_value:,} bytes" if isinstance(length_value, int) else "length unrecorded"
             )
             lines.append(
                 f"  [{node.get('artifact_id')}] {node.get('format')} "
-                f"{node.get('coordinate_system')} {node.get('length'):,} bytes{expanded}{extent}"
+                f"{node.get('coordinate_system')} {length}{expanded}{extent}"
                 f" (decoder {node.get('decoder')}"
                 + (f" {node['decoder_version']}" if node.get("decoder_version") else "")
                 + ")"
@@ -1258,8 +1425,11 @@ def render_markdown(document: dict[str, Any]) -> str:
     lines.append(f"**Artifact kind:** {artifact.get('kind')}")
     lines.append(f"**SHA-256:** `{artifact.get('sha256')}`")
     lines.append(f"**Size:** {artifact.get('size')} bytes")
-    lines.append(f"**File type:** {artifact.get('file_type')}")
+    lines.append(f"**File type:** {artifact.get('file_type')}{_file_type_source_suffix(artifact)}")
     lines.append(f"**Profile:** {assessment.get('profile')} v{assessment.get('profile_version')}")
+    capabilities_line = _capabilities_line(document)
+    if capabilities_line:
+        lines.append(capabilities_line)
     lines.append("")
 
     lines += ["## Assessment", "", f"**Completion:** {assessment.get('completion', 'UNKNOWN')}"]

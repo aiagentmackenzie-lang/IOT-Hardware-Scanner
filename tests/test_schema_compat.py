@@ -1,6 +1,6 @@
-"""P1 — the schema-6 reader is tested against every report version it claims.
+"""P1/P3 — the schema-7 reader is tested against every report version it claims.
 
-One fixture per report schema 1 to 6, each carrying only the fields that version
+One fixture per report schema 1 to 7, each carrying only the fields that version
 actually recorded, and the *exact* upgrade result asserted:
 
 * the version lands on :data:`SCHEMA_VERSION`;
@@ -12,10 +12,10 @@ actually recorded, and the *exact* upgrade result asserted:
 * no field is invented. The top-level key set is asserted exactly, so adding a
   section without a migration decision fails here.
 
-Schema 6 is the only version where a null ``boot``/``cache`` means "this
-profile read no boot manifest / the operator did not enable a cache". For an
-upgrade the same null means "that version never recorded it", and the
-``migration`` note says so.
+Schema 7 is the only version where a null ``artifact.file_type_source`` or
+tool ``capabilities`` means "this scan did not establish it". For an upgrade the
+same null means "that version never recorded it", and the ``migration`` note
+says so.
 """
 
 from __future__ import annotations
@@ -282,6 +282,20 @@ def schema_6() -> dict[str, Any]:
     return document
 
 
+def schema_7() -> dict[str, Any]:
+    """v7 adds the source of the type label and the host's capabilities."""
+    document = schema_6()
+    document["schema_version"] = 7
+    document["artifact"]["file_type_source"] = "libmagic"
+    document["tool"]["capabilities"] = {
+        "libmagic": {"available": True, "version": "540", "detail": None},
+        "pyelftools": {"available": True, "version": "0.33", "detail": None},
+        "yara-python": {"available": True, "version": "4.5.4", "detail": None},
+        "container_runtime_on_path": ["podman"],
+    }
+    return document
+
+
 CASES = {
     1: (schema_1, None),
     2: (schema_2, 2),
@@ -289,6 +303,7 @@ CASES = {
     4: (schema_4, 4),
     5: (schema_5, 5),
     6: (schema_6, None),
+    7: (schema_7, None),
 }
 
 
@@ -345,7 +360,9 @@ def test_schema_2_gains_v3_sections_as_absent_not_empty() -> None:
 
     assert document["schema_version"] == SCHEMA_VERSION
     assert document["migration"]["from"] == 2
-    # Every recorded fact is preserved.
+    # Every recorded fact is preserved (the v7 capability keys are added as
+    # explicit absences, never as invented facts).
+    assert document["artifact"] == {**source["artifact"], "file_type_source": None}
     assert document["findings"] == source["findings"]
     assert document["stages"] == source["stages"]
     assert document["artifact"] == source["artifact"]
@@ -412,17 +429,43 @@ def test_schema_5_does_not_invent_boot_or_cache() -> None:
     assert document["cache"] is None
 
 
-def test_schema_6_round_trips_without_a_migration_record() -> None:
+def test_schema_6_does_not_invent_a_capability_record() -> None:
     source = schema_6()
+    document = load_document(source)
+
+    assert document["schema_version"] == SCHEMA_VERSION
+    assert document["migration"]["from"] == 6
+    # v6 facts survive untouched.
+    assert document["boot"] == source["boot"]
+    assert document["cache"] == source["cache"]
+    assert document["artifact"]["file_type"] == source["artifact"]["file_type"]
+    # Two facts v6 never recorded are null: "not recorded", not "nothing found".
+    assert document["artifact"]["file_type_source"] is None
+    assert document["tool"]["capabilities"] is None
+    assert document["tool"]["version"] == source["tool"]["version"]
+
+
+def test_schema_7_round_trips_without_a_migration_record() -> None:
+    source = schema_7()
     document = load_document(source)
 
     assert document == source
     assert document["schema_version"] == SCHEMA_VERSION
     assert "migration" not in document
     assert "schema_note" not in document
-    # A recorded boot manifest and cache summary are facts, not absences.
+    # A recorded boot manifest, cache summary, type source and capability set
+    # are facts, not absences.
     assert document["boot"]["artifacts"][0]["default_config"] == "config-1"
     assert document["cache"]["entries_read"] == 3
+    assert document["artifact"]["file_type_source"] == "libmagic"
+    assert document["tool"]["capabilities"]["pyelftools"]["version"] == "0.33"
+
+    # It renders with the provenance visible and the absences silent.
+    markdown = render(document, "markdown")
+    assert "identified by libmagic" in markdown
+    assert "Host capabilities" in markdown
+    terminal = render(document, "terminal")
+    assert "identified by libmagic" in terminal
 
 
 # ──────────────────────────────────────────────
@@ -461,6 +504,7 @@ ABSENT_BY_VERSION: dict[int, tuple[str, ...]] = {
     4: ("component_bases", "boot", "cache"),
     5: ("boot", "cache"),
     6: (),
+    7: (),
 }
 
 
@@ -477,6 +521,26 @@ def test_absent_facts_are_null_for_every_upgrade(
         assert not isinstance(value, (list, bool))
 
 
+def test_no_upgrade_invents_a_capability_record(
+    upgraded: tuple[int, dict[str, Any]],
+) -> None:
+    """Before schema 7, the two nested facts are null rather than empty."""
+    version, document = upgraded
+    if version == 7:
+        assert document["artifact"]["file_type_source"] == "libmagic"
+        assert document["tool"]["capabilities"] is not None
+        return
+    assert document["artifact"]["file_type_source"] is None, (
+        f"schema {version}: the type source was invented"
+    )
+    assert document["tool"]["capabilities"] is None, (
+        f"schema {version}: a capability map was invented; an empty map reads as"
+        ' "nothing was available"'
+    )
+    # And the absence stays out of the rendered output.
+    assert "Host capabilities" not in render(document, "markdown")
+
+
 def test_no_upgrade_invents_a_field(upgraded: tuple[int, dict[str, Any]]) -> None:
     """The top-level key set is exact for each source version.
 
@@ -485,19 +549,19 @@ def test_no_upgrade_invents_a_field(upgraded: tuple[int, dict[str, Any]]) -> Non
     never gains the schema-2 ``outcome``/``data_sources`` it never wrote.
     """
     version, document = upgraded
-    schema_six = set(schema_6())
-    if version == 6:
-        expected = schema_six
+    schema_seven = set(schema_7())
+    if version == 7:
+        expected = schema_seven
     elif version == 1:
-        expected = (schema_six - {"outcome", "data_sources"}) | {
+        expected = (schema_seven - {"outcome", "data_sources"}) | {
             "schema_note",
             "legacy_grade",
         }
     else:
-        expected = schema_six | {"schema_note", "migration"}
+        expected = schema_seven | {"schema_note", "migration"}
     assert set(document) == expected, (
         f"schema {version}: unexpected keys {sorted(set(document) - expected)};"
         f" missing {sorted(expected - set(document))}"
     )
-    if version in (2, 3, 4, 5):
+    if version in (2, 3, 4, 5, 6):
         assert document["migration"]["to"] == SCHEMA_VERSION
