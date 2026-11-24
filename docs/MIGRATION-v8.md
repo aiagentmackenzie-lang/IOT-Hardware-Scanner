@@ -164,5 +164,16 @@ carries addresses and digests, not a copy of the firmware.
 | Tests | `pytest` (local, macOS arm64, CPython 3.12.14) | **1072 collected, 1046 passed, 0 failed, 26 skipped** — the skips are the container, verify-image and reference-image rows the qualified CI job runs |
 | Slice 3C | `pytest tests/test_mcu_image.py tests/test_mcu_profile.py` | 54 passed, 0 skipped |
 
-CI evidence for this release is recorded after the push that follows this
-change. The qualified job remains `linux-extractor` (zero skips).
+CI run **`45307659176`** on `main` (`bef0d00`): **9/9 jobs green**, and the wheel
+built on Linux is byte-identical to a macOS clean-checkout build
+(`76e3c1b0…23f5`).
+
+| Job | Result |
+| --- | --- |
+| `linux-extractor` (worker image, frozen corpus, declarations) | **238 passed, 0 skipped** — the only job with the real extraction path; a skip there fails the job |
+| `python-gate` 3.10 / 3.12 / 3.14 | 1043 passed, 29 skipped each (the container and reference-image rows this job does not own); coverage gate met |
+| `installed-wheel-no-backend` | 22 passed, 1 skipped; 45 hostile-input rows passed |
+| `report-contract` (exit precedence, replay, schemas 1–8) | 123 passed, 1 skipped |
+| `reference-image` (worker off) | 3 passed, 1 skipped — exit 5 with a useful partial report |
+| `bounded-resources` | 2 GiB sparse input, exit 0, 57.45 s, peak RSS 92.6 MiB |
+| `performance-contract` | recorded; invariants enforced, envelope only on the fingerprinted host |
