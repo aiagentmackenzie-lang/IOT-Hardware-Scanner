@@ -68,11 +68,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8, 9})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8, 9, 10})
 
 #: Component bases, in report order. Every count is present even when zero.
 COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
@@ -227,6 +227,7 @@ def build_document(context: ScanContext, version: str) -> dict[str, Any]:
         "boot": _boot_section(context),
         "cache": _cache_section(context),
         "mcu": _mcu_section(context),
+        "rauc": context.rauc.as_dict() if context.rauc is not None else None,
         "data_sources": _data_sources_section(),
         "risk_score": None,
     }
@@ -791,11 +792,14 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         document.setdefault("boot", None)
         document.setdefault("cache", None)
         document.setdefault("mcu", None)
+        document.setdefault("rauc", None)
         _mark_unrecorded_capabilities(document)
         _validate_document_shape(document)
         return document
 
-    if raw_version == 8:
+    if raw_version == 9:
+        document = _upgrade_v9(data)
+    elif raw_version == 8:
         document = _upgrade_v8(data)
     elif raw_version == 7:
         document = _upgrade_v7(data)
@@ -817,6 +821,7 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
     document.setdefault("boot", None)
     document.setdefault("cache", None)
     document.setdefault("mcu", None)
+    document.setdefault("rauc", None)
     _mark_unrecorded_capabilities(document)
     _mark_unrecorded_extraction_backend(document)
     _validate_document_shape(document)
@@ -852,6 +857,32 @@ def _mark_unrecorded_capabilities(document: dict[str, Any]) -> None:
 
 #: Sections a schema-5 document never recorded.
 _V5_SECTIONS = ("component_bases",)
+
+
+def _upgrade_v9(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-9 document to schema 10 without inventing an update bundle.
+
+    A v9 document was produced before RAUC bundles were read. ``rauc`` is
+    ``None``: no bundle was described, which is not an empty one.
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 9; RAUC update bundles were not recorded by that version"
+    )
+    document.setdefault("rauc", None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 9,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before the report described a RAUC update "
+                "bundle. The rauc section is absent, not empty."
+            ),
+        },
+    )
+    return document
 
 
 def _upgrade_v8(data: dict[str, Any]) -> dict[str, Any]:
@@ -1431,6 +1462,33 @@ def render_terminal(document: dict[str, Any]) -> str:
         for item in (mcu.get("diagnostics") or [])[:6]:
             lines.append(f"  ! {item.get('kind')}: {item.get('detail')}")
 
+    rauc = document.get("rauc")
+    if rauc:
+        signature = rauc.get("signature") or {}
+        lines.append(
+            f"RAUC bundle: {rauc.get('version') or 'unversioned'} for "
+            f"{rauc.get('compatible') or 'an unnamed board'} "
+            f"({rauc.get('bundle_format') or 'format unknown'}); running slot unknown"
+        )
+        lines.append(
+            "  signature: "
+            + (
+                f"present, {signature.get('bytes')} byte(s), not verified — "
+                f"{signature.get('reason')}"
+                if signature.get("present")
+                else "absent"
+            )
+        )
+        for image in rauc.get("images") or []:
+            lines.append(
+                f"  {image.get('slot')}: {image.get('filename')} — {image.get('state')}"
+                + (f", root {image.get('root_id')}" if image.get("root_id") else "")
+            )
+            if image.get("detail"):
+                lines.append(f"    {image.get('detail')}")
+        for note in (rauc.get("diagnostics") or [])[:4]:
+            lines.append(f"  ! {note}")
+
     boot = document.get("boot") or {}
     for artifact in boot.get("artifacts") or []:
         configurations = artifact.get("configurations") or []
@@ -1730,6 +1788,40 @@ def render_markdown(document: dict[str, Any]) -> str:
             lines += ["", "### Encoding notes", ""]
             for note in mcu.get("notes") or []:
                 lines.append(f"- {note}")
+        lines.append("")
+
+    rauc = document.get("rauc")
+    if rauc:
+        signature = rauc.get("signature") or {}
+        lines += [
+            "## RAUC update bundle",
+            "",
+            f"- Compatible: `{rauc.get('compatible') or '—'}`",
+            f"- Version: {rauc.get('version') or '—'}",
+            f"- Bundle format: {rauc.get('bundle_format') or '—'}",
+            "- Running slot: **unknown** (a static artifact cannot name the slot a "
+            "device booted from)",
+            "- Signature: "
+            + (
+                f"present ({signature.get('bytes')} byte(s)), **not verified** — "
+                f"{_md_cell(str(signature.get('reason')))}"
+                if signature.get("present")
+                else "absent"
+            ),
+            "",
+            "| Slot | Payload | State | Root | Hooks |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for image in rauc.get("images") or []:
+            lines.append(
+                f"| `{image.get('slot')}` | `{image.get('filename')}` | "
+                f"{image.get('state')} | {image.get('root_id') or '—'} | "
+                f"{', '.join(image.get('hooks') or []) or '—'} |"
+            )
+        if rauc.get("diagnostics"):
+            lines += ["", "### Bundle notes", ""]
+            for note in rauc.get("diagnostics") or []:
+                lines.append(f"- {_md_cell(str(note))}")
         lines.append("")
 
     boot = document.get("boot") or {}
@@ -2251,6 +2343,33 @@ def render_html(document: dict[str, Any]) -> str:
             parts.append(
                 f"<p>{len(gaps)} unobserved address range(s); they are never zero-filled.</p>"
             )
+
+    rauc = document.get("rauc")
+    if rauc:
+        signature = rauc.get("signature") or {}
+        parts.append("<h2>RAUC update bundle</h2>")
+        parts.append(
+            f"<p>{html.escape(str(rauc.get('compatible') or 'unnamed board'))}, version "
+            f"{html.escape(str(rauc.get('version') or '—'))}, format "
+            f"{html.escape(str(rauc.get('bundle_format') or '—'))}; running slot "
+            "<strong>unknown</strong>. Signature "
+            + (
+                f"present ({html.escape(str(signature.get('bytes')))} byte(s)), not verified: "
+                f"{html.escape(str(signature.get('reason')))}."
+                if signature.get("present")
+                else "absent."
+            )
+            + "</p>"
+        )
+        parts.append("<table><tr><th>Slot</th><th>Payload</th><th>State</th><th>Root</th></tr>")
+        for image in rauc.get("images") or []:
+            parts.append(
+                f"<tr><td><code>{html.escape(str(image.get('slot')))}</code></td>"
+                f"<td><code>{html.escape(str(image.get('filename')))}</code></td>"
+                f"<td>{html.escape(str(image.get('state')))}</td>"
+                f"<td>{html.escape(str(image.get('root_id') or '—'))}</td></tr>"
+            )
+        parts.append("</table>")
 
     boot = document.get("boot") or {}
     for artifact in boot.get("artifacts") or []:

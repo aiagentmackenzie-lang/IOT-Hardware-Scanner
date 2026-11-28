@@ -519,6 +519,14 @@ class FirmwareIngest:
                 f"Bare-metal firmware ({mcu_format} records)",
                 FILE_TYPE_SOURCE_MAGIC_BYTES,
             )
+        if head.startswith(b"hsqs"):
+            # A bare SquashFS image, and a RAUC bundle (which is one, with a
+            # signature appended). The label states the container the bytes prove;
+            # whether it is a bundle is the extraction phase's question.
+            return (
+                "SquashFS v4 filesystem image",
+                FILE_TYPE_SOURCE_MAGIC_BYTES,
+            )
         cpio_format = detect_cpio_format(head)
         if cpio_format:
             # An initramfs is the sixth byte pattern this scanner reads rather

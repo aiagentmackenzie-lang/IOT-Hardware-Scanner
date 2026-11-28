@@ -12,7 +12,22 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.10.0
+## Status — version 2.11.0
+
+Version 2.11.0 reads **RAUC update bundles** (slice 3E) as what they are: a
+**proposed** device state, never a running one. A bundle is a SquashFS image whose
+root carries `manifest.raucm`; the manifest's board string, version and slot classes
+are recorded, and every payload it names is checked against the bytes the bundle
+actually carries. A payload whose size or SHA-256 disagrees **loses its slot
+association** — it is listed, and nothing inside it is attributed to that slot or
+decoded into a root. A verified payload is then decoded as a root of its own,
+qualified by its slot class, so a finding reads `rootfs/etc/shadow:1` and names the
+payload it came from. The running slot is always `unknown`: a static artifact cannot
+tell which slot a device booted. A detached signature appended after the filesystem
+is reported by presence and byte count; `verified` stays `null`, because a trust
+decision needs a supplied certificate and a CMS verifier and this release supplies
+neither — `false` would read as "checked and invalid". Report schema 9 → 10
+(`rauc`), no profile change. Record: [docs/3E-RAUC.md](docs/3E-RAUC.md).
 
 Version 2.10.0 decodes **CPIO initramfs archives** (slice 3A, part 3) — in-process,
 because an initramfs is a sequence of 110-byte headers, not a filesystem image that
@@ -155,7 +170,8 @@ to a passing case.
 | Partitioned disk images (MBR, extended MBR, GPT) | ✅ table CRC-verified and bounds-checked; every partition mapped and decoded by its own magic; two roots in one image both inventoried |
 | CPIO initramfs (`newc`, `crc`, `odc`) | ✅ decoded **in-process** — no worker, no container runtime; hard links resolved to one inode; a truncated or unsafe archive is exit 4 |
 | Repeated-work cache (`--cache-dir`) | ✅ opt-in, bounded, atomic; measured cold/warm equivalence |
-| RAUC bundles / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
+| RAUC update bundles (`manifest.raucm`, slot classes, payload digests) | ✅ payloads verified against the manifest, each decoded as a slot-named root; a mismatched payload loses its association; running slot unknown |
+| JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -354,8 +370,8 @@ document, and neither is a substitute for one.
 
 ```json
 {
-  "schema_version": 9,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.10.0",
+  "schema_version": 10,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.11.0",
            "capabilities": {
              "libmagic": {"available": true, "version": "540", "detail": null},
              "pyelftools": {"available": true, "version": "0.33", "detail": null},
@@ -618,9 +634,12 @@ and corpus digests, with the platform each was built on. The reference image is
 ## Known limitations
 
 * **Container coverage is still partial.** SquashFS v4 (bare or gzip-wrapped) and CPIO `newc`/`crc`/`odc`
-  are decoded; JFFS2/UBIFS, RAUC bundles and raw NAND captures are later gates with their own
-  fixtures, each reported as unsupported rather than guessed at. A binary CPIO archive is named
-  and refused, never misread as `odc`.
+  are decoded; JFFS2/UBIFS and raw NAND captures are later gates with their own fixtures. A binary
+  CPIO archive is named and refused, never misread as `odc`.
+* **A RAUC bundle is a declaration, not a device.** The running slot is always `unknown`; a payload
+  is only associated with its slot when its size and digest match the manifest, and a signature is
+  reported as present with its byte count but never as verified — this release has no CMS verifier.
+  A bundle inside a partition, and a delta update whose base is not supplied, are not claimed.
 * **An initramfs is one archive.** A concatenated initramfs (a second archive after the trailer) is
   recorded and makes the extraction stage `PARTIAL`; only the first archive's tree is inventoried.
   Archive ownership is recorded from the headers and permission bits are applied, but `uid`/`gid`

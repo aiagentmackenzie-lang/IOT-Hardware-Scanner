@@ -1639,3 +1639,138 @@ class TestCpioInitramfs:
         assert stage["status"] == "FAILED"
         assert "CPIO archive is not decodable" in stage["reason"]
         assert document["assessment"]["completion"] != "COMPLETE"
+
+
+# ──────────────────────────────────────────────
+# 3E — a RAUC bundle is a proposed device state
+# ──────────────────────────────────────────────
+
+
+class TestRaucBundle:
+    """A generated RAUC bundle, through the installed CLI.
+
+    A bundle is a SquashFS image whose root holds ``manifest.raucm`` and the
+    payload images it names. Two distinct payloads are built — a system rootfs
+    with a seeded empty-password finding and a recovery image without it — and
+    the row asserts what a reader must be able to see: each payload listed once,
+    the payload that carries the finding named, and the running slot unknown.
+    """
+
+    def _bundle(
+        self,
+        runtime: str,
+        workdir: Path,
+        *,
+        rootfs_digest: str | None = None,
+        signature: bool = False,
+    ) -> Path:
+        system = make_tree(workdir / "system-tree", "root::19000:0:99999:7:::\n")
+        recovery = make_tree(workdir / "recovery-tree", "root:*:19000:0:99999:7:::\n")
+        system_image = _build_squashfs(runtime, workdir, system, "rootfs.squashfs")
+        recovery_image = _build_squashfs(runtime, workdir, recovery, "recovery.squashfs")
+
+        def digest(path: Path) -> str:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        manifest = (
+            "[update]\n"
+            "compatible=armsr-armv8\n"
+            "version=2026.11.0-test\n"
+            "description=generated for the acceptance row\n"
+            "[bundle]\n"
+            "format=verity\n"
+            "[image.rootfs]\n"
+            f"filename=rootfs.squashfs\n"
+            f"sha256={rootfs_digest or digest(system_image)}\n"
+            f"size={system_image.stat().st_size}\n"
+            "[image.recovery]\n"
+            f"filename=recovery.squashfs\n"
+            f"sha256={digest(recovery_image)}\n"
+            f"size={recovery_image.stat().st_size}\n"
+        )
+        bundle_tree = workdir / "bundle-tree"
+        bundle_tree.mkdir()
+        (bundle_tree / "manifest.raucm").write_text(manifest)
+        shutil.copy2(system_image, bundle_tree / "rootfs.squashfs")
+        shutil.copy2(recovery_image, bundle_tree / "recovery.squashfs")
+        built = _build_squashfs(runtime, workdir, bundle_tree, "release.raucb")
+        target = workdir / "release-bundle.raucb"
+        payload = built.read_bytes()
+        if signature:
+            # RAUC appends a detached CMS block after the filesystem. The bytes
+            # are not a valid CMS; presence is what this release claims.
+            payload += b"\x30\x82\x01\x00" + b"\x00" * 396
+        target.write_bytes(payload)
+        return target
+
+    def test_a_bundle_lists_each_payload_once_and_names_the_one_with_the_finding(
+        self, runtime: str, workdir: Path, runner: Runner
+    ) -> None:
+        image = self._bundle(runtime, workdir, signature=True)
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "bundle.json"],
+            cwd=workdir,
+            env=_daemon_env(),
+        )
+        document = json.loads((workdir / "bundle.json").read_text())
+
+        # 1. The bundle is described by its manifest, and the slot it boots from is
+        #    not inferable from an artifact.
+        rauc = document["rauc"]
+        assert rauc["compatible"] == "armsr-armv8"
+        assert rauc["version"] == "2026.11.0-test"
+        assert rauc["running_slot"] == "unknown"
+        assert [image_slot["slot_class"] for image_slot in rauc["images"]] == [
+            "rootfs",
+            "recovery",
+        ]
+        assert [image_slot["state"] for image_slot in rauc["images"]] == [
+            "VERIFIED",
+            "VERIFIED",
+        ]
+
+        # 2. A signature is present and is never claimed verified without a verifier.
+        assert rauc["signature"]["present"] is True
+        assert rauc["signature"]["bytes"] >= 400
+        assert rauc["signature"]["verified"] is None
+
+        # 3. Each verified payload is a root of its own, named by its slot class.
+        roots = {root["root_id"]: root for root in document["inventory"]["roots"]}
+        assert set(roots) == {"bundle", "rootfs", "recovery"}
+        assert rauc["images"][0]["root_id"] == "rootfs"
+        assert rauc["images"][1]["root_id"] == "recovery"
+
+        # 4. The finding is attributed to the payload that carries it, and only it.
+        empty = [
+            finding
+            for finding in document["findings"]
+            if finding["rule_id"] == "credential.unix.empty_password"
+        ]
+        assert len(empty) == 1, document["findings"]
+        assert all(location.startswith("rootfs/") for location in empty[0]["locations"]), empty[0]
+        assert result.returncode == 1
+
+    def test_a_manifest_digest_that_disagrees_invalidates_that_slot(
+        self, runtime: str, workdir: Path, runner: Runner
+    ) -> None:
+        """The bytes in the bundle are not the bytes the manifest describes."""
+        image = self._bundle(runtime, workdir, rootfs_digest="0" * 64)
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "mismatch.json"],
+            cwd=workdir,
+            env=_daemon_env(),
+        )
+        document = json.loads((workdir / "mismatch.json").read_text())
+
+        rootfs = document["rauc"]["images"][0]
+        assert rootfs["state"] == "MISMATCH"
+        assert rootfs["root_id"] is None
+        # Nothing inside the unverified payload may be attributed to the slot.
+        assert not any(
+            finding["rule_id"] == "credential.unix.empty_password"
+            for finding in document["findings"]
+        )
+        assert "rootfs" not in {root["root_id"] for root in document["inventory"]["roots"]}
+        # The other payload is unaffected: one bad declaration does not poison it.
+        assert document["rauc"]["images"][1]["state"] == "VERIFIED"
+        assert result.returncode in (0, 2), result.stdout

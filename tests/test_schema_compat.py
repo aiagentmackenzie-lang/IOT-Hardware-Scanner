@@ -1,6 +1,6 @@
-"""P1/P3 — the schema-9 reader is tested against every report version it claims.
+"""P1/P3 — the schema-10 reader is tested against every report version it claims.
 
-One fixture per report schema 1 to 9, each carrying only the fields that version
+One fixture per report schema 1 to 10, each carrying only the fields that version
 actually recorded, and the *exact* upgrade result asserted:
 
 * the version lands on :data:`SCHEMA_VERSION`;
@@ -15,7 +15,8 @@ actually recorded, and the *exact* upgrade result asserted:
 Schema 7 is the only version where a null ``artifact.file_type_source`` or
 tool ``capabilities`` means "this scan did not establish it"; schema 8 is the only
 one where a null ``mcu`` means "no bare-metal image was decoded"; schema 9 is the
-only one where a null ``extraction.backend`` means "no backend ran". For an
+only one where a null ``extraction.backend`` means "no backend ran"; schema 10 is
+the only one where a null ``rauc`` means "no update bundle was opened". For an
 upgrade the same null means "that version never recorded it", and the
 ``migration`` note says so.
 """
@@ -329,6 +330,35 @@ def schema_9() -> dict[str, Any]:
     return document
 
 
+def schema_10() -> dict[str, Any]:
+    """v10 adds the RAUC update bundle."""
+    document = schema_9()
+    document["schema_version"] = 10
+    document["rauc"] = {
+        "compatible": "my-board-v1",
+        "version": "2026.11.0",
+        "description": None,
+        "build": None,
+        "bundle_format": "verity",
+        "running_slot": "unknown",
+        "decoder": "ihs-rauc",
+        "decoder_version": "1",
+        "images": [
+            {
+                "slot": "rootfs",
+                "slot_class": "rootfs",
+                "slot_name": None,
+                "filename": "rootfs.squashfs",
+                "state": "VERIFIED",
+                "root_id": "rootfs",
+            }
+        ],
+        "handler": None,
+        "diagnostics": [],
+    }
+    return document
+
+
 def schema_7() -> dict[str, Any]:
     """v7 adds the source of the type label and the host's capabilities."""
     document = schema_6()
@@ -353,6 +383,7 @@ CASES = {
     7: (schema_7, None),
     8: (schema_8, None),
     9: (schema_9, None),
+    10: (schema_10, None),
 }
 
 
@@ -509,8 +540,8 @@ def test_schema_7_does_not_invent_an_address_map() -> None:
     assert "Bare-metal" not in render(document, "markdown")
 
 
-def test_schema_9_round_trips_without_a_migration_record() -> None:
-    source = schema_9()
+def test_schema_10_round_trips_without_a_migration_record() -> None:
+    source = schema_10()
     document = load_document(source)
 
     assert document == source
@@ -575,6 +606,7 @@ ABSENT_BY_VERSION: dict[int, tuple[str, ...]] = {
     7: (),
     8: (),
     9: (),
+    10: (),
 }
 
 
@@ -596,7 +628,7 @@ def test_no_upgrade_invents_a_capability_record(
 ) -> None:
     """Before schema 7, the two nested facts are null rather than empty."""
     version, document = upgraded
-    if version in (7, 8, 9):
+    if version in (7, 8, 9, 10):
         # Recorded by that version, so not an absence.
         assert document["artifact"]["file_type_source"] == "libmagic"
         assert document["tool"]["capabilities"] is not None
@@ -606,6 +638,9 @@ def test_no_upgrade_invents_a_capability_record(
         if version in (7, 8):
             # ... nor which backend produced the extracted tree.
             assert document["extraction"]["backend"] is None
+        if version in (7, 8, 9):
+            # ... nor an update bundle.
+            assert document["rauc"] is None
         return
     assert document["artifact"]["file_type_source"] is None, (
         f"schema {version}: the type source was invented"
@@ -626,19 +661,19 @@ def test_no_upgrade_invents_a_field(upgraded: tuple[int, dict[str, Any]]) -> Non
     never gains the schema-2 ``outcome``/``data_sources`` it never wrote.
     """
     version, document = upgraded
-    schema_nine = set(schema_9())
-    if version == 9:
-        expected = schema_nine
+    schema_ten = set(schema_10())
+    if version == 10:
+        expected = schema_ten
     elif version == 1:
-        expected = (schema_nine - {"outcome", "data_sources"}) | {
+        expected = (schema_ten - {"outcome", "data_sources"}) | {
             "schema_note",
             "legacy_grade",
         }
     else:
-        expected = schema_nine | {"schema_note", "migration"}
+        expected = schema_ten | {"schema_note", "migration"}
     assert set(document) == expected, (
         f"schema {version}: unexpected keys {sorted(set(document) - expected)};"
         f" missing {sorted(expected - set(document))}"
     )
-    if version in (2, 3, 4, 5, 6, 7, 8):
+    if version in (2, 3, 4, 5, 6, 7, 8, 9):
         assert document["migration"]["to"] == SCHEMA_VERSION

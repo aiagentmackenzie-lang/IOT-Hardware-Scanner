@@ -1,11 +1,17 @@
-# Support matrix and qualification record — release 2.10.0
+# Support matrix and qualification record — release 2.11.0
 
 This file is the answer to one question: **for each input this release claims to
 handle, what has actually been demonstrated, on what, and by which code?** A
 capability without a passing case is listed as unqualified.
 
-Measured with `iot-hardware-scanner 2.10.0`, report schema 9, profile version 6.0.
-Release 2.10.0 adds one container and the first **worker-free** decode: **CPIO
+Measured with `iot-hardware-scanner 2.11.0`, report schema 10, profile version 6.0.
+Release 2.11.0 adds **RAUC update bundles** (slice 3E): the manifest, its board
+string and slot classes, every payload verified against the bytes the bundle
+carries, and each verified payload decoded as a root named by its slot class
+([docs/3E-RAUC.md](3E-RAUC.md)). Report schema 9 → 10 adds the `rauc` section; a
+payload that does not match its declaration loses its slot association and is
+never decoded. The running slot is always `unknown`, and a signature is reported
+by presence only. Release 2.10.0 adds one container and the first **worker-free** decode: **CPIO
 initramfs** archives (`newc`, `crc`, `odc`, bare or gzip-wrapped) are read
 in-process, so a class of firmware that used to need a container runtime can be
 enumerated on any host
@@ -50,6 +56,7 @@ says so.
 | Gzip-wrapped SquashFS v4 root image (OpenWrt) | **analyzed** — decoded, extracted, enumerated, inventoried, detected | `unsquashfs 4.5.1 (2022/03/17)` in `ihs-squashfs-worker:4.5.1` | Linux x86_64 container, arm64 container | `tests/test_installed_image_cli.py::TestReferenceImageInventory`, `::TestReleasedDetectionSemantics` |
 | Unwrapped SquashFS v4 image at offset 0 | **analyzed** — superblock validated in place, then the same worker path | as above | as above | `tests/test_image_map.py`, `tests/test_installed_image_cli.py` |
 | Partitioned disk image (MBR, extended MBR, GPT) | **analyzed** — table decoded with every declared range validated in bounds; each partition sliced, decoded by its own magic, and extracted; two roots in one image both inventoried | in-process table reader `ihs-partitions/1` + pinned worker for the filesystems | any host for the map; Linux worker for extraction | `tests/test_partitions.py`, `tests/test_installed_image_cli.py::TestPartitionedImage` |
+| RAUC update bundle (`.raucb`, `manifest.raucm`) | **analyzed** — manifest, board string, slot classes and per-payload digest/size verified; each verified payload decoded as a root named by its slot class; a mismatched or absent payload loses its association; signature presence recorded, verification not claimed | in-process manifest reader `ihs-rauc/1` + the same worker a single image uses | any host for the manifest; Linux worker to decode a SquashFS payload | `tests/test_rauc.py`, `tests/test_installed_image_cli.py::TestRaucBundle` |
 | CPIO initramfs (`newc`, `crc`, `odc`; bare or gzip-wrapped) | **analyzed** — every record's name and data range validated before it is read; each member mapped with its byte range, mode, uid, gid and nlink; hard links resolved to one inode; extracted, enumerated and detected | **in-process** decoder `ihs-cpio/1`, no worker, no container runtime | any host, any platform — no network | `tests/test_cpio.py`, `tests/test_installed_image_cli.py::TestCpioInitramfs` |
 | Staged root tree (`--input-tree`) | **analyzed** — no container, no extraction | local bounded reader | any host | `tests/test_staged_tree.py`, `tests/test_installed_image_cli.py::TestTreeAndImage` |
 | Two saved scan documents (`compare`) | **analyzed** — records, components, layout and findings compared by identity | none (no extraction, no network) | any host | `tests/test_comparison.py`, `tests/test_installed_image_cli.py::TestTwoReleaseComparison`, `::TestReferenceDeclarationReconciliation` |
@@ -94,11 +101,15 @@ installed-entrypoint modules is named by no row at all.
 | Generated declaration set: one match, one version mismatch, one declared-only, one observed-only | **analyzed** — four distinguishable outcomes; a revision-less supplier row stays unresolved; another image's declaration resolves nothing | `::TestDeclarationReconciliation` |
 | Partition table pointing outside a truncated image | **rejected** — the declared range is checked before it is read; `FAILED`, exit 4 | `tests/test_partitions.py::TestBounds` |
 | Partition holding no recognisable filesystem | **recorded** — `details.content` says `unrecognised`; the other partitions still extract; the run is `PARTIAL` not clean | `tests/test_partitions.py`, `tests/test_installed_image_cli.py::TestPartitionedImage` |
-| Saved report schemas 1–9 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage, and a v8 extraction section gains `backend: null` rather than "none" | `tests/test_schema_compat.py` |
+| Saved report schemas 1–10 | **readable** — one fixture per version, exact upgrade result, absent facts stay `null` rather than `[]`, v1 keeps its historical display and records unknown coverage, and a v8 extraction section gains `backend: null` rather than "none" | `tests/test_schema_compat.py` |
 | CPIO layout: `newc` padding, `odc` octal/no-padding, binary refused by name | **analyzed** — a record whose magic disagrees with its archive stops the walk; the older binary format is named and refused rather than misread as `odc` | `tests/test_cpio.py` |
 | CPIO hard link: a zero-length member of a group | **analyzed** — the group is resolved by (dev, ino); every name carries the carrier's digest and size, the link is a real link, and a 0-byte `/etc/shadow` is never materialised | `tests/test_cpio.py`, `tests/test_installed_image_cli.py::TestCpioInitramfs::test_a_zero_length_hardlink_member_does_not_weaken_the_finding` |
 | CPIO `crc` check field, truncation and unsafe names | **rejected** — a checksum that disagrees with its bytes fails the stage (exit 4); a missing `TRAILER!!!` is truncation; an absolute or `..` name refuses the archive before anything is written | `tests/test_cpio.py` |
 | CPIO decoded with no container runtime at all | **in-process** — `extraction.backend: "in-process"`, no `worker` key, and the stage reason names the decoder; the five end-to-end rows skip on nothing | `tests/test_installed_image_cli.py::TestCpioInitramfs` |
+| RAUC bundle: two payloads, one finding | **analyzed** — each payload listed exactly once, the payload that carries the seeded finding named by its root id (`rootfs/…`), the running slot `unknown` | `tests/test_installed_image_cli.py::TestRaucBundle` |
+| RAUC manifest digest that disagrees with the payload | **rejected association** — that payload is `MISMATCH`, its root id is `null`, nothing inside it is reported, and the other payload stays `VERIFIED` | `tests/test_installed_image_cli.py::TestRaucBundle::test_a_manifest_digest_that_disagrees_invalidates_that_slot` |
+| RAUC payload states: `VERIFIED`, `MISMATCH`, `MISSING`, `UNCHECKED` | **decided by bytes** — `UNCHECKED` is never a pass, and a duplicate `[image.*]` section is a parse error rather than a silently dropped slot | `tests/test_rauc.py` |
+| RAUC appended signature | **presence only** — byte count from size against the filesystem extent; `verified` is `null` with the reason, never `false` | `tests/test_rauc.py`, `tests/test_installed_image_cli.py::TestRaucBundle` |
 | MCU address map: equivalence, gaps, conflicts, truncation, bounds | **analyzed** — one digest across all three encodings, re-chunking does not move it, a gap is never zero-filled, a conflicting rewrite is named, a truncated encoding is a FAILED stage with exit 4 | `tests/test_mcu_image.py`, `tests/test_mcu_profile.py` |
 | Type-label provenance and host capabilities (`artifact.file_type_source`, `tool.capabilities`) | **recorded** — four sources distinguished (`magic-bytes`, `libmagic`, `extension`, `directory`); libmagic availability proved by calling the library and carrying its real reason; parser versions and container runtimes on `PATH` recorded; an upgraded v6 document carries `null`, and `null` renders as silence | `tests/test_capabilities.py` |
 | The support matrix itself | **executable** — every claimed node resolves to a collected test and passes when it runs; unclaimed tests are reported, not hidden | `tests/test_claim_matrix.py::test_every_matrix_reference_resolves` |

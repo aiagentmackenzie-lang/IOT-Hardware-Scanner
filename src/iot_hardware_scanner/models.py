@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # ``scanner/__init__`` imports this module, so the import is type-only
+    from iot_hardware_scanner.scanner.rauc import RaucBundle
 
 # ──────────────────────────────────────────────
 # Enumerations
@@ -362,6 +365,9 @@ class ScanContext:
     #: Slice 3C: the decoded bare-metal image (sparse address map), or ``None``
     #: when the selected profile does not decode one.
     mcu: McuAnalysis | None = None
+    #: Slice 3E: the RAUC bundle a scan opened, its slots and what the payload
+    #: bytes did about each declaration.
+    rauc: RaucBundle | None = None
     #: Slice 3C: compiled-rule matches found in the decoded payload, each with the
     #: device address it was found at. Routed by destination in the assessment.
     mcu_matches: list[YaraMatch] = field(default_factory=list)

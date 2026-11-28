@@ -1173,6 +1173,10 @@ class Orchestrator:
             return context
 
         context.extracted_rootfs = result.root_filesystems[0]
+        # Slice 3E: a RAUC bundle is a SquashFS image whose root holds a
+        # manifest.raucm. Its payloads are the proposed device state, so they are
+        # verified against the manifest and decoded as roots of their own.
+        self._phase_rauc(context, builder, scratch)
         record_stage(
             context,
             StageId.EXTRACTION,
@@ -1204,6 +1208,218 @@ class Orchestrator:
         )
         context.image_rootfs_artifact_id = parent_id
         return context
+
+    # ──────────────────────────────────────────
+    # Slice 3E: a RAUC update bundle is a proposed device state
+    # ──────────────────────────────────────────
+
+    def _phase_rauc(self, context: ScanContext, builder: Any, scratch: Path) -> None:
+        """Describe a RAUC bundle and decode the payloads its manifest verifies.
+
+        A bundle is a SquashFS image whose root carries ``manifest.raucm`` and the
+        payload images it names. Nothing here can know which slot a device booted
+        from, so ``running_slot`` is always ``unknown``. A payload whose bytes do
+        not hash to the manifest's declaration **loses its slot association**: it
+        is recorded, but nothing inside it is attributed to the slot and it is
+        never decoded into a root.
+
+        A bundle inside a partition is not claimed in this release; the phase runs
+        for a top-level image only, and says so when it declines.
+        """
+        from iot_hardware_scanner.scanner.rauc import (
+            RAUC_MANIFEST_NAME,
+            RaucBundle,
+            RaucError,
+            apply_payload_facts,
+            parse_manifest,
+            signature_from_extent,
+        )
+
+        root = context.extracted_rootfs
+        if root is None or not (root / RAUC_MANIFEST_NAME).is_file():
+            return
+        manifest_path = root / RAUC_MANIFEST_NAME
+        try:
+            text = manifest_path.read_text(encoding="utf-8", errors="replace")
+            bundle = parse_manifest(text)
+        except (OSError, RaucError, UnicodeError) as exc:
+            # The marker is present but the declaration is not readable. That is a
+            # fact about the bundle, so it is recorded rather than raised: the tree
+            # itself was extracted and is still evidence.
+            bundle = RaucBundle(
+                diagnostics=[f"the manifest is not readable as a bundle description: {exc}"]
+            )
+            context.rauc = bundle
+            console.print(f"  [yellow]![/yellow] RAUC manifest unreadable: {exc}")
+            return
+
+        budget = self.config.max_decoded_bytes_mb * 1024 * 1024
+        sizes: dict[str, int] = {}
+        digests: dict[str, str] = {}
+        for image in bundle.images:
+            payload = (root / image.filename).resolve()
+            try:
+                payload.relative_to(root.resolve())
+            except ValueError:
+                bundle.diagnostics.append(
+                    f"{image.slot}: the manifest names {image.filename!r}, which leaves the "
+                    "bundle root; it was not read"
+                )
+                continue
+            if not payload.is_file():
+                continue
+            sizes[image.filename] = payload.stat().st_size
+            digests[image.filename] = _sha256_streamed(payload, budget)
+
+        apply_payload_facts(bundle, sizes=sizes, digests=digests)
+        bundle.signature = signature_from_extent(
+            file_size=context.file_size,
+            squashfs_extent=self._squashfs_extent(context),
+        )
+        context.rauc = bundle
+        # The bundle's own tree is a root too — the manifest, the hook scripts and
+        # the payload files live there. Naming it keeps three roots distinguishable
+        # (bundle / rootfs / recovery) instead of numbering them by position.
+        context.root_sources[str(root)] = {
+            "metadata_source": "image",
+            "artifact_id": context.image_rootfs_artifact_id,
+            "root_id": "bundle",
+        }
+
+        decoded: list[tuple[str, Path]] = []
+        files_from_payloads = 0
+        for image in bundle.verified_images:
+            payload = root / image.filename
+            root_id = image.slot_class + (f"-{image.slot_name}" if image.slot_name else "")
+            outcome = self._decode_bundle_payload(
+                context, builder, payload, image.slot, root_id, scratch, budget
+            )
+            if outcome is None:
+                bundle.diagnostics.append(
+                    f"{image.slot}: {image.filename!r} is verified but is not a container "
+                    "this release decodes (an ext4 payload, for example)"
+                )
+                continue
+            image.root_id, extracted_root, payload_files = outcome
+            decoded.append((root_id, extracted_root))
+            files_from_payloads += payload_files
+            context.root_sources[str(extracted_root)] = {
+                "metadata": _extract_manifest_metadata(
+                    ExtractionResult(
+                        success=True,
+                        extraction_dir=extracted_root.parent,
+                    )
+                ),
+                "metadata_source": "image",
+                "artifact_id": image.slot,
+                "root_id": root_id,
+            }
+
+        if decoded:
+            result = context.extraction_result
+            if result is not None:
+                result.root_filesystems.extend([path for _root_id, path in decoded])
+                result.file_count += files_from_payloads
+            console.print(
+                f"  [green]✓[/green] RAUC bundle {bundle.version or 'unversioned'} for "
+                f"{bundle.compatible}: {len(bundle.images)} payload(s), "
+                f"{len(bundle.verified_images)} verified, {len(decoded)} decoded as root(s)"
+                f"{'' if bundle.signature.present else ', unsigned'}"
+            )
+        else:
+            console.print(
+                f"  [yellow]![/yellow] RAUC bundle for {bundle.compatible}: "
+                f"{len(bundle.invalidated)} payload(s) could not be associated"
+            )
+
+    def _squashfs_extent(self, context: ScanContext) -> int:
+        """The bundle's own filesystem extent, from the map this scan built."""
+        image_map = context.image_map
+        if image_map is None:
+            return 0
+        for node in image_map.nodes:
+            if node.format == "squashfs" and node.extent_bytes:
+                return node.extent_bytes
+        return 0
+
+    def _decode_bundle_payload(
+        self,
+        context: ScanContext,
+        builder: Any,
+        payload: Path,
+        slot: str,
+        root_id: str,
+        scratch: Path,
+        budget: int,
+    ) -> tuple[str, Path, int] | None:
+        """Decode one verified payload into a root, or report that it is not one."""
+        from iot_hardware_scanner.scanner.cpio import CpioError
+        from iot_hardware_scanner.scanner.extraction_worker import (
+            ExtractionError,
+            SquashfsWorker,
+        )
+        from iot_hardware_scanner.scanner.image_map import ImageMapError
+
+        artifact_id = f"rauc-{slot}"
+        node = ArtifactNode(
+            artifact_id=artifact_id,
+            parent_id=context.image_rootfs_artifact_id,
+            digest_sha256="",
+            format="file",
+            coordinate_system="container-bytes",
+            offset=0,
+            length=payload.stat().st_size,
+            decoder="",
+            depth=1,
+            locator=payload.name,
+        )
+        if context.image_map is not None:
+            context.image_map.add(node)
+
+        try:
+            decoded, child, content = self._decode_partition(payload, node, builder)
+        except ImageMapError as exc:
+            node.details["content"] = "undecodable"
+            node.details["content_note"] = str(exc)
+            return None
+        if decoded is None:
+            node.details["content"] = "unrecognised"
+            return None
+
+        if content == "cpio":
+            try:
+                _archive, extraction = self._decode_cpio(
+                    builder,
+                    open_bounded(decoded),
+                    child or node,
+                    scratch / "rauc" / slot,
+                )
+            except CpioError:
+                return None
+            return root_id, extraction.rootfs, extraction.files
+
+        worker = SquashfsWorker(self.config)
+        try:
+            result = worker.extract(decoded, scratch / "rauc" / slot)
+        except ExtractionError as exc:
+            node.details["extraction_state"] = exc.state
+            return None
+        if not result.success or not result.root_filesystems:
+            node.details["extraction_state"] = result.state
+            return None
+        node.details["content"] = "squashfs"
+        node.details["extraction_state"] = result.state
+        node.details["file_count"] = result.file_count
+        if result.provenance is not None:
+            node.decoder_version = result.provenance.helper_version
+        root = result.root_filesystems[0]
+        context.root_sources[str(root)] = {
+            "metadata": _extract_manifest_metadata(result),
+            "metadata_source": "image",
+            "artifact_id": node.artifact_id,
+            "root_id": root_id,
+        }
+        return root_id, root, result.file_count
 
     def _cpio_extraction(
         self,
@@ -1697,11 +1913,17 @@ class Orchestrator:
             metadata_source="image" if metadata else "host",
         )
         for index, rootfs in enumerate(roots):
-            root_id = f"rootfs{index + 1}" if len(roots) > 1 else "rootfs"
+            source = context.root_sources.get(str(rootfs), {})
+            # A RAUC payload names its own slot class (``rootfs``, ``recovery``);
+            # otherwise a multi-root image numbers its roots.
+            root_id = (
+                str(source["root_id"])
+                if source.get("root_id")
+                else (f"rootfs{index + 1}" if len(roots) > 1 else "rootfs")
+            )
             # A disk image can carry two partitions whose relative paths collide.
             # Metadata and the artifact node are therefore taken per root, never
             # from one aggregate manifest.
-            source = context.root_sources.get(str(rootfs), {})
             root_metadata = source.get("metadata") or metadata
             root_source = source.get("metadata_source") or ("image" if root_metadata else "host")
             inventory = scanner.scan(
@@ -2332,6 +2554,27 @@ def _merge_inventory(merged: FilesystemInventory, inventory: FilesystemInventory
     merged.ssl_cert_files.extend(inventory.ssl_cert_files)
     merged.init_scripts.extend(inventory.init_scripts)
     merged.network_services.extend(inventory.network_services)
+
+
+def _sha256_streamed(path: Path, budget: int) -> str:
+    """Hash one file in bounded windows, never loading it.
+
+    A RAUC payload is a whole root filesystem — the reason this hashes by window
+    rather than calling ``read_bytes()`` is the same 2.6.0 lesson that bounded the
+    control reads: a 2 GiB payload must cost a window, not 2 GiB of resident memory.
+    """
+    import hashlib
+
+    from iot_hardware_scanner.scanner.bounded_reader import BoundedReadLimitError, open_bounded
+
+    reader = open_bounded(path)
+    hasher = hashlib.sha256()
+    try:
+        for window in reader.iter_windows(1024 * 1024, budget=budget):
+            hasher.update(window.data)
+    except BoundedReadLimitError:
+        return ""
+    return hasher.hexdigest()
 
 
 def _extract_manifest_metadata(
