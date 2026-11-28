@@ -251,6 +251,7 @@ machine-independent invariants are still enforced
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.10.0, qualified) | `99f9a4114f273723602c49b4b54b81d5e4f892bfc2cf8f6df589e8a5801381cc` — `iot_hardware_scanner-2.10.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`7195294`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `46088979236`. **Report schema 9**, profile 6.0: a v8 document reads and gains `extraction.backend: null`; no profile's required set changed |
 | Wheel (2.9.0, qualified) | `79ed8e05f70f4d7e32cbb68db880adb0db270effd817d90de8bcb154dc7819de` — `iot_hardware_scanner-2.9.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`6b8e892`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `45318170784`. **No report-schema change and no profile change** (schema 8, profile 6.0), so a 2.8 document reads unchanged; the partition nodes use fields the node model already carried |
 | Wheel (2.8.0, qualified) | `76e3c1b03cdbd872897e90be7e3be5c00d98fd4ffbd522de5dac1e172d8423f5` — `iot_hardware_scanner-2.8.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build, a fresh clone and the Linux CI build in run `45307659176`. **Report schema 8**, profile 6.0: a 2.7 document reads and gains `mcu: null`; no existing profile's required set changed |
 | Wheel (2.7.0, qualified) | `404cb097af9692583ac05507201891ba74c2e9ddc49da96c2239a2c88a3c4978` — `iot_hardware_scanner-2.7.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build and the Linux CI build in run `45301197717` (68 members, same order). A build from a dirty working tree gives a different digest, because the content differs — the claim is about the checked-out commit. **Report schema 7**, so 2.6–2.4 reports stay readable and gain `null` for the two facts they never recorded; no profile change |
@@ -290,6 +291,22 @@ set and the same `unsquashfs`, and different ids, because the image
 configuration records a build timestamp. The report records the id it actually
 used; the Dockerfile digest, the package list and `unsquashfs version 4.5.1
 (2022/03/17)` are the reproducible facts.
+
+Release 2.10.0 adds **CPIO initramfs** archives and the first worker-free
+decode, and moves the report to schema 9. Qualified in GitHub Actions
+**`46088979236`** on `main` (`7195294`), **9/9 job instances green**:
+`linux-extractor` **247 passed with zero skips** in 398.68 s (2.9.0: 239) — the
+qualified job, which fails the build on any skip, and which now runs the five
+CPIO end-to-end rows that need no container runtime at all — `python-gate`
+**1116 passed / 30 skipped** and **86 %** on 3.10, 3.12 and 3.14,
+`installed-wheel-no-backend` 22 acceptance rows plus **49 hostile rows with zero
+skips** (2.9.0: 45; four are new CPIO lies), `report-contract` **126 / 1**,
+`bounded-resources` 61 / 0 (2 GiB at 16 MiB windows in **77.43 s**, peak RSS
+**95,000 KiB**), the reference image without a worker, and the recorded
+performance contract, with the CI wheel digest equal to the local build's. On this
+machine, with the pinned worker and **without** the reference corpus, the same
+tree runs **1130 passed / 16 skipped at 86 %** (2.9.0: 1078 / 16); the sixteen are
+the reference-image and container-oracle rows, which only the qualified job runs.
 
 Release 2.9.0 adds **partitioned disk images** and changes no schema, profile or
 detector. Qualified in GitHub Actions **`45318170784`** on `main` (`6b8e892`),
