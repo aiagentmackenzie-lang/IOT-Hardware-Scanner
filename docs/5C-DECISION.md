@@ -1,9 +1,9 @@
 # 5C decision — repeated deterministic work is material, so it was measured and cached
 
 Status: **implemented in 2.4.0**, after a measurement on the pinned corpus.
-The entry condition in `FIRMWARE_SCANNER_PLAN.md` is a number: *"Take 5C only
-after the profile shows repeated work is a material cost."* No such profile
-existed before this session. Here it is.
+The entry condition for this slice was always a number, written down before any
+code existed: *"take the cache only after the profile shows repeated work is a
+material cost."* No such profile existed before this session. Here it is.
 
 This is not a release milestone and it does not change the scan exit table.
 

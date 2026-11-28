@@ -6,7 +6,10 @@ bytes live, what was never declared, and one digest over the payload that does
 not depend on the encoding. No section was renamed, no fact changed type, and a
 schema-7 document still reads.
 
-This closes slice **3C** of `FIRMWARE_SCANNER_PLAN.md`.
+This is slice **3C** — decoding bare-metal address spaces — delivered as its own
+gate. The slice records are public documents: this file for the schema change,
+[docs/SUPPORT-MATRIX.md](SUPPORT-MATRIX.md) for what is qualified, and the
+acceptance rows in `tests/test_mcu_image.py` and `tests/test_mcu_profile.py`.
 
 ---
 

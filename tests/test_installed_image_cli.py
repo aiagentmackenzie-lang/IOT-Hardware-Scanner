@@ -4,8 +4,8 @@ Every case here runs the *installed* command through :class:`Runner` (the wheel,
 or the relocated package when no wheel is installed), from a directory that no
 checkout is visible in, with the network unused.
 
-The rows are the release gate from FIRMWARE_SCANNER_PLAN.md and the Milestone B
-acceptance list:
+The rows are the Milestone B acceptance list, kept current by
+`docs/SUPPORT-MATRIX.md` and `tests/test_claim_matrix.py`:
 
 1. the reference image's inventory is recoverable through the CLI;
 2. the same image with the worker turned off still identifies the artifact,

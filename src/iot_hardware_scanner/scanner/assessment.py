@@ -8,8 +8,8 @@ This module is the single place that answers two questions:
 The CLI, the JSON writer and the terminal summary all read these answers from
 here, so a saved report and the process status can never disagree.
 
-Precedence, highest first (see FIRMWARE_SCANNER_PLAN.md, "What a successful
-result means"):
+Precedence, highest first (the same table the README publishes as the exit
+contract):
 
 ===  ===========================================================
  3   invalid input or configuration
