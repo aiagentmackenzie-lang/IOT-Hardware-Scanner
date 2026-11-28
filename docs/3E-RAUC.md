@@ -118,6 +118,8 @@ bundle intends to run on the device.
 | RAUC unit | `pytest tests/test_rauc.py` | **26 rows** — manifest parse, duplicate sections refused, slot naming, every payload state, the invalidation rule, signature presence |
 | RAUC end to end | `pytest tests/test_installed_image_cli.py::TestRaucBundle` | **2 rows** through the installed CLI: a generated two-payload bundle (each listed once, the finding attributed to `rootfs/`, running slot unknown, signature present and unverified) and a manifest digest that disagrees (that slot invalidated, the other still verified, its findings absent) |
 | Schema | `pytest tests/test_schema_compat.py` | 1 → 10 with the exact upgrade result per version |
+| Tests | `pytest` (local, macOS arm64, CPython 3.12.14, colima worker, no reference corpus) | **1161 passed / 16 skipped / 85 %** (2.10.0: 1130 / 16) |
+| CI | run **`46090736423`** on `main` (`b7da7da`) | **9/9 green**: `linux-extractor` 252 passed, 0 skipped (366.09 s); `python-gate` 1145 / 32 at 86 % ×3; hostile 49 / 0; wheel `53c2846e…fa69` byte-identical macOS ↔ Linux |
 
 The end-to-end rows build their own bundle with the pinned worker's `mksquashfs` and
 therefore run wherever the worker image is present (the `linux-extractor` job).

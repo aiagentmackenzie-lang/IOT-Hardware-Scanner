@@ -262,6 +262,7 @@ machine-independent invariants are still enforced
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.11.0, qualified) | `53c2846e2765db49da9eaeacdbbd7311ee087498ad16643b0d1a8a4197d8fa69` — `iot_hardware_scanner-2.11.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`b7da7da`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `46090736423`. **Report schema 10**, profile 6.0: a v9 document reads and gains `rauc: null`; no profile's required set changed |
 | Wheel (2.10.0, qualified) | `99f9a4114f273723602c49b4b54b81d5e4f892bfc2cf8f6df589e8a5801381cc` — `iot_hardware_scanner-2.10.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`7195294`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `46088979236`. **Report schema 9**, profile 6.0: a v8 document reads and gains `extraction.backend: null`; no profile's required set changed |
 | Wheel (2.9.0, qualified) | `79ed8e05f70f4d7e32cbb68db880adb0db270effd817d90de8bcb154dc7819de` — `iot_hardware_scanner-2.9.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`6b8e892`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `45318170784`. **No report-schema change and no profile change** (schema 8, profile 6.0), so a 2.8 document reads unchanged; the partition nodes use fields the node model already carried |
 | Wheel (2.8.0, qualified) | `76e3c1b03cdbd872897e90be7e3be5c00d98fd4ffbd522de5dac1e172d8423f5` — `iot_hardware_scanner-2.8.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build, a fresh clone and the Linux CI build in run `45307659176`. **Report schema 8**, profile 6.0: a 2.7 document reads and gains `mcu: null`; no existing profile's required set changed |
@@ -302,6 +303,21 @@ set and the same `unsquashfs`, and different ids, because the image
 configuration records a build timestamp. The report records the id it actually
 used; the Dockerfile digest, the package list and `unsquashfs version 4.5.1
 (2022/03/17)` are the reproducible facts.
+
+Release 2.11.0 adds **RAUC update bundles** and changes no profile, detector or
+control. Qualified in GitHub Actions **`46090736423`** on `main` (`b7da7da`),
+**9/9 job instances green**: `linux-extractor` **252 passed with zero skips** in
+366.09 s (2.10.0: 247) — the qualified job, which fails the build on any skip, and
+where the two bundle rows run (they build their own bundle with the pinned worker's
+`mksquashfs`) — `python-gate` **1145 passed / 32 skipped** and **86 %** on 3.10,
+3.12 and 3.14, `installed-wheel-no-backend` 22 acceptance rows plus **49 hostile
+rows with zero skips**, `report-contract` **129 / 1**, `bounded-resources` 61 / 0
+(2 GiB at 16 MiB windows in **105.92 s**, peak RSS **95,168 KiB**), the reference
+image without a worker, and the recorded performance contract, with the CI wheel
+digest equal to the local build's. On this machine, with the pinned worker and
+**without** the reference corpus, the same tree runs **1161 passed / 16 skipped at
+85 %** (2.10.0: 1130 / 16); the sixteen are the reference-image and container-oracle
+rows, which only the qualified job runs.
 
 Release 2.10.0 adds **CPIO initramfs** archives and the first worker-free
 decode, and moves the report to schema 9. Qualified in GitHub Actions
