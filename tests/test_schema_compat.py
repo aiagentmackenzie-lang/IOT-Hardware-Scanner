@@ -1,6 +1,6 @@
-"""P1/P3 — the schema-8 reader is tested against every report version it claims.
+"""P1/P3 — the schema-9 reader is tested against every report version it claims.
 
-One fixture per report schema 1 to 8, each carrying only the fields that version
+One fixture per report schema 1 to 9, each carrying only the fields that version
 actually recorded, and the *exact* upgrade result asserted:
 
 * the version lands on :data:`SCHEMA_VERSION`;
@@ -14,9 +14,10 @@ actually recorded, and the *exact* upgrade result asserted:
 
 Schema 7 is the only version where a null ``artifact.file_type_source`` or
 tool ``capabilities`` means "this scan did not establish it"; schema 8 is the only
-one where a null ``mcu`` means "no bare-metal image was decoded". For an upgrade
-the same null means "that version never recorded it", and the ``migration`` note
-says so.
+one where a null ``mcu`` means "no bare-metal image was decoded"; schema 9 is the
+only one where a null ``extraction.backend`` means "no backend ran". For an
+upgrade the same null means "that version never recorded it", and the
+``migration`` note says so.
 """
 
 from __future__ import annotations
@@ -319,6 +320,15 @@ def schema_8() -> dict[str, Any]:
     return document
 
 
+def schema_9() -> dict[str, Any]:
+    """v9 records which backend produced the extracted tree."""
+    document = schema_8()
+    document["schema_version"] = 9
+    if isinstance(document.get("extraction"), dict):
+        document["extraction"] = {**document["extraction"], "backend": "docker"}
+    return document
+
+
 def schema_7() -> dict[str, Any]:
     """v7 adds the source of the type label and the host's capabilities."""
     document = schema_6()
@@ -342,6 +352,7 @@ CASES = {
     6: (schema_6, None),
     7: (schema_7, None),
     8: (schema_8, None),
+    9: (schema_9, None),
 }
 
 
@@ -430,7 +441,8 @@ def test_schema_3_keeps_its_evidence_and_gains_v4_absences() -> None:
     assert document["schema_version"] == SCHEMA_VERSION
     assert document["migration"]["from"] == 3
     assert document["image_map"] == source["image_map"]
-    assert document["extraction"] == source["extraction"]
+    # v9 adds the backend as an explicit absence: that version never recorded it.
+    assert document["extraction"] == {**source["extraction"], "backend": None}
     assert document["input_binding"] == source["input_binding"]
     assert document["opkg"] == source["opkg"]
     for section in ("ruleset", "advisory", "component_bases", "boot", "cache"):
@@ -497,8 +509,8 @@ def test_schema_7_does_not_invent_an_address_map() -> None:
     assert "Bare-metal" not in render(document, "markdown")
 
 
-def test_schema_8_round_trips_without_a_migration_record() -> None:
-    source = schema_8()
+def test_schema_9_round_trips_without_a_migration_record() -> None:
+    source = schema_9()
     document = load_document(source)
 
     assert document == source
@@ -512,6 +524,7 @@ def test_schema_8_round_trips_without_a_migration_record() -> None:
     assert document["artifact"]["file_type_source"] == "libmagic"
     assert document["tool"]["capabilities"]["pyelftools"]["version"] == "0.33"
     assert document["mcu"]["format"] == "intel-hex"
+    assert document["extraction"]["backend"] == "docker"
 
     # It renders with the provenance and the address map visible.
     markdown = render(document, "markdown")
@@ -561,6 +574,7 @@ ABSENT_BY_VERSION: dict[int, tuple[str, ...]] = {
     6: (),
     7: (),
     8: (),
+    9: (),
 }
 
 
@@ -582,13 +596,16 @@ def test_no_upgrade_invents_a_capability_record(
 ) -> None:
     """Before schema 7, the two nested facts are null rather than empty."""
     version, document = upgraded
-    if version in (7, 8):
+    if version in (7, 8, 9):
         # Recorded by that version, so not an absence.
         assert document["artifact"]["file_type_source"] == "libmagic"
         assert document["tool"]["capabilities"] is not None
         if version == 7:
             # ... but a v7 document never recorded an address map.
             assert document["mcu"] is None
+        if version in (7, 8):
+            # ... nor which backend produced the extracted tree.
+            assert document["extraction"]["backend"] is None
         return
     assert document["artifact"]["file_type_source"] is None, (
         f"schema {version}: the type source was invented"
@@ -609,19 +626,19 @@ def test_no_upgrade_invents_a_field(upgraded: tuple[int, dict[str, Any]]) -> Non
     never gains the schema-2 ``outcome``/``data_sources`` it never wrote.
     """
     version, document = upgraded
-    schema_eight = set(schema_8())
-    if version == 8:
-        expected = schema_eight
+    schema_nine = set(schema_9())
+    if version == 9:
+        expected = schema_nine
     elif version == 1:
-        expected = (schema_eight - {"outcome", "data_sources"}) | {
+        expected = (schema_nine - {"outcome", "data_sources"}) | {
             "schema_note",
             "legacy_grade",
         }
     else:
-        expected = schema_eight | {"schema_note", "migration"}
+        expected = schema_nine | {"schema_note", "migration"}
     assert set(document) == expected, (
         f"schema {version}: unexpected keys {sorted(set(document) - expected)};"
         f" missing {sorted(expected - set(document))}"
     )
-    if version in (2, 3, 4, 5, 6, 7):
+    if version in (2, 3, 4, 5, 6, 7, 8):
         assert document["migration"]["to"] == SCHEMA_VERSION

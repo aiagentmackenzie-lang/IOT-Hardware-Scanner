@@ -12,7 +12,23 @@ talk to devices, and does not reach the network unless asked.
 
 ---
 
-## Status — version 2.9.0
+## Status — version 2.10.0
+
+Version 2.10.0 decodes **CPIO initramfs archives** (slice 3A, part 3) — in-process,
+because an initramfs is a sequence of 110-byte headers, not a filesystem image that
+needs a kernel-side tool. `newc`, `crc` and `odc` are each read by their own layout: the
+hex fields and 4-byte padding of `newc`, the octal fields and **no padding at all** of
+`odc`, and — for `crc` — the checksum that the format calls a CRC and is in fact the sum
+of the data bytes. A header's name and data ranges are validated against the file before
+anything is read, so a truncated archive is a `FAILED` stage with exit 4 rather than a
+tree with holes. A name is data that becomes a path: absolute paths and `..` components
+refuse the archive before a byte is written. **A hard link is one file with several
+names** — the zero-length member of the group is never materialised as an empty file, so
+`/etc/shadow` behind a link still yields the finding its bytes support. Symlinks, device
+nodes, FIFOs and sockets are recorded with their archive mode and never created.
+The extraction section of the report now names the **backend** that produced the tree
+(schema 9), because "state: ok, no worker" and "a worker whose provenance was lost" used
+to look the same. Record: [docs/3A-CPIO.md](docs/3A-CPIO.md).
 
 Version 2.9.0 delivers **partitioned disk images** (slice 3A, part 2). A flash
 dump or SD-card image is no longer an opaque blob: the MBT/GPT table is decoded,
@@ -137,8 +153,9 @@ to a passing case.
 | Flattened device trees and U-Boot FIT (`firmware-boot`) | ✅ bounded parse; configuration, payload integrity, signature presence/verification |
 | Bare-metal address spaces (`firmware-mcu`) | ✅ Intel HEX, S-record and UF2 decoded to one sparse map; one payload digest across encodings; gaps unobserved; conflicts named |
 | Partitioned disk images (MBR, extended MBR, GPT) | ✅ table CRC-verified and bounds-checked; every partition mapped and decoded by its own magic; two roots in one image both inventoried |
+| CPIO initramfs (`newc`, `crc`, `odc`) | ✅ decoded **in-process** — no worker, no container runtime; hard links resolved to one inode; a truncated or unsafe archive is exit 4 |
 | Repeated-work cache (`--cache-dir`) | ✅ opt-in, bounded, atomic; measured cold/warm equivalence |
-| RAUC bundles / CPIO / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
+| RAUC bundles / JFFS2 / UBIFS / raw NAND | ❌ later gates, not in this release |
 
 When extraction is unavailable the run still produces a report: it names the missing backend,
 records every stage that could not run, keeps any findings it did obtain, and exits non-zero.
@@ -190,6 +207,11 @@ iot-hardware-scanner scan ./staged-root --input-tree --build-manifest declared.j
 
 # Scan a gzip-wrapped SquashFS image; offline by default
 iot-hardware-scanner scan firmware.img.gz --offline --format json --out report.json
+
+# Scan an initramfs: CPIO newc/crc/odc, bare or gzip-wrapped, decoded in-process
+# (no container runtime, no worker, no network)
+iot-hardware-scanner scan initramfs.cpio --offline --format json --out report.json
+iot-hardware-scanner scan initramfs.cpio.gz --offline --format json --out report.json
 
 # Apply a local advisory snapshot (still offline: the scan never fetches)
 iot-hardware-scanner scan firmware.img.gz --offline \
@@ -332,8 +354,8 @@ document, and neither is a substitute for one.
 
 ```json
 {
-  "schema_version": 8,
-  "tool": {"name": "iot-hardware-scanner", "version": "2.8.0",
+  "schema_version": 9,
+  "tool": {"name": "iot-hardware-scanner", "version": "2.10.0",
            "capabilities": {
              "libmagic": {"available": true, "version": "540", "detail": null},
              "pyelftools": {"available": true, "version": "0.33", "detail": null},
@@ -595,11 +617,17 @@ and corpus digests, with the platform each was built on. The reference image is
 
 ## Known limitations
 
-* **One container path.** gzip-wrapped SquashFS v4 only. Partitioned images, CPIO, JFFS2/UBIFS,
-  MCU address spaces and RAUC bundles are later gates with their own fixtures; each is reported as
-  unsupported rather than guessed at.
+* **Container coverage is still partial.** SquashFS v4 (bare or gzip-wrapped) and CPIO `newc`/`crc`/`odc`
+  are decoded; JFFS2/UBIFS, RAUC bundles and raw NAND captures are later gates with their own
+  fixtures, each reported as unsupported rather than guessed at. A binary CPIO archive is named
+  and refused, never misread as `odc`.
+* **An initramfs is one archive.** A concatenated initramfs (a second archive after the trailer) is
+  recorded and makes the extraction stage `PARTIAL`; only the first archive's tree is inventoried.
+  Archive ownership is recorded from the headers and permission bits are applied, but `uid`/`gid`
+  are not assumed on the host — they are evidence, not an executed `chown`.
 * **A partitioned image is mapped, not compared.** `scan` inventories every partition that holds a
-  SquashFS filesystem; `compare` does not yet diff two disk layouts. Partitions that hold something
+  SquashFS filesystem or a CPIO initramfs; `compare` does not yet diff two disk layouts. Partitions
+  that hold something
   else (a bootloader, a `uboot-env` blob) are recorded as `unrecognised` and are not an error.
 * **A bare-metal image is bytes, not a system.** The `firmware-mcu` profile reports an address
   map, one payload digest and a single rule-set sweep over the decoded bytes; each match is a

@@ -43,6 +43,11 @@ SCAN_CASES = [
     Case("fdt-deep-nesting", hostile.fdt_deep_nesting(), "boot_analysis", "FAILED", 4),
     Case("fit-out-of-bounds", hostile.fit_out_of_bounds(), "boot_analysis", "PARTIAL", 4),
     Case("fit-truncated", hostile.fit_truncated(), "boot_analysis", "FAILED", 4),
+    # Slice 3A part 3: a CPIO archive is header-validated before a byte is read.
+    Case("cpio-data-size-lie", hostile.cpio_data_size_lie(), "extraction", "FAILED", 4),
+    Case("cpio-traversal-name", hostile.cpio_traversal_name(), "extraction", "FAILED", 4),
+    Case("cpio-no-trailer", hostile.cpio_no_trailer(), "extraction", "FAILED", 4),
+    Case("cpio-binary-magic", hostile.cpio_binary_magic(), "extraction", "FAILED", 4),
 ]
 
 

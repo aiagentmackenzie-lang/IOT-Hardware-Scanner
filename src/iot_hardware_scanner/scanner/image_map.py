@@ -43,6 +43,16 @@ from iot_hardware_scanner.models import (
     SquashfsSuperblock,
 )
 from iot_hardware_scanner.scanner.bounded_reader import BoundedReader, open_bounded
+from iot_hardware_scanner.scanner.cpio import (
+    CPIO_DECODER_NAME,
+    CPIO_DECODER_VERSION,
+    CpioArchive,
+    CpioExtraction,
+    decode_cpio,
+    detect_cpio_format,
+    extract_cpio,
+    resolve_hardlinks,
+)
 from iot_hardware_scanner.scanner.partitions import (
     decode_partition_table,
     looks_like_partition_table,
@@ -102,15 +112,18 @@ class ImageMapBuilder:
     def start(self, reader: BoundedReader, digest: str, name: str) -> ImageMap:
         """Create the map with the inspected artifact as its root node.
 
-        Three containers are recognised here, each by its own bytes: a gzip
-        wrapper, a disk with an MBR/GPT table, and everything else (which the
-        caller then tries as a bare SquashFS image).
+        Four containers are recognised here, each by its own bytes: a gzip
+        wrapper, a disk with an MBR/GPT table, a CPIO archive (an initramfs),
+        and everything else (which the caller then tries as a bare SquashFS
+        image).
         """
         header = reader.read_head(SECTOR_SIZE_BYTES)
         if header.startswith(GZIP_MAGIC):
             fmt = "gzip"
         elif looks_like_partition_table(header):
             fmt = "disk"
+        elif detect_cpio_format(header):
+            fmt = "cpio"
         else:
             fmt = "file"
         root = ArtifactNode(
@@ -129,6 +142,124 @@ class ImageMapBuilder:
         )
         self.map = ImageMap(root_artifact_id=root.artifact_id, nodes=[root])
         return self.map
+
+    # ──────────────────────────────────────
+    # CPIO archives (slice 3A, part 3)
+    # ──────────────────────────────────────
+
+    def add_cpio_members(
+        self,
+        reader: BoundedReader,
+        node: ArtifactNode,
+        *,
+        max_members: int,
+        max_data_bytes: int,
+        offset: int = 0,
+    ) -> CpioArchive:
+        """Decode an archive's headers and add one child node per record.
+
+        Every declared range is validated against the file before a node
+        exists, so a record that points past the end of a truncated archive
+        raises here rather than producing a member that reads as empty. A
+        member's digest is filled in when its bytes are first read, exactly as
+        a partition's is, because the map must not hash what the extraction has
+        not yet verified.
+
+        The decoded archive is returned so the extraction walks the same
+        records: two decoders that can disagree is a defect waiting to happen.
+        """
+        if self.map is None:  # pragma: no cover - builder is always started
+            raise ImageMapError("image map was not started")
+        archive = decode_cpio(
+            reader,
+            max_members=max_members,
+            max_data_bytes=max_data_bytes,
+            offset=offset,
+        )
+        node.format = "cpio"
+        node.decoder = CPIO_DECODER_NAME
+        node.decoder_version = CPIO_DECODER_VERSION
+        node.extent_bytes = archive.archive_length
+        node.length = archive.archive_length
+        node.details.update(archive.as_dict())
+        resolved, _notes = resolve_hardlinks(archive)
+        for member in archive.members:
+            kind = member.kind
+            # A hard link declares no bytes of its own; its content is the
+            # carrier's, so its node points at the carrier's range and says which
+            # name carried them. ``declared_data_length`` keeps the record as
+            # written, because "0" is what the archive says and "25" is what the
+            # name resolves to.
+            carrier = resolved.get(member.index)
+            offset = carrier.data_offset if carrier is not None else member.data_offset
+            length = carrier.data_length if carrier is not None else member.data_length
+            details: dict[str, object] = {
+                "member_index": member.index,
+                "kind": "hardlink" if carrier is not None else kind,
+                "mode": f"{member.mode:06o}",
+                "uid": member.uid,
+                "gid": member.gid,
+                "nlink": member.nlink,
+                "mtime": member.mtime,
+                "header_offset": member.header_offset,
+            }
+            if carrier is not None:
+                details["declared_data_length"] = member.data_length
+                details["hardlink_of"] = carrier.name
+            self.map.add(
+                ArtifactNode(
+                    artifact_id=f"m{len(self.map.nodes)}",
+                    parent_id=node.artifact_id,
+                    # Filled when the extraction reads the bytes, so the map
+                    # never claims a digest it did not compute.
+                    digest_sha256="",
+                    format="dir" if kind == "dir" else "file",
+                    coordinate_system="container-bytes",
+                    offset=offset,
+                    length=length,
+                    decoder=CPIO_DECODER_NAME,
+                    decoder_version=CPIO_DECODER_VERSION,
+                    depth=node.depth + 1,
+                    locator=member.name,
+                    details=details,
+                )
+            )
+        logger.info(
+            "cpio %s archive: %d member(s), %d bytes of record data",
+            archive.format,
+            len(archive.members),
+            archive.total_data_bytes,
+        )
+        return archive
+
+    def extract_cpio_members(
+        self,
+        reader: BoundedReader,
+        node: ArtifactNode,
+        archive: CpioArchive,
+        destination: Path,
+        *,
+        max_data_bytes: int,
+    ) -> CpioExtraction:
+        """Materialise an archive in-process and stamp each node with its digest.
+
+        No worker is involved: an initramfs is a sequence of headers, not a
+        filesystem image that needs a kernel-side tool. That is why a CPIO scan
+        can be COMPLETE on a host with no container runtime.
+        """
+        if self.map is None:  # pragma: no cover - builder is always started
+            raise ImageMapError("image map was not started")
+        extraction = extract_cpio(
+            reader,
+            archive,
+            destination,
+            max_data_bytes=max_data_bytes,
+        )
+        for child in self.map.children(node.artifact_id):
+            index = child.details.get("member_index")
+            if isinstance(index, int):
+                child.digest_sha256 = extraction.digests.get(index, "")
+        return extraction
 
     # ──────────────────────────────────────────
     # Partition tables (slice 3A, part 2)
@@ -335,8 +466,23 @@ class ImageMapBuilder:
         )
 
         # The declared format is settled by the child's own header, not by the
-        # wrapper's name.
-        superblock = self.parse_squashfs(open_bounded(destination, size=decoded))
+        # wrapper's name. An initramfs (`initramfs.cpio.gz`) is the common second
+        # case: a gzip wrapper around a CPIO archive, not around a filesystem.
+        decoded_reader = open_bounded(destination, size=decoded)
+        child_head = decoded_reader.read_head(6)
+        if detect_cpio_format(child_head):
+            child.format = "cpio"
+            child.decoder = CPIO_DECODER_NAME
+            child.decoder_version = CPIO_DECODER_VERSION
+            child.details["cpio_format"] = detect_cpio_format(child_head)
+            logger.info(
+                "gzip wrapper: %d bytes on the wire -> %d decoded bytes of CPIO",
+                reader.size,
+                decoded,
+            )
+            return destination, child
+
+        superblock = self.parse_squashfs(decoded_reader)
         child.format = "squashfs"
         child.details["superblock"] = superblock.as_dict()
         child.extent_bytes = superblock.bytes_used

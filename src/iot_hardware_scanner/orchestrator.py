@@ -1015,8 +1015,14 @@ class Orchestrator:
                 # and each partition is decoded by its own magic bytes.
                 return self._partitioned_extraction(context, builder, reader, scratch)
 
+            if image_map.nodes[0].format == "cpio":
+                # An initramfs is a filesystem that was never mounted, and its
+                # records are headers rather than a compressed image: it is
+                # decoded in-process and needs no worker.
+                return self._cpio_extraction(context, builder, reader, image_map.nodes[0], scratch)
+
             if image_map.nodes[0].format == "gzip":
-                decoded = scratch / "decoded" / "root.squashfs"
+                decoded = scratch / "decoded" / "root.container"
                 _path, child = builder.decompress_gzip(
                     reader,
                     decoded,
@@ -1026,6 +1032,16 @@ class Orchestrator:
                     f"  [green]✓[/green] gzip wrapper: {reader.size:,} bytes on the wire -> "
                     f"{child.expanded_bytes:,} decoded bytes"
                 )
+                if child.format == "cpio":
+                    from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+
+                    return self._cpio_extraction(
+                        context,
+                        builder,
+                        open_bounded(decoded, size=child.length),
+                        child,
+                        scratch,
+                    )
                 console.print(
                     f"  [green]✓[/green] {child.format} v{child.details['superblock']['version']} "
                     f"declares {child.extent_bytes:,} bytes used "
@@ -1189,6 +1205,123 @@ class Orchestrator:
         context.image_rootfs_artifact_id = parent_id
         return context
 
+    def _cpio_extraction(
+        self,
+        context: ScanContext,
+        builder: Any,
+        reader: Any,
+        node: ArtifactNode,
+        scratch: Path,
+    ) -> ScanContext:
+        """Phase 2 for a CPIO initramfs: in-process, no worker (slice 3A, part 3).
+
+        The archive is decoded and materialised by this process. No container
+        runtime, no kernel-side helper and no network: an initramfs is a
+        sequence of headers, and every one of them is validated against the
+        input before its bytes are read. The manifest records the archive's own
+        mode/ownership, so a permission finding rests on the artifact rather
+        than on this host's filesystem.
+        """
+        from iot_hardware_scanner.scanner.cpio import CpioError
+        from iot_hardware_scanner.scanner.image_map import ImageMapError
+
+        extraction_dir = scratch / "cpio" / node.artifact_id
+        try:
+            archive, extraction = self._decode_cpio(builder, reader, node, extraction_dir)
+        except (CpioError, ImageMapError) as exc:
+            record_stage(
+                context,
+                StageId.EXTRACTION,
+                StageStatus.FAILED,
+                reason=f"the CPIO archive is not decodable: {exc}",
+                omissions=["filesystem never enumerated"],
+            )
+            record_stage(
+                context,
+                StageId.ROOT_DISCOVERY,
+                StageStatus.UNAVAILABLE,
+                reason="the archive was rejected before a filesystem was reached",
+            )
+            console.print(f"  [red]✗[/red] {exc}")
+            return context
+
+        result = ExtractionResult(
+            success=True,
+            extraction_dir=extraction_dir,
+            root_filesystems=[extraction.rootfs],
+            file_count=extraction.files,
+            total_size=extraction.bytes_written,
+            backend="in-process",
+            state=EXTRACTION_OK,
+            omissions=list(extraction.omissions),
+        )
+        context.extraction_result = result
+        context.extraction_provenance = None
+        context.extracted_rootfs = extraction.rootfs
+        context.image_rootfs_artifact_id = node.artifact_id
+        context.root_sources[str(extraction.rootfs)] = {
+            "metadata": extraction.metadata,
+            "metadata_source": "image",
+            "artifact_id": node.artifact_id,
+        }
+        record_stage(
+            context,
+            StageId.EXTRACTION,
+            # A concatenated initramfs means records this release did not read,
+            # so the stage is PARTIAL rather than clean.
+            StageStatus.PARTIAL if archive.incomplete else StageStatus.COMPLETE,
+            reason=(
+                f"in-process {archive.format} decoder: {len(archive.members)} record(s), "
+                f"{archive.total_data_bytes:,} data bytes, no worker"
+            ),
+            inspected=extraction.files,
+            eligible=extraction.files,
+            omissions=list(extraction.omissions),
+        )
+        record_stage(
+            context,
+            StageId.ROOT_DISCOVERY,
+            StageStatus.COMPLETE,
+            reason="1 root filesystem decoded from the archive",
+            inspected=1,
+            eligible=1,
+        )
+        console.print(
+            f"  [green]✓[/green] initramfs extracted in-process: {extraction.files:,} file(s), "
+            f"{extraction.directories:,} dir(s), {extraction.bytes_written:,} bytes "
+            f"({archive.format})"
+        )
+        return context
+
+    def _decode_cpio(
+        self,
+        builder: Any,
+        reader: Any,
+        node: ArtifactNode,
+        extraction_dir: Path,
+    ) -> tuple[Any, Any]:
+        """Decode and materialise one archive, with the budgets this config sets.
+
+        Kept in one place so the top-level path and a partition's archive are
+        decoded by the same code with the same limits; two call sites that
+        could drift is a defect waiting to happen.
+        """
+        budget = self.config.max_decoded_bytes_mb * 1024 * 1024
+        archive = builder.add_cpio_members(
+            reader,
+            node,
+            max_members=self.config.max_extracted_entries,
+            max_data_bytes=budget,
+        )
+        extraction = builder.extract_cpio_members(
+            reader,
+            node,
+            archive,
+            extraction_dir,
+            max_data_bytes=budget,
+        )
+        return archive, extraction
+
     def _partitioned_extraction(
         self,
         context: ScanContext,
@@ -1204,6 +1337,7 @@ class Orchestrator:
         does not fail the others: a disk image legitimately carries a bootloader,
         a `uboot-env` blob and two roots side by side.
         """
+        from iot_hardware_scanner.scanner.cpio import CpioError
         from iot_hardware_scanner.scanner.extraction_worker import (
             ExtractionError,
             SquashfsWorker,
@@ -1275,7 +1409,7 @@ class Orchestrator:
                 return context
 
             try:
-                squashfs_path, child = self._decode_partition(sliced, node, builder)
+                squashfs_path, child, content = self._decode_partition(sliced, node, builder)
             except ImageMapError as exc:
                 node.details["content"] = "undecodable"
                 node.details["content_note"] = str(exc)
@@ -1289,7 +1423,65 @@ class Orchestrator:
                 omissions.append(f"{node.artifact_id}: no recognised filesystem in its bytes")
                 console.print(
                     f"  [yellow]![/yellow] {node.artifact_id} ({node.details.get('type_name')}): "
-                    "no SquashFS magic in its bytes"
+                    "no filesystem magic in its bytes"
+                )
+                continue
+
+            if content == "cpio":
+                # An initramfs partition is decoded in-process, so it does not
+                # need the worker that the other partitions in this image do.
+                archive_node = child
+                if archive_node is None:
+                    archive_node = image_map.add(
+                        ArtifactNode(
+                            artifact_id=f"{node.artifact_id}c",
+                            parent_id=node.artifact_id,
+                            digest_sha256=node.digest_sha256,
+                            format="cpio",
+                            coordinate_system="container-bytes",
+                            offset=0,
+                            length=node.length,
+                            decoder="ihs-cpio",
+                            decoder_version="1",
+                            depth=node.depth + 1,
+                            locator=f"{node.locator}:cpio",
+                        )
+                    )
+                try:
+                    from iot_hardware_scanner.scanner.bounded_reader import (
+                        open_bounded as _open,
+                    )
+
+                    archive, extraction = self._decode_cpio(
+                        builder,
+                        _open(squashfs_path),
+                        archive_node,
+                        scratch / "extract" / node.artifact_id,
+                    )
+                except CpioError as exc:
+                    node.details["content"] = "cpio"
+                    node.details["extraction_state"] = "FAILED"
+                    omissions.append(f"{node.artifact_id}: {exc}")
+                    console.print(f"  [yellow]![/yellow] {node.artifact_id}: {exc}")
+                    continue
+                node.details["content"] = "cpio"
+                node.details["extraction_state"] = EXTRACTION_OK
+                node.details["file_count"] = extraction.files
+                node.details["cpio_format"] = archive.format
+                filesystem_partitions += 1
+                roots.extend([extraction.rootfs])
+                collected.file_count += extraction.files
+                collected.total_size += extraction.bytes_written
+                collected.omissions.extend(extraction.omissions)
+                collected.backend = "in-process"
+                context.root_sources[str(extraction.rootfs)] = {
+                    "metadata": extraction.metadata,
+                    "metadata_source": "image",
+                    "artifact_id": archive_node.artifact_id,
+                }
+                console.print(
+                    f"  [green]✓[/green] {node.artifact_id} ({node.details.get('label')}): "
+                    f"CPIO initramfs, {extraction.files:,} file(s), decoded in-process"
                 )
                 continue
 
@@ -1412,25 +1604,33 @@ class Orchestrator:
 
     def _decode_partition(
         self, sliced: Path, node: ArtifactNode, builder: Any
-    ) -> tuple[Path | None, ArtifactNode | None]:
+    ) -> tuple[Path | None, ArtifactNode | None, str]:
         """Decide what one partition holds, from its first bytes.
 
-        A partition is either a bare SquashFS image, a gzip-wrapped one, or
-        neither. "Neither" is a fact about this partition, not a failure of the
-        scan, so it returns ``(None, None)`` and the caller records it.
+        A partition is a bare SquashFS image, a gzip-wrapped one, a CPIO
+        initramfs, or none of those. "None of those" is a fact about this
+        partition, not a failure of the scan, so it returns ``(None, None,
+        "none")`` and the caller records it. The third value names the decoder
+        the caller must use, so the scan never assumes one format for a
+        partition it only just identified.
         """
+        from iot_hardware_scanner.scanner.cpio import detect_cpio_format
         from iot_hardware_scanner.scanner.image_map import (
             GZIP_MAGIC,
             ImageMapError,
         )
 
         reader = open_bounded(sliced)
-        head = reader.read_head(4)
+        head = reader.read_head(6)
+        if detect_cpio_format(head):
+            # A partition can hold an initramfs, and an initramfs needs no
+            # worker: the caller decodes it in-process.
+            return sliced, None, "cpio"
         if head.startswith(GZIP_MAGIC):
             if builder.map is None:  # pragma: no cover - builder is always started
                 raise ImageMapError("image map was not started")
             builder.map.root_artifact_id = node.artifact_id
-            decoded = sliced.parent / f"{sliced.stem}.squashfs"
+            decoded = sliced.parent / f"{sliced.stem}.container"
             try:
                 _path, child = builder.decompress_gzip(
                     reader,
@@ -1442,7 +1642,7 @@ class Orchestrator:
                 builder.map.root_artifact_id = "a0"
             child.parent_id = node.artifact_id
             node.details["content"] = "gzip"
-            return decoded, child
+            return decoded, child, child.format
         if head.startswith(b"hsqs"):
             superblock = builder.parse_squashfs(reader)
             if superblock.bytes_used > node.length:
@@ -1452,8 +1652,8 @@ class Orchestrator:
                 )
             node.details["superblock"] = superblock.as_dict()
             node.extent_bytes = superblock.bytes_used
-            return sliced, None
-        return None, None
+            return sliced, None, "squashfs"
+        return None, None, "none"
 
     # ──────────────────────────────────────────
     # Phase 2b: enumeration

@@ -68,11 +68,11 @@ from iot_hardware_scanner.models import (
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 #: Schema versions this reader upgrades. A v2 document keeps every recorded
 #: fact and gains explicit "not recorded" markers for the v3 sections.
-READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8})
+READABLE_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7, 8, 9})
 
 #: Component bases, in report order. Every count is present even when zero.
 COMPONENT_BASES = ("nist-mapped", "opkg-package-name", "banner")
@@ -555,6 +555,10 @@ def _extraction_section(context: ScanContext) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "state": result.state if result is not None else None,
         "success": result.success if result is not None else None,
+        # Which decoder produced the tree. A worker's name is not enough: an
+        # initramfs is decoded in-process, and a document that records only a
+        # state and a helper version cannot tell the two apart after the fact.
+        "backend": result.backend if result is not None else None,
         "omissions": list(result.omissions) if result is not None else [],
         "errors": list(result.extraction_errors) if result is not None else [],
     }
@@ -791,7 +795,9 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
         _validate_document_shape(document)
         return document
 
-    if raw_version == 7:
+    if raw_version == 8:
+        document = _upgrade_v8(data)
+    elif raw_version == 7:
         document = _upgrade_v7(data)
     elif raw_version == 6:
         document = _upgrade_v6(data)
@@ -812,8 +818,21 @@ def load_document(data: dict[str, Any]) -> dict[str, Any]:
     document.setdefault("cache", None)
     document.setdefault("mcu", None)
     _mark_unrecorded_capabilities(document)
+    _mark_unrecorded_extraction_backend(document)
     _validate_document_shape(document)
     return document
+
+
+def _mark_unrecorded_extraction_backend(document: dict[str, Any]) -> None:
+    """Give an upgraded extraction section the schema-9 backend key, as ``None``.
+
+    A document from before schema 9 recorded the extraction's state but not the
+    decoder that produced the tree. ``None`` says "not recorded"; it must not be
+    read as "no backend ran", which is what a scan of an initramfs would say.
+    """
+    extraction = document.get("extraction")
+    if isinstance(extraction, dict):
+        extraction.setdefault("backend", None)
 
 
 def _mark_unrecorded_capabilities(document: dict[str, Any]) -> None:
@@ -833,6 +852,37 @@ def _mark_unrecorded_capabilities(document: dict[str, Any]) -> None:
 
 #: Sections a schema-5 document never recorded.
 _V5_SECTIONS = ("component_bases",)
+
+
+def _upgrade_v8(data: dict[str, Any]) -> dict[str, Any]:
+    """Lift a schema-8 document to schema 9 without inventing an extractor.
+
+    A v8 document recorded the extraction's state and, when a worker ran, the
+    worker's provenance. It never recorded *which backend* produced the tree, so
+    an in-process decode and a lost worker looked the same. ``backend`` is
+    ``None`` here: not recorded, not "none ran".
+    """
+    document = dict(data)
+    document["schema_version"] = SCHEMA_VERSION
+    document["schema_note"] = (
+        "upgraded from schema 8; the extraction backend was not recorded by that version"
+    )
+    extraction = document.get("extraction")
+    if isinstance(extraction, dict):
+        extraction.setdefault("backend", None)
+    document.setdefault(
+        "migration",
+        {
+            "from": 8,
+            "to": SCHEMA_VERSION,
+            "note": (
+                "This document was produced before the report named the extraction "
+                "backend. The field is absent, which means the producer did not record "
+                "it -- not that no backend ran."
+            ),
+        },
+    )
+    return document
 
 
 def _upgrade_v7(data: dict[str, Any]) -> dict[str, Any]:
@@ -1415,9 +1465,15 @@ def render_terminal(document: dict[str, Any]) -> str:
 
     extraction = document.get("extraction")
     if extraction:
+        backend = extraction.get("backend")
+        worker = extraction.get("worker")
+        produced_by = (
+            f"{worker} {extraction.get('isolation') or ''}".strip()
+            if worker
+            else (f"{backend} decoder" if backend else "not recorded")
+        )
         lines.append(
-            f"Extraction: {extraction.get('state')} via {extraction.get('worker')} "
-            f"({extraction.get('isolation')})"
+            f"Extraction: {extraction.get('state')} via {produced_by}"
             + (
                 f", helper {extraction.get('helper_version')}"
                 if extraction.get("helper_version")

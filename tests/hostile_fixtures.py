@@ -104,6 +104,58 @@ def squashfs_magic_only() -> bytes:
 
 
 # ──────────────────────────────────────────────
+# CPIO archives (slice 3A, part 3)
+# ──────────────────────────────────────────────
+
+
+def _newc_record(name: str, payload: bytes, *, filesize: int | None = None) -> bytes:
+    """One ``newc`` record, with an optional lie about its data length."""
+    declared = len(payload) if filesize is None else filesize
+    body = name.encode() + b"\x00"
+    header = b"070701" + b"".join(
+        f"{value:08x}".encode()
+        for value in (
+            1,  # ino
+            0o100644,  # mode
+            0,  # uid
+            0,  # gid
+            1,  # nlink
+            1_700_000_000,  # mtime
+            declared,  # filesize
+            1,  # devmajor
+            2,  # devminor
+            0,  # rdevmajor
+            0,  # rdevminor
+            len(body),  # namesize
+            0,  # check
+        )
+    )
+    padded = header + body
+    padded += b"\x00" * ((-len(padded)) % 4)
+    return padded + payload + b"\x00" * ((-len(payload)) % 4)
+
+
+def cpio_data_size_lie() -> bytes:
+    """A record that declares 64 KiB of data and carries twelve bytes."""
+    return _newc_record("etc/shadow", b"root::0:0:", filesize=0x10000)
+
+
+def cpio_traversal_name() -> bytes:
+    """A member whose name would write outside the extraction root."""
+    return _newc_record("../../etc/shadow", b"root::0:0:")
+
+
+def cpio_no_trailer() -> bytes:
+    """A well-formed record set with no ``TRAILER!!!``: truncated, not empty."""
+    return _newc_record("etc/passwd", b"root:x:0:0:root:/root:/bin/sh\n")
+
+
+def cpio_binary_magic() -> bytes:
+    """The old binary format, whose magic is decimal 070707 stored as a word."""
+    return b"\xc7\x71" + b"\x00" * 24
+
+
+# ──────────────────────────────────────────────
 # Flattened device tree (FDT)
 # ──────────────────────────────────────────────
 

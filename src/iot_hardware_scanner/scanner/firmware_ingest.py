@@ -34,6 +34,7 @@ from iot_hardware_scanner.models import (
     TreeManifestEntry,
 )
 from iot_hardware_scanner.scanner.bounded_reader import open_bounded
+from iot_hardware_scanner.scanner.cpio import detect_cpio_format
 from iot_hardware_scanner.scanner.fit_dtb import looks_like_fdt
 from iot_hardware_scanner.scanner.mcu_image import identify_mcu_format
 
@@ -516,6 +517,15 @@ class FirmwareIngest:
             # without the encoding is not actionable.
             return (
                 f"Bare-metal firmware ({mcu_format} records)",
+                FILE_TYPE_SOURCE_MAGIC_BYTES,
+            )
+        cpio_format = detect_cpio_format(head)
+        if cpio_format:
+            # An initramfs is the sixth byte pattern this scanner reads rather
+            # than guesses. Labelling it from a ``.cpio`` suffix would claim less
+            # than the file's own header proves.
+            return (
+                f"CPIO archive (initramfs, {cpio_format})",
                 FILE_TYPE_SOURCE_MAGIC_BYTES,
             )
 

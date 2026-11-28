@@ -28,6 +28,7 @@ capability unqualified; the ``linux-extractor`` CI job is the qualified gate.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import shutil
@@ -40,7 +41,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cpio_fixtures
 import partition_fixtures
+from cpio_fixtures import ODC, build, initramfs
 from elf_fixtures import ElfSpec, write_fixture
 from harness import Runner, make_tree
 
@@ -1458,3 +1461,181 @@ class TestPartitionedImage:
         ), empty[0]["locations"]
         assert document["assessment"]["completion"] == "COMPLETE"
         assert result.returncode == 1
+
+
+# ──────────────────────────────────────────────
+# 3A part 3 — an initramfs is a filesystem nobody mounted
+# ──────────────────────────────────────────────
+
+
+class TestCpioInitramfs:
+    """A CPIO initramfs, decoded in-process, through the installed CLI.
+
+    None of these rows need a container runtime, and that is the claim: an
+    initramfs is a sequence of headers, so the scanner can enumerate it on any
+    host. A row that skipped here would leave the slice unqualified, which is
+    why no case below is gated on ``runtime``.
+    """
+
+    def test_an_initramfs_is_decoded_in_process_and_enumerated(
+        self, workdir: Path, runner: Runner
+    ) -> None:
+        image = workdir / "initramfs.cpio"
+        image.write_bytes(initramfs(shadow=b"root::19000:0:99999:7:::\n"))
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "initramfs.json"],
+            cwd=workdir,
+        )
+        document = json.loads((workdir / "initramfs.json").read_text())
+
+        # 1. The label came from the bytes, not from the suffix.
+        assert document["artifact"]["file_type_source"] == "magic-bytes"
+        assert "CPIO" in document["artifact"]["file_type"]
+
+        # 2. The container is mapped, and every member is a byte range in it.
+        root = document["image_map"]["nodes"][0]
+        assert root["format"] == "cpio"
+        assert root["details"]["cpio_format"] == "newc"
+        assert root["extent_bytes"] == image.stat().st_size
+        members = document["image_map"]["nodes"][1:]
+        assert {node["locator"] for node in members} >= {"etc/passwd", "etc/shadow", "bin/sh"}
+        shadow_node = next(node for node in members if node["locator"] == "etc/shadow")
+        assert shadow_node["coordinate_system"] == "container-bytes"
+        assert (
+            shadow_node["digest_sha256"]
+            == hashlib.sha256(b"root::19000:0:99999:7:::\n").hexdigest()
+        )
+
+        # 3. No worker ran, and the document says which decoder did.
+        extraction = document["extraction"]
+        assert extraction["state"] == "OK"
+        assert extraction["backend"] == "in-process"
+        assert "worker" not in extraction
+        stage = next(s for s in document["stages"] if s["stage"] == "extraction")
+        assert "in-process newc decoder" in stage["reason"]
+        assert "no worker" in stage["reason"]
+
+        # 4. The filesystem was enumerated with archive-derived metadata, and the
+        #    empty root password is a critical finding, not a 0-byte file.
+        roots = document["inventory"]["roots"]
+        assert len(roots) == 1
+        assert roots[0]["metadata_source"] == "image"
+        # Four regular names on disk, but ``bin/sh`` and ``bin/busybox.sh`` are one
+        # inode: the inventory reconciles them, which is what "a hard link is one
+        # file, however many names point at it" means.
+        assert roots[0]["files"] == 3
+        critical = [f for f in document["findings"] if f["critical_qualified"]]
+        assert [f["rule_id"] for f in critical] == ["credential.unix.empty_password"]
+        assert document["assessment"]["completion"] == "COMPLETE"
+        assert result.returncode == 1
+
+    def test_a_gzip_wrapped_initramfs_is_the_same_filesystem(
+        self, workdir: Path, runner: Runner
+    ) -> None:
+        plain = initramfs(shadow=b"root::19000:0:99999:7:::\n")
+        image = workdir / "initramfs.cpio.gz"
+        image.write_bytes(gzip.compress(plain))
+
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "wrapped.json"],
+            cwd=workdir,
+        )
+        document = json.loads((workdir / "wrapped.json").read_text())
+
+        nodes = document["image_map"]["nodes"]
+        assert [node["format"] for node in nodes[:2]] == ["gzip", "cpio"]
+        assert nodes[1]["parent_id"] == nodes[0]["artifact_id"]
+        assert nodes[1]["details"]["cpio_format"] == "newc"
+        assert document["extraction"]["backend"] == "in-process"
+        assert [f["rule_id"] for f in document["findings"] if f["critical_qualified"]] == [
+            "credential.unix.empty_password"
+        ]
+        assert result.returncode == 1
+
+    def test_the_odc_layout_is_not_read_as_newc(self, workdir: Path, runner: Runner) -> None:
+        """Octal fields and no padding: a newc reader would produce garbage."""
+        image = workdir / "initramfs.odc"
+        image.write_bytes(initramfs(archive_format=ODC, shadow=b"root::19000:0:99999:7:::\n"))
+
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "odc.json"],
+            cwd=workdir,
+        )
+        document = json.loads((workdir / "odc.json").read_text())
+
+        root = document["image_map"]["nodes"][0]
+        assert root["details"]["cpio_format"] == "odc"
+        assert {node["locator"] for node in document["image_map"]["nodes"][1:]} >= {
+            "etc/passwd",
+            "etc/shadow",
+        }
+        assert [f["rule_id"] for f in document["findings"] if f["critical_qualified"]] == [
+            "credential.unix.empty_password"
+        ]
+        assert result.returncode == 1
+
+    def test_a_zero_length_hardlink_member_does_not_weaken_the_finding(
+        self, workdir: Path, runner: Runner
+    ) -> None:
+        """The bytes live in one member of the group; every name carries them.
+
+        A reader that takes ``filesize == 0`` literally reports a 0-byte
+        ``/etc/shadow`` and misses the empty password. This is the row that
+        proves the group is resolved.
+        """
+        image = workdir / "linked.cpio"
+        image.write_bytes(
+            build(
+                [
+                    cpio_fixtures.Member(name="etc", mode=cpio_fixtures.S_IFDIR | 0o755),
+                    cpio_fixtures.Member(
+                        name="etc/passwd", data=b"root:x:0:0:root:/root:/bin/sh\n"
+                    ),
+                    # The name a scan looks for is the *empty* member of the group.
+                    *cpio_fixtures.hardlink_pair(
+                        "var/lib/shadow",
+                        "etc/shadow",
+                        b"root::19000:0:99999:7:::\n",
+                        ino=77,
+                    ),
+                ]
+            )
+        )
+
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "linked.json"],
+            cwd=workdir,
+        )
+        document = json.loads((workdir / "linked.json").read_text())
+
+        nodes = {node["locator"]: node for node in document["image_map"]["nodes"][1:]}
+        assert nodes["etc/shadow"]["digest_sha256"] == nodes["var/lib/shadow"]["digest_sha256"]
+        assert nodes["etc/shadow"]["length"] == len(b"root::19000:0:99999:7:::\n")
+
+        finding = next(
+            f for f in document["findings"] if f["rule_id"] == "credential.unix.empty_password"
+        )
+        assert any("etc/shadow" in location for location in finding["locations"]), finding[
+            "locations"
+        ]
+        assert result.returncode == 1
+
+    def test_a_truncated_archive_is_exit_4_and_no_traceback(
+        self, workdir: Path, runner: Runner
+    ) -> None:
+        image = workdir / "truncated.cpio"
+        payload = initramfs()
+        image.write_bytes(payload[: len(payload) // 2])
+
+        result = runner(
+            ["scan", str(image), "--offline", "--format", "json", "--out", "truncated.json"],
+            cwd=workdir,
+        )
+        document = json.loads((workdir / "truncated.json").read_text())
+
+        assert result.returncode == 4
+        assert "Traceback" not in result.stderr
+        stage = next(s for s in document["stages"] if s["stage"] == "extraction")
+        assert stage["status"] == "FAILED"
+        assert "CPIO archive is not decodable" in stage["reason"]
+        assert document["assessment"]["completion"] != "COMPLETE"
