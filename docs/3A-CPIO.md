@@ -113,7 +113,7 @@ schema 9, profile 6.0.
 | Lint / format | `ruff check src/ tests/ benchmarks/`, `ruff format --check` | clean |
 | Types | `mypy src/` | clean, 43 source files |
 | Tests | `pytest` (local, macOS arm64, CPython 3.12.14, colima worker, no reference corpus) | **1125 passed, 0 failed, 16 skipped**, 86 % — the sixteen are the reference-image and container-oracle rows |
-| CPIO unit | `pytest tests/test_cpio.py` | **39 rows** — layout, padding, `odc` widths, hard links, symlinks, specials, `crc`, truncation, unsafe names, budgets, map coordinates |
+| CPIO unit | `pytest tests/test_cpio.py` | **40 rows** — layout, padding, `odc` widths, hard links, symlinks, specials, `crc`, truncation, unsafe names, budgets, map coordinates |
 | CPIO end to end | `pytest tests/test_installed_image_cli.py::TestCpioInitramfs` | **5 rows** through the installed CLI: newc, gzip-wrapped, odc, a zero-length hard-link member, and a truncated archive (exit 4, no traceback) |
 | CPIO, hostile | `pytest tests/test_hostile_inputs.py` | **4 of the 19 scan cases** — a declared size past the end, a traversal name, a missing trailer, and the binary magic: each exit 4 with a named stage and no traceback |
 

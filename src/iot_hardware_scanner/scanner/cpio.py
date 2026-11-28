@@ -382,7 +382,7 @@ def decode_cpio(
             raise CpioError(
                 f"the archive holds more than {max_members:,} records, over the entry budget"
             )
-
+        if raw_namesize < 1:
             raise CpioError(f"a record at byte {cursor} declares an empty name field")
         if name_offset + raw_namesize > reader.size:
             raise CpioError(f"the name field of the record at byte {cursor} runs past the input")
@@ -412,15 +412,16 @@ def decode_cpio(
             archive.trailing_bytes = reader.size - data_offset
             if archive.trailing_bytes:
                 following = reader.read_at(data_offset, min(6, archive.trailing_bytes))
-                note = (
-                    "a second archive follows the first (a concatenated initramfs); "
-                    "only the first is decoded"
-                    if detect_cpio_format(following)
-                    else "block padding or trailing bytes after the trailer"
-                )
-                archive.incomplete = bool(detect_cpio_format(following))
+                another_archive = detect_cpio_format(following) is not None
+                archive.incomplete = another_archive
                 archive.diagnostics.append(
-                    f"{archive.trailing_bytes} byte(s) after {CPIO_TRAILER_NAME}: {note}"
+                    f"{archive.trailing_bytes} byte(s) after {CPIO_TRAILER_NAME}: "
+                    + (
+                        "a second archive follows the first (a concatenated initramfs); "
+                        "only the first is decoded"
+                        if another_archive
+                        else "block padding or trailing bytes after the trailer"
+                    )
                 )
             break
 

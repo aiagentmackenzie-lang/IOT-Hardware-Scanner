@@ -193,6 +193,14 @@ def test_a_data_range_past_the_end_names_the_member(tmp_path: Path) -> None:
         decoded(tmp_path, forged)
 
 
+def test_a_record_with_no_name_field_is_refused(tmp_path: Path) -> None:
+    """``namesize = 0`` is not a member with no name; it is a broken record."""
+    payload = build([Member(name="etc/passwd", data=b"x")])
+    forged = payload[:94] + b"00000000" + payload[102:]
+    with pytest.raises(CpioError, match="empty name field"):
+        decoded(tmp_path, forged)
+
+
 def test_a_truncated_name_field_is_refused(tmp_path: Path) -> None:
     payload = build([Member(name="a-rather-long-name", data=b"x")])
     # ``namesize`` is the twelfth field: bytes 94..102. Claim more than exists.
