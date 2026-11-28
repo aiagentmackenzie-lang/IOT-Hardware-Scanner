@@ -238,6 +238,7 @@ machine-independent invariants are still enforced
 
 | Artifact | Digest |
 | --- | --- |
+| Wheel (2.9.0, qualified) | `79ed8e05f70f4d7e32cbb68db880adb0db270effd817d90de8bcb154dc7819de` — `iot_hardware_scanner-2.9.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build (`6b8e892`, `uv build`), the `installed-wheel-no-backend` job and the `linux-extractor` job in run `45318170784`. **No report-schema change and no profile change** (schema 8, profile 6.0), so a 2.8 document reads unchanged; the partition nodes use fields the node model already carried |
 | Wheel (2.8.0, qualified) | `76e3c1b03cdbd872897e90be7e3be5c00d98fd4ffbd522de5dac1e172d8423f5` — `iot_hardware_scanner-2.8.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build, a fresh clone and the Linux CI build in run `45307659176`. **Report schema 8**, profile 6.0: a 2.7 document reads and gains `mcu: null`; no existing profile's required set changed |
 | Wheel (2.7.0, qualified) | `404cb097af9692583ac05507201891ba74c2e9ddc49da96c2239a2c88a3c4978` — `iot_hardware_scanner-2.7.0-py3-none-any.whl`; **byte-identical** from the macOS clean-checkout build and the Linux CI build in run `45301197717` (68 members, same order). A build from a dirty working tree gives a different digest, because the content differs — the claim is about the checked-out commit. **Report schema 7**, so 2.6–2.4 reports stay readable and gain `null` for the two facts they never recorded; no profile change |
 | Wheel (2.6.0, local) | `389a1555ecdfb9ec488865c19f276675964d7e27d6545cc992afa0358f54d931` — `iot_hardware_scanner-2.6.0-py3-none-any.whl`; two consecutive local builds are byte-identical. Linux CI byte-identity is recorded by the run that ships it. **No schema or profile change**, so 2.4/2.5 reports stay readable; cached text facts from 2.5 (`ihs-analysis-cache/1`, extractor version 1) are ignored and recomputed |
@@ -276,6 +277,21 @@ set and the same `unsquashfs`, and different ids, because the image
 configuration records a build timestamp. The report records the id it actually
 used; the Dockerfile digest, the package list and `unsquashfs version 4.5.1
 (2022/03/17)` are the reproducible facts.
+
+Release 2.9.0 adds **partitioned disk images** and changes no schema, profile or
+detector. Qualified in GitHub Actions **`45318170784`** on `main` (`6b8e892`),
+**9/9 job instances green**: `linux-extractor` **239 passed with zero skips** in
+284.80 s (2.8.0: 238, 2.5.1: 221) — the qualified job, which fails the build on
+any skip — `python-gate` **1064 passed / 30 skipped** and **87 %** on 3.10, 3.12
+and 3.14, `bounded-resources` 61 / 0 (2 GiB at 16 MiB windows in **106.48 s**,
+peak RSS **94,740 KiB**), `installed-wheel-no-backend`, `report-contract`, the
+reference image without a worker, and the recorded performance contract, with
+the CI wheel digest equal to the local build's. On this machine, with the pinned
+worker and **without** the reference corpus, the same tree runs **1078 passed /
+16 skipped at 86.5 %**; the sixteen are the reference-image and container-oracle
+rows, which only the qualified job runs. The local worker build for that run
+produced ids `ae64e345…` (runtime) and `0abefb6f…` (verification) — different
+again from the recorded ones, which is what “observed, not reproducible” means.
 
 Qualified run for 2.4: GitHub Actions **`44904681133`** on `main` (`49ce0cb`),
 **8/8 job instances green**, `linux-extractor` **200 passed with zero skips**

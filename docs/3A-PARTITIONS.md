@@ -119,6 +119,7 @@ unavailable); it never exits 0 as "clean".
 | Tests | `pytest` (local, macOS arm64, CPython 3.12.14, colima worker) | **1094 collected, 1078 passed, 0 failed, 16 skipped** — with the worker present the container rows run here; the reference-image rows still need the corpus |
 | Partitions, unit | `pytest tests/test_partitions.py` | 21 passed — MBR, EBR chain, GPT + both CRCs, bounds, truncation, map nodes, slicing |
 | Partitions, end to end | `pytest tests/test_installed_image_cli.py::TestPartitionedImage` | **1 passed** — two generated SquashFS roots in one GPT image, through the installed CLI |
+| CI | run **`45318170784`** on `main` (`6b8e892`) | **9/9 job instances green**; `linux-extractor` **239 passed, 0 skipped** (284.80 s), `python-gate` 1064 / 30 and 87 % on 3.10, 3.12 and 3.14, `bounded-resources` 61 / 0 (2 GiB in 106.48 s, peak RSS 94,740 KiB), wheel `79ed8e05…19de` byte-identical on macOS and both Linux builds |
 
 The end-to-end case builds its own disk image with the worker's `mksquashfs`, so
 it runs wherever the pinned image is present (the `linux-extractor` job) and skips
